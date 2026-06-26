@@ -16,7 +16,7 @@ The Worker is published as `https://data.mcmik.top/api`. It forwards a small all
 
 - No arbitrary proxying. Every public route is allowlisted in `src/index.ts`.
 - Only `GET` and `OPTIONS` are accepted.
-- TOTP secrets are Worker secrets and are only used server-side.
+- HMAC secrets are Worker secrets and are only used server-side.
 - CORS is restricted by `ALLOWED_ORIGINS`; use comma-separated origins.
 - Upstream responses must be successful JSON before being persisted.
 
@@ -31,8 +31,10 @@ Do not put upstream addresses or secrets in `wrangler.jsonc`. Store all runtime 
 | `MINECRAFT_SERVER_ADDRESS` | Yes | Minecraft status fallback host |
 | `MINECRAFT_SERVER_PORT` | Yes | Minecraft status fallback port |
 | `ALLOWED_ORIGINS` | Yes | Comma-separated CORS allowlist |
-| `TOTP_SECRET` | Yes | HMAC timestamp secret for the main upstream |
-| `BUILDINGS_TOTP_SECRET` | Yes | HMAC timestamp secret for the buildings upstream |
+| `MINECRAFT_HMAC_SECRET` | Yes | HMAC timestamp secret for the main upstream |
+| `BUILDINGS_HMAC_SECRET` | Yes | HMAC timestamp secret for the buildings upstream |
+
+The upstream auth token is sent in `X-TOTP-Token`. Its value is an HMAC-SHA256 hex digest of the current 30-second Unix time step.
 
 ```sh
 bunx wrangler secret put MINECRAFT_SERVER_URL
@@ -40,8 +42,8 @@ bunx wrangler secret put BUILDINGS_SERVER_URL
 bunx wrangler secret put MINECRAFT_SERVER_ADDRESS
 bunx wrangler secret put MINECRAFT_SERVER_PORT
 bunx wrangler secret put ALLOWED_ORIGINS
-bunx wrangler secret put TOTP_SECRET
-bunx wrangler secret put BUILDINGS_TOTP_SECRET
+bunx wrangler secret put MINECRAFT_HMAC_SECRET
+bunx wrangler secret put BUILDINGS_HMAC_SECRET
 ```
 
 For local development, copy `.dev.vars.example` to `.dev.vars` and fill values. `.dev.vars` is ignored by git.

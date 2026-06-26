@@ -4,8 +4,8 @@ interface Env {
   BUILDINGS_SERVER_URL: string;
   MINECRAFT_SERVER_ADDRESS: string;
   MINECRAFT_SERVER_PORT: string;
-  TOTP_SECRET: string;
-  BUILDINGS_TOTP_SECRET: string;
+  MINECRAFT_HMAC_SECRET: string;
+  BUILDINGS_HMAC_SECRET: string;
   ALLOWED_ORIGINS: string;
 }
 
@@ -31,6 +31,7 @@ interface CacheRecord {
 
 const PUBLIC_BASE_PATH = '/api';
 const CACHE_VERSION = 'v1';
+const HMAC_TIME_STEP_SECONDS = 30;
 
 const JSON_HEADERS = {
   'Content-Type': 'application/json; charset=utf-8',
@@ -167,11 +168,12 @@ async function refreshRoute(route: RouteConfig, env: Env): Promise<void> {
 
 async function fetchAndCache(route: RouteConfig, env: Env): Promise<CacheRecord> {
   const targetUrl = buildUpstreamUrl(route, env);
+  const authToken = await generateHmacTimestampToken(hmacSecretForRoute(route, env));
   const response = await fetch(targetUrl, {
     method: 'GET',
     headers: {
       Accept: 'application/json',
-      'X-TOTP-Token': await generateToken(secretForRoute(route, env)),
+      'X-TOTP-Token': authToken,
     },
     signal: AbortSignal.timeout(5000),
   });
@@ -320,18 +322,21 @@ function buildCacheKey(route: RouteConfig): string {
   return `${CACHE_VERSION}:${route.id}`;
 }
 
-function secretForRoute(route: RouteConfig, env: Env): string {
-  const secret = route.upstream === 'buildings' ? env.BUILDINGS_TOTP_SECRET : env.TOTP_SECRET;
+function hmacSecretForRoute(route: RouteConfig, env: Env): string {
+  const secret =
+    route.upstream === 'buildings'
+      ? env.BUILDINGS_HMAC_SECRET
+      : env.MINECRAFT_HMAC_SECRET;
 
   if (!secret) {
-    throw new Error(`Missing TOTP secret for ${route.id}`);
+    throw new Error(`Missing HMAC secret for ${route.id}`);
   }
 
   return secret;
 }
 
-async function generateToken(secret: string): Promise<string> {
-  const step = Math.floor(Date.now() / 1000 / 30).toString();
+async function generateHmacTimestampToken(secret: string): Promise<string> {
+  const step = Math.floor(Date.now() / 1000 / HMAC_TIME_STEP_SECONDS).toString();
   const key = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(secret),
