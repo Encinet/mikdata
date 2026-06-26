@@ -35,6 +35,7 @@ Do not put upstream addresses or secrets in `wrangler.jsonc`. Store all runtime 
 | `BUILDINGS_HMAC_SECRET` | Yes | HMAC timestamp secret for the buildings upstream |
 
 The upstream auth token is sent in `X-HMAC-Token`. Its value is an HMAC-SHA256 hex digest of the current 30-second Unix time step.
+Minecraft upstream requests use the `VPC_SERVICE` binding configured in `wrangler.jsonc`; `MINECRAFT_SERVER_URL` should be reachable through that VPC service.
 
 ```sh
 bunx wrangler secret put MINECRAFT_SERVER_URL

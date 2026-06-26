@@ -18,5 +18,12 @@
 			"id": "e029ccf019db4fd99ea553235f08ee83",
 			"remote": true
 		}
+	],
+	"vpc_services": [
+		{
+			"binding": "VPC_SERVICE",
+			"service_id": "019f0423-6121-7610-a9b7-4253dd29cfe2",
+			"remote": true
+		}
 	]
 }

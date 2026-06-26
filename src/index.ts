@@ -1,5 +1,6 @@
 interface Env {
   MIKDATA_CACHE: KVNamespace;
+  VPC_SERVICE: Fetcher;
   MINECRAFT_SERVER_URL: string;
   BUILDINGS_SERVER_URL: string;
   MINECRAFT_SERVER_ADDRESS: string;
@@ -169,14 +170,7 @@ async function refreshRoute(route: RouteConfig, env: Env): Promise<void> {
 async function fetchAndCache(route: RouteConfig, env: Env): Promise<CacheRecord> {
   const targetUrl = buildUpstreamUrl(route, env);
   const authToken = await generateHmacTimestampToken(hmacSecretForRoute(route, env));
-  const response = await fetch(targetUrl, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-      'X-HMAC-Token': authToken,
-    },
-    signal: AbortSignal.timeout(5000),
-  });
+  const response = await fetchUpstream(route, targetUrl, authToken, env);
 
   if (!response.ok) {
     throw upstreamStatusError(route, targetUrl, response);
@@ -202,6 +196,28 @@ async function fetchAndCache(route: RouteConfig, env: Env): Promise<CacheRecord>
   });
 
   return record;
+}
+
+function fetchUpstream(
+  route: RouteConfig,
+  targetUrl: URL,
+  authToken: string,
+  env: Env,
+): Promise<Response> {
+  const init: RequestInit = {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      'X-HMAC-Token': authToken,
+    },
+    signal: AbortSignal.timeout(5000),
+  };
+
+  if (route.upstream === 'minecraft') {
+    return env.VPC_SERVICE.fetch(targetUrl, init);
+  }
+
+  return fetch(targetUrl, init);
 }
 
 async function fetchPlayerCountFallback(env: Env): Promise<unknown> {
