@@ -53,10 +53,9 @@ Create KV namespaces:
 
 ```sh
 bunx wrangler kv namespace create MIKDATA_CACHE
-bunx wrangler kv namespace create MIKDATA_CACHE --preview
 ```
 
-Put the generated `id` and `preview_id` into `wrangler.jsonc`.
+Put the generated `id` into `wrangler.jsonc`.
 
 For local development, copy `.dev.vars.example` to `.dev.vars` and fill values.
 

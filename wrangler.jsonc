@@ -13,8 +13,7 @@
   "kv_namespaces": [
     {
       "binding": "MIKDATA_CACHE",
-      "id": "replace-with-production-kv-namespace-id",
-      "preview_id": "replace-with-preview-kv-namespace-id"
+      "id": "replace-with-kv-namespace-id"
     }
   ],
   "vars": {
