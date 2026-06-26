@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mikdata",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-26",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "MIKDATA_CACHE",
+      "id": "replace-with-production-kv-namespace-id",
+      "preview_id": "replace-with-preview-kv-namespace-id"
+    }
+  ],
+  "vars": {
+    "MINECRAFT_SERVER_URL": "https://example.invalid",
+    "BUILDINGS_SERVER_URL": "",
+    "MINECRAFT_SERVER_ADDRESS": "mcmik.top",
+    "MINECRAFT_SERVER_PORT": "25565",
+    "ALLOWED_ORIGINS": "https://mcmik.top,http://localhost:3000"
+  }
+}

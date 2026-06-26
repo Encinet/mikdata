@@ -1,0 +1,276 @@
+openapi: 3.1.0
+info:
+  title: MikData API
+  description: |
+    Minecraft 服务器 Web 面板数据 API，提供玩家在线状态、建筑列表、封禁列表和公告等数据。
+
+    所有 `/api/*` 路由均启用 CORS，允许来源由 Worker 的 `ALLOWED_ORIGINS` 配置控制。
+  version: 1.0.0
+
+servers:
+  - url: https://data.mcmik.top/api
+    description: 公共实例
+  - url: /api
+    description: 相对路径（本地开发）
+
+security: []
+
+paths:
+  /players:
+    get:
+      summary: 获取在线玩家
+      description: 返回当前在线玩家列表及人数。当上游服务不可用时可能降级到第三方查询服务（仅返回人数）。
+      operationId: getPlayers
+      responses:
+        "200":
+          description: 成功
+          headers:
+            X-Proxy-Cache:
+              $ref: "#/components/headers/X-Proxy-Cache"
+            X-Proxy-Source:
+              $ref: "#/components/headers/X-Proxy-Source"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerOnlinePayload"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /buildings:
+    get:
+      summary: 获取建筑列表
+      description: 返回服务器中所有已登记建筑的详细信息，包含坐标、建造者、标签等。
+      operationId: getBuildings
+      responses:
+        "200":
+          description: 成功
+          headers:
+            X-Proxy-Cache:
+              $ref: "#/components/headers/X-Proxy-Cache"
+            X-Proxy-Source:
+              $ref: "#/components/headers/X-Proxy-Source"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Building"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /bans:
+    get:
+      summary: 获取封禁列表
+      description: 返回当前所有被封禁玩家的记录。
+      operationId: getBans
+      responses:
+        "200":
+          description: 成功
+          headers:
+            X-Proxy-Cache:
+              $ref: "#/components/headers/X-Proxy-Cache"
+            X-Proxy-Source:
+              $ref: "#/components/headers/X-Proxy-Source"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BanItem"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /announcements:
+    get:
+      summary: 获取公告列表
+      description: 返回服务器公告。
+      operationId: getAnnouncements
+      responses:
+        "200":
+          description: 成功
+          headers:
+            X-Proxy-Cache:
+              $ref: "#/components/headers/X-Proxy-Cache"
+            X-Proxy-Source:
+              $ref: "#/components/headers/X-Proxy-Source"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AnnouncementItem"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+components:
+  headers:
+    X-Proxy-Cache:
+      description: 代理缓存状态
+      schema:
+        type: string
+        enum: [MISS, HIT, STALE]
+    X-Proxy-Source:
+      description: 数据来源
+      schema:
+        type: string
+        enum: [UPSTREAM, FALLBACK]
+  responses:
+    UpstreamError:
+      description: 上游服务不可用
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: string
+
+  schemas:
+    PlayerOnlinePayload:
+      type: object
+      required: [online, players]
+      properties:
+        online:
+          type: integer
+          description: 当前在线人数。-1 表示服务器离线（降级查询失败）。
+        players:
+          type: array
+          items:
+            $ref: "#/components/schemas/OnlinePlayer"
+
+    OnlinePlayer:
+      type: object
+      required: [name, uuid, joined_at]
+      properties:
+        name:
+          type: string
+        uuid:
+          type: string
+          format: uuid
+        joined_at:
+          type: string
+          format: date-time
+          description: 本次登录时间
+
+    Building:
+      type: object
+      required:
+        - name
+        - description
+        - coordinates
+        - builders
+        - buildType
+        - images
+        - buildDate
+      properties:
+        name:
+          $ref: "#/components/schemas/LocalizedText"
+        description:
+          $ref: "#/components/schemas/LocalizedText"
+        coordinates:
+          $ref: "#/components/schemas/Coordinates"
+        builders:
+          type: array
+          items:
+            $ref: "#/components/schemas/Builder"
+        buildType:
+          type: string
+          enum: [original, derivative, replica]
+        images:
+          type: array
+          items:
+            type: string
+        buildDate:
+          type: string
+          description: 建造日期
+        tags:
+          type: array
+          items:
+            $ref: "#/components/schemas/LocalizedText"
+        source:
+          $ref: "#/components/schemas/BuildingSource"
+
+    LocalizedText:
+      type: object
+      additionalProperties:
+        type: string
+      description: "键为 locale（如 zh-CN、en），值为对应语言的文本"
+      example:
+        zh-CN: 示例文本
+        en: Example text
+
+    Coordinates:
+      type: object
+      required: [x, y, z]
+      properties:
+        x:
+          type: number
+        y:
+          type: number
+        z:
+          type: number
+      description: Minecraft 世界坐标
+
+    Builder:
+      type: object
+      required: [name, uuid, weight]
+      properties:
+        name:
+          type: string
+        uuid:
+          type: string
+          format: uuid
+        weight:
+          type: number
+          description: 贡献权重，用于计算贡献百分比
+
+    BuildingSource:
+      type: ["object", "null"]
+      properties:
+        originalAuthor:
+          type: string
+        originalLink:
+          type: string
+          format: uri
+        notes:
+          $ref: "#/components/schemas/LocalizedText"
+
+    BanItem:
+      type: object
+      required:
+        - playerName
+        - playerUuid
+        - reason
+        - bannedBy
+        - bannedAt
+        - expiresAt
+        - isPermanent
+      properties:
+        playerName:
+          type: string
+        playerUuid:
+          type: string
+          format: uuid
+        reason:
+          type: string
+        bannedBy:
+          type: string
+        bannedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: ["string", "null"]
+          format: date-time
+        isPermanent:
+          type: boolean
+
+    AnnouncementItem:
+      type: object
+      required: [content, timestamp]
+      properties:
+        content:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
