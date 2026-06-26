@@ -1,19 +1,22 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "mikdata",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-06-26",
-  "workers_dev": true,
-  "observability": {
-    "enabled": true
-  },
-  "triggers": {
-    "crons": ["*/5 * * * *"]
-  },
-  "kv_namespaces": [
-    {
-      "binding": "MIKDATA_CACHE",
-      "id": "replace-with-kv-namespace-id"
-    }
-  ]
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "mikdata",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-06-26",
+	"workers_dev": true,
+	"observability": {
+		"enabled": true
+	},
+	"triggers": {
+		"crons": [
+			"*/5 * * * *"
+		]
+	},
+	"kv_namespaces": [
+		{
+			"binding": "MIKDATA_CACHE",
+			"id": "e029ccf019db4fd99ea553235f08ee83",
+			"remote": true
+		}
+	]
 }
