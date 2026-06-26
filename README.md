@@ -34,7 +34,7 @@ Do not put upstream addresses or secrets in `wrangler.jsonc`. Store all runtime 
 | `MINECRAFT_HMAC_SECRET` | Yes | HMAC timestamp secret for the main upstream |
 | `BUILDINGS_HMAC_SECRET` | Yes | HMAC timestamp secret for the buildings upstream |
 
-The upstream auth token is sent in `X-TOTP-Token`. Its value is an HMAC-SHA256 hex digest of the current 30-second Unix time step.
+The upstream auth token is sent in `X-HMAC-Token`. Its value is an HMAC-SHA256 hex digest of the current 30-second Unix time step.
 
 ```sh
 bunx wrangler secret put MINECRAFT_SERVER_URL
