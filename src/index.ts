@@ -1,12 +1,12 @@
 interface Env {
   MIKDATA_CACHE: KVNamespace;
   MINECRAFT_SERVER_URL: string;
-  BUILDINGS_SERVER_URL?: string;
-  MINECRAFT_SERVER_ADDRESS?: string;
-  MINECRAFT_SERVER_PORT?: string;
-  TOTP_SECRET?: string;
-  BUILDINGS_TOTP_SECRET?: string;
-  ALLOWED_ORIGINS?: string;
+  BUILDINGS_SERVER_URL: string;
+  MINECRAFT_SERVER_ADDRESS: string;
+  MINECRAFT_SERVER_PORT: string;
+  TOTP_SECRET: string;
+  BUILDINGS_TOTP_SECRET: string;
+  ALLOWED_ORIGINS: string;
 }
 
 type CacheStatus = 'MISS' | 'HIT' | 'STALE';
@@ -209,7 +209,7 @@ async function fetchPlayerCountFallback(env: Env): Promise<unknown> {
     throw new Error('MINECRAFT_SERVER_ADDRESS is not configured');
   }
 
-  const port = env.MINECRAFT_SERVER_PORT || '25565';
+  const port = env.MINECRAFT_SERVER_PORT;
   const address = port === '25565' ? host : `${host}:${port}`;
   const response = await fetch(`https://api.mcstatus.io/v2/status/java/${encodeURIComponent(address)}`, {
     signal: AbortSignal.timeout(5000),
@@ -286,12 +286,7 @@ function jsonResponse(
 function corsHeaders(request: Request, env: Env): Record<string, string> {
   const requestOrigin = request.headers.get('Origin');
   const allowedOrigins = parseAllowedOrigins(env.ALLOWED_ORIGINS);
-  const origin =
-    requestOrigin && allowedOrigins.has(requestOrigin)
-      ? requestOrigin
-      : allowedOrigins.size === 0
-        ? '*'
-        : '';
+  const origin = requestOrigin && allowedOrigins.has(requestOrigin) ? requestOrigin : '';
 
   return {
     ...(origin ? { 'Access-Control-Allow-Origin': origin } : {}),
@@ -317,9 +312,7 @@ function matchRoute(pathname: string): RouteConfig | null {
 
 function buildUpstreamUrl(route: RouteConfig, env: Env): URL {
   const baseUrl =
-    route.upstream === 'buildings' && env.BUILDINGS_SERVER_URL
-      ? env.BUILDINGS_SERVER_URL
-      : env.MINECRAFT_SERVER_URL;
+    route.upstream === 'buildings' ? env.BUILDINGS_SERVER_URL : env.MINECRAFT_SERVER_URL;
   return new URL(route.upstreamPath, baseUrl);
 }
 
@@ -328,10 +321,7 @@ function buildCacheKey(route: RouteConfig): string {
 }
 
 function secretForRoute(route: RouteConfig, env: Env): string {
-  const secret =
-    route.upstream === 'buildings'
-      ? env.BUILDINGS_TOTP_SECRET || env.TOTP_SECRET
-      : env.TOTP_SECRET;
+  const secret = route.upstream === 'buildings' ? env.BUILDINGS_TOTP_SECRET : env.TOTP_SECRET;
 
   if (!secret) {
     throw new Error(`Missing TOTP secret for ${route.id}`);

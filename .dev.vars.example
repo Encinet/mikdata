@@ -1,18 +1,18 @@
 # Required: main upstream data service.
-MINECRAFT_SERVER_URL=http://localhost:8080
+MINECRAFT_SERVER_URL=http://your-upstream.example
 
-# Optional: separate buildings upstream. Leave empty to use MINECRAFT_SERVER_URL.
-BUILDINGS_SERVER_URL=
+# Required: buildings upstream data service.
+BUILDINGS_SERVER_URL=http://your-buildings-upstream.example
 
-# Optional: Minecraft status fallback used when /api/players upstream is unavailable.
-MINECRAFT_SERVER_ADDRESS=mcmik.top
+# Required: Minecraft status fallback used when /api/players upstream is unavailable.
+MINECRAFT_SERVER_ADDRESS=play.example.com
 MINECRAFT_SERVER_PORT=25565
 
-# Optional: comma-separated browser origins allowed to read this Worker.
-ALLOWED_ORIGINS=http://localhost:3000,https://mcmik.top
+# Required: comma-separated browser origins allowed to read this Worker.
+ALLOWED_ORIGINS=http://localhost:3000,https://your-site.example
 
 # Required: HMAC timestamp secret for MINECRAFT_SERVER_URL.
 TOTP_SECRET=
 
-# Optional: separate buildings HMAC secret. Leave empty to use TOTP_SECRET.
+# Required: HMAC timestamp secret for BUILDINGS_SERVER_URL.
 BUILDINGS_TOTP_SECRET=

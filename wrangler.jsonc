@@ -15,12 +15,5 @@
       "binding": "MIKDATA_CACHE",
       "id": "replace-with-kv-namespace-id"
     }
-  ],
-  "vars": {
-    "MINECRAFT_SERVER_URL": "https://example.invalid",
-    "BUILDINGS_SERVER_URL": "",
-    "MINECRAFT_SERVER_ADDRESS": "mcmik.top",
-    "MINECRAFT_SERVER_PORT": "25565",
-    "ALLOWED_ORIGINS": "https://mcmik.top,http://localhost:3000"
-  }
+  ]
 }

@@ -20,26 +20,31 @@ The Worker is published as `https://data.mcmik.top/api`. It forwards a small all
 - CORS is restricted by `ALLOWED_ORIGINS`; use comma-separated origins.
 - Upstream responses must be successful JSON before being persisted.
 
-## Configuration
+## Runtime Configuration
 
-Public Worker variables in `wrangler.jsonc`:
+Do not put upstream addresses or secrets in `wrangler.jsonc`. Store all runtime configuration as Cloudflare secrets:
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `MINECRAFT_SERVER_URL` | Yes | Main upstream data service base URL |
-| `BUILDINGS_SERVER_URL` | No | Optional buildings upstream; falls back to `MINECRAFT_SERVER_URL` |
-| `MINECRAFT_SERVER_ADDRESS` | No | Minecraft status fallback host |
-| `MINECRAFT_SERVER_PORT` | No | Minecraft status fallback port, defaults to `25565` |
-| `ALLOWED_ORIGINS` | No | Comma-separated CORS allowlist |
-
-Secrets:
+| `BUILDINGS_SERVER_URL` | Yes | Buildings upstream data service base URL |
+| `MINECRAFT_SERVER_ADDRESS` | Yes | Minecraft status fallback host |
+| `MINECRAFT_SERVER_PORT` | Yes | Minecraft status fallback port |
+| `ALLOWED_ORIGINS` | Yes | Comma-separated CORS allowlist |
+| `TOTP_SECRET` | Yes | HMAC timestamp secret for the main upstream |
+| `BUILDINGS_TOTP_SECRET` | Yes | HMAC timestamp secret for the buildings upstream |
 
 ```sh
+bunx wrangler secret put MINECRAFT_SERVER_URL
+bunx wrangler secret put BUILDINGS_SERVER_URL
+bunx wrangler secret put MINECRAFT_SERVER_ADDRESS
+bunx wrangler secret put MINECRAFT_SERVER_PORT
+bunx wrangler secret put ALLOWED_ORIGINS
 bunx wrangler secret put TOTP_SECRET
 bunx wrangler secret put BUILDINGS_TOTP_SECRET
 ```
 
-`TOTP_SECRET` is required for the main upstream. `BUILDINGS_TOTP_SECRET` only needs to be set when the buildings service uses a different secret.
+For local development, copy `.dev.vars.example` to `.dev.vars` and fill values. `.dev.vars` is ignored by git.
 
 ## Setup
 
@@ -56,8 +61,6 @@ bunx wrangler kv namespace create MIKDATA_CACHE
 ```
 
 Put the generated `id` into `wrangler.jsonc`.
-
-For local development, copy `.dev.vars.example` to `.dev.vars` and fill values.
 
 Run locally:
 
