@@ -179,7 +179,7 @@ async function fetchAndCache(route: RouteConfig, env: Env): Promise<CacheRecord>
   });
 
   if (!response.ok) {
-    throw new Error(`Upstream status ${response.status}`);
+    throw await upstreamStatusError(route, targetUrl, response);
   }
 
   const contentType = response.headers.get('Content-Type') ?? '';
@@ -232,6 +232,28 @@ async function fetchPlayerCountFallback(env: Env): Promise<unknown> {
     players: [],
     online: data.online ? (data.players?.online ?? 0) : -1,
   };
+}
+
+async function upstreamStatusError(
+  route: RouteConfig,
+  targetUrl: URL,
+  response: Response,
+): Promise<Error> {
+  const body = await response.clone().text().catch(() => '');
+  const bodyPreview = body.slice(0, 200).replace(/\s+/g, ' ').trim();
+  const details = {
+    route: route.id,
+    upstream: route.upstream,
+    target: `${targetUrl.origin}${targetUrl.pathname}`,
+    status: response.status,
+    contentType: response.headers.get('Content-Type') ?? '',
+    server: response.headers.get('Server') ?? '',
+    cfRay: response.headers.get('CF-Ray') ?? '',
+    bodyPreview,
+  };
+
+  console.error('Upstream returned non-OK response', details);
+  return new Error(`Upstream status ${response.status}`);
 }
 
 async function readCache(env: Env, cacheKey: string): Promise<CacheRecord | null> {
