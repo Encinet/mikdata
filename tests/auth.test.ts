@@ -45,6 +45,56 @@ test('passkey registration options require an authenticated session', async () =
   expect(response.body).toEqual({ error: 'unauthenticated' });
 });
 
+test('minecraft challenge creation is rate limited per client key', async () => {
+  const store = createAuthStore();
+
+  for (let index = 0; index < 8; index += 1) {
+    const response = await callStore(store, {
+      action: 'createMinecraftChallenge',
+      clientKey: 'ip:203.0.113.10',
+    });
+    expect(response.status).toBe(200);
+  }
+
+  const limited = await callStore(store, {
+    action: 'createMinecraftChallenge',
+    clientKey: 'ip:203.0.113.10',
+  });
+
+  expect(limited.status).toBe(429);
+  expect(limited.body.error).toBe('rate_limited');
+});
+
+test('minecraft challenge status polling is rate limited per client key', async () => {
+  const store = createAuthStore({
+    VPC_SERVICE: {
+      fetch: () => Promise.resolve(Response.json({ status: 'pending' })),
+    } as Fetcher,
+  });
+  const created = await callStore(store, {
+    action: 'createMinecraftChallenge',
+    clientKey: 'ip:203.0.113.11',
+  });
+
+  for (let index = 0; index < 120; index += 1) {
+    const response = await callStore(store, {
+      action: 'getMinecraftChallenge',
+      challengeId: created.body.challengeId,
+      clientKey: 'ip:203.0.113.11',
+    });
+    expect(response.status).toBe(200);
+  }
+
+  const limited = await callStore(store, {
+    action: 'getMinecraftChallenge',
+    challengeId: created.body.challengeId,
+    clientKey: 'ip:203.0.113.11',
+  });
+
+  expect(limited.status).toBe(429);
+  expect(limited.body.error).toBe('rate_limited');
+});
+
 test('auth preflight does not return wildcard cors headers', async () => {
   const response = await worker.fetch(
     new Request('https://data.mcmik.top/auth/me', { method: 'OPTIONS' }),

@@ -59,6 +59,7 @@ Do not put upstream addresses or secrets in `wrangler.jsonc`. Store all runtime 
 | `MINECRAFT_SERVER_PORT` | Yes | Minecraft status fallback port |
 | `CLOUDFLARE_ACCESS_ISSUER` | Yes | Access issuer, for example `https://your-team.cloudflareaccess.com` |
 | `CLOUDFLARE_ACCESS_AUD` | Yes | Access application AUD tag for `/admin*` |
+| `MIKWEB_AUTH_CLIENT_SECRET` | Yes | Shared server-side secret for MikWeb `/api/auth/*` and `/api/account/*` BFF requests |
 
 Minecraft upstream requests use the `VPC_SERVICE` binding configured in `wrangler.jsonc`; `MINECRAFT_SERVER_URL` should be reachable through that VPC service.
 Buildings require the `BUILDINGS_KV` binding and `BUILDINGS_WRITER` Durable Object binding.
@@ -69,6 +70,7 @@ bunx wrangler secret put MINECRAFT_SERVER_ADDRESS
 bunx wrangler secret put MINECRAFT_SERVER_PORT
 bunx wrangler secret put CLOUDFLARE_ACCESS_ISSUER
 bunx wrangler secret put CLOUDFLARE_ACCESS_AUD
+bunx wrangler secret put MIKWEB_AUTH_CLIENT_SECRET
 ```
 
 For local development, copy `.dev.vars.example` to `.dev.vars` and fill values. `.dev.vars` is ignored by git.

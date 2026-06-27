@@ -8,3 +8,6 @@ MINECRAFT_SERVER_PORT=25565
 # Required: Cloudflare Access application settings for /admin*.
 CLOUDFLARE_ACCESS_ISSUER=https://your-team.cloudflareaccess.com
 CLOUDFLARE_ACCESS_AUD=your-access-application-aud
+
+# Required: shared server-side secret accepted from MikWeb auth BFF requests.
+MIKWEB_AUTH_CLIENT_SECRET=replace-with-the-same-server-secret-as-mikweb

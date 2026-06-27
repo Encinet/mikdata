@@ -140,9 +140,10 @@ export async function handleAuthRoute(
   }
 
   const store = authStore(env);
+  const clientKey = clientRateLimitKey(request);
 
   if (routePath === '/auth/challenges' && request.method === 'POST') {
-    const response = await callStore(store, { action: 'createMinecraftChallenge' });
+    const response = await callStore(store, { action: 'createMinecraftChallenge', clientKey });
     return authJson(stripInternalAuthFields(response.body), response.status, setLoginCookie(response.body));
   }
 
@@ -151,6 +152,7 @@ export async function handleAuthRoute(
     const response = await callStore(store, {
       action: 'getMinecraftChallenge',
       challengeId: challengeStatus[1],
+      clientKey,
     });
     return authJson(response.body, response.status);
   }
@@ -162,6 +164,7 @@ export async function handleAuthRoute(
       action: 'completeMinecraftChallenge',
       challengeId: challengeComplete[1],
       browserNonce: payload.browserNonce,
+      clientKey,
     });
     return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
   }
@@ -199,7 +202,7 @@ export async function handleAuthRoute(
   }
 
   if (routePath === '/auth/passkeys/options/login' && request.method === 'POST') {
-    const response = await callStore(store, { action: 'passkeyAuthenticationOptions' });
+    const response = await callStore(store, { action: 'passkeyAuthenticationOptions', clientKey });
     return authJson(response.body, response.status);
   }
 
@@ -208,6 +211,7 @@ export async function handleAuthRoute(
     const response = await callStore(store, {
       action: 'passkeyLogin',
       credential: payload.credential,
+      clientKey,
     });
     return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
   }
@@ -265,11 +269,15 @@ export class AuthStore implements DurableObject {
   private async dispatch(body: StoreRequest): Promise<{ status: number; body: unknown }> {
     switch (body.action) {
       case 'createMinecraftChallenge':
-        return this.createMinecraftChallenge();
+        return this.createMinecraftChallenge(asString(body.clientKey));
       case 'getMinecraftChallenge':
-        return this.getMinecraftChallenge(asString(body.challengeId));
+        return this.getMinecraftChallenge(asString(body.challengeId), asString(body.clientKey));
       case 'completeMinecraftChallenge':
-        return this.completeMinecraftChallenge(asString(body.challengeId), asString(body.browserNonce));
+        return this.completeMinecraftChallenge(
+          asString(body.challengeId),
+          asString(body.browserNonce),
+          asString(body.clientKey),
+        );
       case 'me':
         return this.me(asString(body.sessionId));
       case 'logout':
@@ -279,9 +287,9 @@ export class AuthStore implements DurableObject {
       case 'passkeyRegister':
         return this.passkeyRegister(asString(body.sessionId), body.credential, optionalString(body.displayName));
       case 'passkeyAuthenticationOptions':
-        return this.passkeyAuthenticationOptions();
+        return this.passkeyAuthenticationOptions(asString(body.clientKey));
       case 'passkeyLogin':
-        return this.passkeyLogin(body.credential);
+        return this.passkeyLogin(body.credential, asString(body.clientKey));
       case 'passkeyDelete':
         return this.passkeyDelete(asString(body.sessionId), asString(body.credentialId));
       case 'accountSummary':
@@ -293,13 +301,13 @@ export class AuthStore implements DurableObject {
     }
   }
 
-  private async createMinecraftChallenge(): Promise<{ status: number; body: unknown }> {
-    const rateLimited = this.consumeRateLimit('minecraft-challenge:create', 60, 60);
+  private async createMinecraftChallenge(clientKey: string): Promise<{ status: number; body: unknown }> {
+    const rateLimited = this.consumeRateLimit(rateLimitKey('minecraft-challenge:create', clientKey), 8, 60);
     if (rateLimited) return rateLimited;
     await this.cleanupExpiredChallenges();
 
     const challengeId = randomToken(18);
-    const displayCode = createDisplayCode();
+    const displayCode = await this.createUniqueDisplayCode();
     const browserNonce = randomToken(24);
     const now = new Date();
     const record: ChallengeRecord = {
@@ -326,7 +334,25 @@ export class AuthStore implements DurableObject {
     };
   }
 
-  private async getMinecraftChallenge(challengeId: string): Promise<{ status: number; body: unknown }> {
+  private async createUniqueDisplayCode(): Promise<string> {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const displayCode = createDisplayCode();
+      const existingChallengeId = await this.storage.get<string>(codeKey(displayCode));
+      if (!existingChallengeId) {
+        return displayCode;
+      }
+    }
+
+    throw new Error('Unable to allocate unique web login code');
+  }
+
+  private async getMinecraftChallenge(
+    challengeId: string,
+    clientKey: string,
+  ): Promise<{ status: number; body: unknown }> {
+    const rateLimited = this.consumeRateLimit(rateLimitKey('minecraft-challenge:status', clientKey), 120, 60);
+    if (rateLimited) return rateLimited;
+
     const record = await this.readMinecraftChallenge(challengeId);
     if (!record) return { status: 404, body: { status: 'not_found' } };
     if (isExpired(record.expiresAt)) {
@@ -353,7 +379,11 @@ export class AuthStore implements DurableObject {
   private async completeMinecraftChallenge(
     challengeId: string,
     browserNonce: string,
+    clientKey: string,
   ): Promise<{ status: number; body: unknown }> {
+    const rateLimited = this.consumeRateLimit(rateLimitKey('minecraft-challenge:complete', clientKey), 20, 60);
+    if (rateLimited) return rateLimited;
+
     const record = await this.readMinecraftChallenge(challengeId);
     if (!record) return { status: 404, body: { error: 'not_found' } };
     if (isExpired(record.expiresAt)) {
@@ -420,7 +450,7 @@ export class AuthStore implements DurableObject {
       })),
       authenticatorSelection: {
         residentKey: 'preferred',
-        userVerification: 'preferred',
+        userVerification: 'required',
       },
     });
 
@@ -453,6 +483,7 @@ export class AuthStore implements DurableObject {
       expectedChallenge: challenge.challenge,
       expectedOrigin: EXPECTED_ORIGIN,
       expectedRPID: RP_ID,
+      requireUserVerification: true,
     });
 
     if (!verification.verified || !verification.registrationInfo) {
@@ -481,14 +512,14 @@ export class AuthStore implements DurableObject {
     };
   }
 
-  private async passkeyAuthenticationOptions(): Promise<{ status: number; body: unknown }> {
-    const rateLimited = this.consumeRateLimit('passkey-authentication:create', 120, 60);
+  private async passkeyAuthenticationOptions(clientKey: string): Promise<{ status: number; body: unknown }> {
+    const rateLimited = this.consumeRateLimit(rateLimitKey('passkey-authentication:create', clientKey), 20, 60);
     if (rateLimited) return rateLimited;
     await this.cleanupExpiredChallenges();
 
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
-      userVerification: 'preferred',
+      userVerification: 'required',
     });
 
     await this.storage.put(webauthnChallengeKey(options.challenge), {
@@ -502,7 +533,13 @@ export class AuthStore implements DurableObject {
     return { status: 200, body: { options } };
   }
 
-  private async passkeyLogin(credential: unknown): Promise<{ status: number; body: unknown }> {
+  private async passkeyLogin(
+    credential: unknown,
+    clientKey: string,
+  ): Promise<{ status: number; body: unknown }> {
+    const rateLimited = this.consumeRateLimit(rateLimitKey('passkey-authentication:login', clientKey), 20, 60);
+    if (rateLimited) return rateLimited;
+
     const response = credential as AuthenticationResponseJSON;
     const passkey = await this.storage.get<PasskeyRecord>(passkeyKey(response.id));
     if (!passkey) return { status: 404, body: { error: 'passkey_not_found' } };
@@ -513,6 +550,7 @@ export class AuthStore implements DurableObject {
       expectedChallenge: challenge.challenge,
       expectedOrigin: EXPECTED_ORIGIN,
       expectedRPID: RP_ID,
+      requireUserVerification: true,
       credential: {
         id: passkey.credentialId,
         publicKey: base64urlToBuffer(passkey.publicKey),
@@ -712,6 +750,14 @@ export class AuthStore implements DurableObject {
     windowSeconds: number,
   ): { status: number; body: Record<string, unknown> } | null {
     const now = Date.now();
+    if (this.rateLimits.size > 2048) {
+      for (const [entryKey, record] of this.rateLimits.entries()) {
+        if (record.resetAt <= now) {
+          this.rateLimits.delete(entryKey);
+        }
+      }
+    }
+
     const existing = this.rateLimits.get(key);
 
     if (!existing || existing.resetAt <= now) {
@@ -766,6 +812,18 @@ function isMikwebClientRequest(request: Request, env: Env): boolean {
   const expected = env.MIKWEB_AUTH_CLIENT_SECRET?.trim();
   if (!expected) return false;
   return request.headers.get('X-Mikweb-Auth') === expected;
+}
+
+function clientRateLimitKey(request: Request): string {
+  return sanitizeRateLimitPart(request.headers.get('X-Mik-Client-Key') ?? 'unknown');
+}
+
+function rateLimitKey(action: string, clientKey: string): string {
+  return `${action}:${sanitizeRateLimitPart(clientKey)}`;
+}
+
+function sanitizeRateLimitPart(value: string): string {
+  return value.trim().slice(0, 128).replace(/[^a-zA-Z0-9:._-]/g, '_') || 'unknown';
 }
 
 function setLoginCookie(body: Record<string, unknown>): HeadersInit {
