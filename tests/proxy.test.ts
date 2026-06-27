@@ -45,6 +45,7 @@ function createEnvWithUnavailableKv(): Env {
   return {
     BUILDINGS_KV: unavailableKv,
     BUILDINGS_WRITER: {} as DurableObjectNamespace,
+    AUTH_STORE: {} as DurableObjectNamespace,
     VPC_SERVICE: {
       fetch: (input: RequestInfo | URL) => {
         const url = new URL(input.toString());

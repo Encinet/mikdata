@@ -96,6 +96,7 @@ function createEnvWithSummary(buildings: Building[]): Env {
       idFromName: () => ({}) as DurableObjectId,
       get: () => writer,
     } as unknown as DurableObjectNamespace,
+    AUTH_STORE: {} as DurableObjectNamespace,
     VPC_SERVICE: {} as Fetcher,
     MINECRAFT_SERVER_URL: 'https://upstream.example',
     MINECRAFT_SERVER_ADDRESS: 'mc.example',

@@ -16,6 +16,7 @@
     "wrangler": "^4.25.0"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^13.3.2",
     "jose": "^6.2.3"
   }
 }

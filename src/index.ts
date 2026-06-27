@@ -1,6 +1,7 @@
 import type { Env } from './env';
 import { requireCloudflareAccess } from './access';
 import { adminPage } from './admin';
+import { AuthStore, handleAuthRoute } from './auth';
 import {
   BuildingsWriter,
   handleAdminBuildingsRoute,
@@ -10,10 +11,10 @@ import { corsHeaders } from './http';
 import { json, proxyJson } from './http';
 import { matchProxyRoute, refreshProxyRoutes, serveProxyRoute } from './proxy';
 
-const PUBLIC_BASE_PATH = '/api';
 const ADMIN_API_BASE_PATH = '/admin/api';
+const PUBLIC_BASE_PATH = '/api';
 
-export { BuildingsWriter };
+export { AuthStore, BuildingsWriter };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -29,7 +30,7 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
   const url = new URL(request.url);
 
   if (request.method === 'OPTIONS') {
-    if (url.pathname.startsWith('/admin')) {
+    if (url.pathname.startsWith('/admin') || isAuthPath(url.pathname)) {
       return new Response(null, { status: 204 });
     }
 
@@ -38,6 +39,10 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
 
   if (url.pathname === '/health') {
     return proxyJson({ ok: true }, 200, request, env, 'HIT', 'FALLBACK');
+  }
+
+  if (isAuthPath(url.pathname)) {
+    return withoutCors((await handleAuthRoute(url.pathname, request, env)) ?? json({ error: 'Not found' }, 404, request, env));
   }
 
   if (url.pathname === '/admin' || url.pathname === '/admin/') {
@@ -99,6 +104,10 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
   }
 
   return serveProxyRoute(route, request, env, ctx);
+}
+
+function isAuthPath(pathname: string): boolean {
+  return pathname === '/auth' || pathname.startsWith('/auth/') || pathname === '/me' || pathname.startsWith('/me/');
 }
 
 function withoutCors(response: Response): Response {

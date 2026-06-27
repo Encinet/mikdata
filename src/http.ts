@@ -26,6 +26,20 @@ export function json(
   });
 }
 
+export function authJson(body: unknown, status = 200, extraHeaders: HeadersInit = {}): Response {
+  const headers = new Headers(JSON_HEADERS);
+  headers.set('Cache-Control', 'no-store');
+
+  new Headers(extraHeaders).forEach((value, key) => {
+    headers.append(key, value);
+  });
+
+  return new Response(JSON.stringify(body), {
+    status,
+    headers,
+  });
+}
+
 export function proxyJson(
   body: unknown,
   status: number,
