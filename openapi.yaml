@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
-  title: MikData API
+  title: MikCasual API
   description: |
-    Minecraft 服务器 Web 面板数据 API，提供玩家在线状态、建筑列表、封禁列表和公告等数据。
+    MikCasual 服务器数据 API，提供玩家在线状态、建筑列表、封禁列表和公告等数据。
 
-    所有 `/api/*` 路由均启用 CORS，允许来源由 Worker 的 `ALLOWED_ORIGINS` 配置控制。
+    所有公共 `/api/*` 路由均启用 CORS，并允许任意来源读取。
   version: 1.0.0
 
 servers:
@@ -19,7 +19,11 @@ paths:
   /players:
     get:
       summary: 获取在线玩家
-      description: 返回当前在线玩家列表及人数。当上游服务不可用时可能降级到第三方查询服务（仅返回人数）。
+      description: |
+        返回当前在线玩家快照。后端响应来自内存里的预生成 JSON 缓存，适合高频轮询。
+
+        `players` 数组当前不保证排序。当上游服务不可用时可能降级到第三方查询服务；
+        降级响应只包含在线人数，`peak_online` 为 -1，`players` 为空数组。
       operationId: getPlayers
       responses:
         "200":
@@ -39,24 +43,55 @@ paths:
   /buildings:
     get:
       summary: 获取建筑列表
-      description: 返回服务器中所有已登记建筑的详细信息，包含坐标、建造者、标签等。
+      description: 从内存/Worker Cache API 缓存的建筑汇总返回所有已登记建筑；cache miss 时读取 Durable Object 快照，KV 仅作为建筑持久存储和快照重建来源。支持按 tag、type、builder、locale 过滤。
       operationId: getBuildings
+      parameters:
+        - name: tag
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [original, derivative, replica]
+        - name: builder
+          in: query
+          schema:
+            type: string
+        - name: locale
+          in: query
+          schema:
+            type: string
       responses:
         "200":
           description: 成功
-          headers:
-            X-Proxy-Cache:
-              $ref: "#/components/headers/X-Proxy-Cache"
-            X-Proxy-Source:
-              $ref: "#/components/headers/X-Proxy-Source"
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: "#/components/schemas/Building"
-        "502":
-          $ref: "#/components/responses/UpstreamError"
+
+  /buildings/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: 获取单个建筑
+      operationId: getBuilding
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Building"
+        "404":
+          $ref: "#/components/responses/Error"
 
   /bans:
     get:
@@ -115,6 +150,16 @@ components:
         type: string
         enum: [UPSTREAM, FALLBACK]
   responses:
+    Error:
+      description: 请求失败
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: string
     UpstreamError:
       description: 上游服务不可用
       content:
@@ -129,13 +174,24 @@ components:
   schemas:
     PlayerOnlinePayload:
       type: object
-      required: [online, players]
+      required: [online, peak_online, players]
+      example:
+        online: 2
+        peak_online: 8
+        players:
+          - uuid: 00000000-0000-0000-0000-000000000000
+            name: PlayerName
+            joined_at: "2026-06-27T12:34:56Z"
       properties:
         online:
           type: integer
-          description: 当前在线人数。-1 表示服务器离线（降级查询失败）。
+          description: 当前在线人数。降级查询失败时为 -1。
+        peak_online:
+          type: integer
+          description: 持久化历史最高在线人数，来自 plugins/mik/api-state.yml 的 peak-online。降级响应中为 -1。
         players:
           type: array
+          description: 当前在线玩家列表，当前不保证排序。
           items:
             $ref: "#/components/schemas/OnlinePlayer"
 
@@ -153,7 +209,7 @@ components:
           format: date-time
           description: 本次登录时间
 
-    Building:
+    BuildingInput:
       type: object
       required:
         - name
@@ -179,6 +235,7 @@ components:
           enum: [original, derivative, replica]
         images:
           type: array
+          description: 图片路径列表。每项必须是相对路径或 https URL。
           items:
             type: string
         buildDate:
@@ -190,6 +247,21 @@ components:
             $ref: "#/components/schemas/LocalizedText"
         source:
           $ref: "#/components/schemas/BuildingSource"
+
+    Building:
+      allOf:
+        - $ref: "#/components/schemas/BuildingInput"
+        - type: object
+          required: [id, createdAt, updatedAt]
+          properties:
+            id:
+              type: string
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
 
     LocalizedText:
       type: object

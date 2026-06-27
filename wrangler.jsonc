@@ -3,7 +3,7 @@
 	"name": "mikdata",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-06-26",
-	"workers_dev": true,
+	"workers_dev": false,
 	"observability": {
 		"enabled": true
 	},
@@ -12,10 +12,26 @@
 			"*/5 * * * *"
 		]
 	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "BUILDINGS_WRITER",
+				"class_name": "BuildingsWriter"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"BuildingsWriter"
+			]
+		}
+	],
 	"kv_namespaces": [
 		{
-			"binding": "MIKDATA_CACHE",
-			"id": "e029ccf019db4fd99ea553235f08ee83",
+			"binding": "BUILDINGS_KV",
+			"id": "bd97d8e8ecd541fea6d4f451b3f259af",
 			"remote": true
 		}
 	],

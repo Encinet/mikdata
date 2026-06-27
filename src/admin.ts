@@ -1,0 +1,702 @@
+export function adminPage(): Response {
+  const nonce = createNonce();
+
+  return new Response(ADMIN_HTML.replaceAll('__NONCE__', nonce), {
+    headers: htmlHeaders(nonce),
+  });
+}
+
+function htmlHeaders(nonce: string): HeadersInit {
+  return {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Content-Security-Policy':
+      `default-src 'self'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`,
+  };
+}
+
+function createNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return btoa(String.fromCharCode(...bytes));
+}
+
+const ADMIN_HTML = /* html */ `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MikData Admin</title>
+<style nonce="__NONCE__">
+  *, *::before, *::after { box-sizing: border-box; }
+  :root {
+    color-scheme: light;
+    --bg: #f7f8fa;
+    --surface: #ffffff;
+    --input: #ffffff;
+    --subtle: #f1f3f5;
+    --line: #dfe3e8;
+    --line-strong: #c8ced6;
+    --text: #171b22;
+    --muted: #69717d;
+    --topbar: rgba(255,255,255,.92);
+    --thead: #fafbfc;
+    --hover: #fcfdff;
+    --danger-bg: #ffffff;
+    --danger-line: #f3c4bd;
+    --danger-hover: #fff4f2;
+    --overlay-bg: rgba(17, 24, 39, .48);
+    --blue: #155eef;
+    --blue-dark: #0f4bcc;
+    --red: #b42318;
+    --green: #067647;
+    --amber: #a15c07;
+    --shadow: 0 18px 50px rgba(23, 27, 34, .12);
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #101114;
+    --surface: #17191d;
+    --input: #111317;
+    --subtle: #20242a;
+    --line: #2b3038;
+    --line-strong: #3a414c;
+    --text: #f2f4f7;
+    --muted: #9aa3af;
+    --topbar: rgba(23,25,29,.92);
+    --thead: #1d2026;
+    --hover: #1b1f25;
+    --danger-bg: #211514;
+    --danger-line: #5c2c28;
+    --danger-hover: #2b1917;
+    --overlay-bg: rgba(0, 0, 0, .56);
+    --blue: #528bff;
+    --blue-dark: #3473f4;
+    --red: #ff8a7a;
+    --green: #47c98b;
+    --amber: #f5ad54;
+    --shadow: 0 18px 50px rgba(0, 0, 0, .34);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #101114;
+      --surface: #17191d;
+      --input: #111317;
+      --subtle: #20242a;
+      --line: #2b3038;
+      --line-strong: #3a414c;
+      --text: #f2f4f7;
+      --muted: #9aa3af;
+      --topbar: rgba(23,25,29,.92);
+      --thead: #1d2026;
+      --hover: #1b1f25;
+      --danger-bg: #211514;
+      --danger-line: #5c2c28;
+      --danger-hover: #2b1917;
+      --overlay-bg: rgba(0, 0, 0, .56);
+      --blue: #528bff;
+      --blue-dark: #3473f4;
+      --red: #ff8a7a;
+      --green: #47c98b;
+      --amber: #f5ad54;
+      --shadow: 0 18px 50px rgba(0, 0, 0, .34);
+    }
+  }
+  body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
+  button, input, select, textarea { font: inherit; }
+  button { border: 0; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: .45; }
+  input, select, textarea {
+    width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--input);
+    color: var(--text); outline: none; padding: 9px 10px;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(21, 94, 239, .12); }
+  textarea { min-height: 78px; resize: vertical; }
+  .app { min-height: 100vh; }
+  .topbar {
+    height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 22px;
+    background: var(--topbar); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 20;
+    backdrop-filter: blur(12px);
+  }
+  .brand { font-size: 15px; font-weight: 760; }
+  .identity {
+    color: var(--muted); font-size: 13px; border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px; background: var(--surface); white-space: nowrap;
+  }
+  .grow { flex: 1; }
+  .btn {
+    min-height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    border-radius: 6px; padding: 0 12px; font-weight: 650; white-space: nowrap;
+  }
+  .primary { background: var(--blue); color: #fff; }
+  .primary:hover { background: var(--blue-dark); }
+  .quiet { background: var(--surface); color: var(--text); border: 1px solid var(--line); }
+  .quiet:hover { border-color: var(--line-strong); background: var(--subtle); }
+  .danger { background: var(--danger-bg); color: var(--red); border: 1px solid var(--danger-line); }
+  .danger:hover { background: var(--danger-hover); }
+  .sm { min-height: 30px; padding: 0 9px; font-size: 13px; }
+  main { width: min(1240px, calc(100vw - 32px)); margin: 18px auto 34px; }
+  .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 13px 14px; }
+  .stat span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 7px; }
+  .stat strong { display: block; font-size: 24px; line-height: 1; letter-spacing: 0; }
+  .tools { display: grid; grid-template-columns: 1fr 170px; gap: 10px; margin-bottom: 12px; }
+  .table { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; overflow: auto; }
+  table { width: 100%; min-width: 900px; border-collapse: collapse; }
+  th { background: var(--thead); color: var(--muted); font-size: 12px; font-weight: 700; text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: middle; font-size: 14px; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: var(--hover); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); }
+  .title { font-weight: 720; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .badge { display: inline-flex; border-radius: 999px; padding: 3px 8px; font-size: 12px; font-weight: 700; }
+  .original { background: #ecfdf3; color: var(--green); }
+  .derivative { background: #eff6ff; color: var(--blue-dark); }
+  .replica { background: #fff7ed; color: var(--amber); }
+  .row-actions { display: flex; gap: 7px; }
+  .empty { color: var(--muted); text-align: center; padding: 46px 12px; }
+  .overlay {
+    display: none; position: fixed; inset: 0; z-index: 50; padding: 18px;
+    align-items: center; justify-content: center; background: var(--overlay-bg);
+  }
+  .overlay.open { display: flex; }
+  .modal {
+    width: min(760px, 100%); max-height: calc(100vh - 36px); display: grid; grid-template-rows: auto 1fr auto;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow);
+  }
+  .modal-head, .modal-foot { display: flex; align-items: center; gap: 10px; padding: 14px 16px; }
+  .modal-head { border-bottom: 1px solid var(--line); }
+  .modal-foot { border-top: 1px solid var(--line); justify-content: flex-end; }
+  .modal-title { font-weight: 760; }
+  .modal-body { overflow: auto; padding: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+  .field { display: grid; gap: 6px; }
+  .full { grid-column: 1 / -1; }
+  label { color: var(--muted); font-size: 12px; font-weight: 700; }
+  .section { grid-column: 1 / -1; padding-top: 12px; border-top: 1px solid var(--line); color: var(--text); font-weight: 750; font-size: 13px; }
+  .preview {
+    grid-column: 1 / -1; min-height: 34px; display: flex; align-items: center;
+    color: var(--muted); font-size: 13px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--subtle); padding: 8px 10px;
+  }
+  #toast {
+    position: fixed; right: 18px; bottom: 18px; z-index: 80; width: min(360px, calc(100vw - 36px));
+    transform: translateY(140%); transition: transform .18s ease; border-radius: 7px; padding: 11px 13px;
+    background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 14px;
+  }
+  #toast.show { transform: translateY(0); }
+  #toast.ok { border-left: 4px solid var(--green); }
+  #toast.err { border-left: 4px solid var(--red); }
+  @media (max-width: 760px) {
+    .topbar { height: auto; min-height: 56px; padding: 10px 12px; flex-wrap: wrap; }
+    .brand { width: 100%; }
+    .identity { width: 100%; }
+    main { width: calc(100vw - 20px); margin-top: 12px; }
+    .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .tools { grid-template-columns: 1fr; }
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">MikData</div>
+    <div class="identity">Cloudflare Access</div>
+    <div class="grow"></div>
+    <button class="btn quiet sm" id="theme-btn" type="button">系统</button>
+    <button class="btn quiet" id="refresh-btn" type="button">刷新</button>
+    <button class="btn quiet" id="import-btn" type="button">导入</button>
+    <button class="btn primary" id="create-btn" type="button">新增</button>
+  </header>
+  <main>
+    <section class="summary">
+      <div class="stat"><span>总数</span><strong id="s-total">0</strong></div>
+      <div class="stat"><span>原创</span><strong id="s-original">0</strong></div>
+      <div class="stat"><span>二创</span><strong id="s-derivative">0</strong></div>
+      <div class="stat"><span>复刻</span><strong id="s-replica">0</strong></div>
+    </section>
+    <div class="tools">
+      <input id="search" placeholder="搜索建筑、建造者、标签" autocomplete="off">
+      <select id="type-filter">
+        <option value="">全部类型</option>
+        <option value="original">原创</option>
+        <option value="derivative">二创</option>
+        <option value="replica">复刻</option>
+      </select>
+    </div>
+    <div class="table">
+      <table>
+        <thead>
+          <tr><th>ID</th><th>建筑</th><th>坐标</th><th>类型</th><th>建造者</th><th>日期</th><th>操作</th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+<div class="overlay" id="overlay">
+  <form class="modal" id="building-form">
+    <div class="modal-head">
+      <div class="modal-title" id="modal-title">新增建筑</div>
+      <div class="grow"></div>
+      <button class="btn quiet sm" id="close-btn" type="button">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div class="grid">
+        <div class="section">基本信息</div>
+        <div class="field"><label for="name-zh">名称 zh-CN</label><input id="name-zh" maxlength="200" required></div>
+        <div class="field"><label for="name-en">名称 en</label><input id="name-en" maxlength="200" required></div>
+        <div class="field full"><label for="desc-zh">描述 zh-CN</label><textarea id="desc-zh" maxlength="2000" required></textarea></div>
+        <div class="field full"><label for="desc-en">描述 en</label><textarea id="desc-en" maxlength="2000" required></textarea></div>
+        <div class="section">坐标</div>
+        <div class="field"><label for="coord-x">X</label><input id="coord-x" type="number" value="0" required></div>
+        <div class="field"><label for="coord-y">Y</label><input id="coord-y" type="number" value="64" required></div>
+        <div class="field"><label for="coord-z">Z</label><input id="coord-z" type="number" value="0" required></div>
+        <div class="field"><label for="build-type">类型</label><select id="build-type"><option value="original">original</option><option value="derivative">derivative</option><option value="replica">replica</option></select></div>
+        <div class="section">内容</div>
+        <div class="field full"><label for="builders">建造者，每行 name,uuid,weight</label><textarea id="builders" required></textarea></div>
+        <div class="field full"><label for="images">图片，每行一个 /path 或 https:// URL</label><textarea id="images" required></textarea></div>
+        <div class="field"><label for="build-date">建造日期</label><input id="build-date" type="date" required></div>
+        <div class="field full"><label for="tags">标签，每行 zh-CN,en</label><textarea id="tags"></textarea></div>
+        <div class="section">来源</div>
+        <div class="field"><label for="source-author">原作者</label><input id="source-author" maxlength="200"></div>
+        <div class="field"><label for="source-link">原作链接</label><input id="source-link" maxlength="500"></div>
+        <div class="field full"><label for="source-note-zh">备注 zh-CN</label><input id="source-note-zh" maxlength="500"></div>
+        <div class="field full"><label for="source-note-en">备注 en</label><input id="source-note-en" maxlength="500"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn quiet" id="cancel-btn" type="button">取消</button>
+      <button class="btn primary" id="save-btn" type="submit">保存</button>
+    </div>
+  </form>
+</div>
+<div class="overlay" id="import-overlay">
+  <form class="modal" id="import-form">
+    <div class="modal-head">
+      <div class="modal-title">导入 JSON</div>
+      <div class="grow"></div>
+      <button class="btn quiet sm" id="import-close-btn" type="button">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div class="grid">
+        <div class="field full"><label for="import-file">JSON 文件</label><input id="import-file" type="file" accept="application/json,.json"></div>
+        <div class="field full"><label for="import-json">JSON</label><textarea id="import-json" class="mono" spellcheck="false"></textarea></div>
+        <div class="preview" id="import-preview">等待 JSON</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn quiet" id="import-cancel-btn" type="button">取消</button>
+      <button class="btn primary" id="import-save-btn" type="submit">导入</button>
+    </div>
+  </form>
+</div>
+<div id="toast"></div>
+<script nonce="__NONCE__">
+const THEME_KEY = 'mikdata-admin-theme';
+const THEMES = ['system', 'light', 'dark'];
+const themeLabel = { system: '系统', light: '浅色', dark: '深色' };
+const state = { buildings: [], editId: null, busy: false, theme: readTheme() };
+const typeLabel = { original: '原创', derivative: '二创', replica: '复刻' };
+const $ = (id) => document.getElementById(id);
+
+applyTheme();
+$('theme-btn').addEventListener('click', cycleTheme);
+$('refresh-btn').addEventListener('click', loadBuildings);
+$('import-btn').addEventListener('click', openImport);
+$('create-btn').addEventListener('click', openCreate);
+$('search').addEventListener('input', render);
+$('type-filter').addEventListener('change', render);
+$('close-btn').addEventListener('click', closeModal);
+$('cancel-btn').addEventListener('click', closeModal);
+$('overlay').addEventListener('click', (event) => {
+  if (event.target === event.currentTarget) closeModal();
+});
+$('building-form').addEventListener('submit', saveBuilding);
+$('import-close-btn').addEventListener('click', closeImport);
+$('import-cancel-btn').addEventListener('click', closeImport);
+$('import-overlay').addEventListener('click', (event) => {
+  if (event.target === event.currentTarget) closeImport();
+});
+$('import-form').addEventListener('submit', importBuildings);
+$('import-file').addEventListener('change', readImportFile);
+$('import-json').addEventListener('input', updateImportPreview);
+
+updateAuthState();
+loadBuildings();
+
+function readTheme() {
+  try {
+    const stored = localStorage.getItem(THEME_KEY);
+    return THEMES.includes(stored) ? stored : 'system';
+  } catch {
+    return 'system';
+  }
+}
+
+function applyTheme() {
+  if (state.theme === 'system') {
+    document.documentElement.removeAttribute('data-theme');
+  } else {
+    document.documentElement.dataset.theme = state.theme;
+  }
+
+  $('theme-btn').textContent = themeLabel[state.theme];
+}
+
+function cycleTheme() {
+  const next = THEMES[(THEMES.indexOf(state.theme) + 1) % THEMES.length];
+  state.theme = next;
+
+  try {
+    localStorage.setItem(THEME_KEY, next);
+  } catch {}
+
+  applyTheme();
+}
+
+function updateAuthState() {
+  $('create-btn').disabled = state.busy;
+  $('import-btn').disabled = state.busy;
+  render();
+}
+
+async function loadBuildings() {
+  setBusy(true);
+  try {
+    const res = await fetch('/api/buildings', { cache: 'no-store' });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    state.buildings = Array.isArray(data) ? data : [];
+    updateStats();
+    render();
+  } catch (error) {
+    toast(error.message || '加载失败', false);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function updateStats() {
+  $('s-total').textContent = state.buildings.length;
+  $('s-original').textContent = countType('original');
+  $('s-derivative').textContent = countType('derivative');
+  $('s-replica').textContent = countType('replica');
+}
+
+function countType(type) {
+  return state.buildings.filter((building) => building.buildType === type).length;
+}
+
+function render() {
+  const query = $('search').value.trim().toLowerCase();
+  const type = $('type-filter').value;
+  const rows = state.buildings.filter((building) => {
+    if (type && building.buildType !== type) return false;
+    return !query || searchableText(building).includes(query);
+  });
+  const body = $('rows');
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="7"><div class="empty">暂无数据</div></td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map((building) => {
+    const builders = [...(building.builders || [])].sort((a, b) => b.weight - a.weight).map((item) => item.name).join('、');
+    const tags = (building.tags || []).map((tag) => tag['zh-CN'] || tag.en).filter(Boolean).join('、');
+    const disabled = state.busy ? ' disabled' : '';
+    return '<tr>' +
+      '<td><span class="mono">' + esc(building.id) + '</span></td>' +
+      '<td><div class="title">' + esc(building.name && building.name['zh-CN']) + '</div><div class="meta">' + esc(building.name && building.name.en) + '</div>' + (tags ? '<div class="meta">' + esc(tags) + '</div>' : '') + '</td>' +
+      '<td><span class="mono">(' + num(building.coordinates && building.coordinates.x) + ', ' + num(building.coordinates && building.coordinates.y) + ', ' + num(building.coordinates && building.coordinates.z) + ')</span></td>' +
+      '<td><span class="badge ' + esc(building.buildType) + '">' + esc(typeLabel[building.buildType] || building.buildType) + '</span></td>' +
+      '<td>' + esc(builders) + '</td>' +
+      '<td><span class="mono">' + esc(building.buildDate) + '</span></td>' +
+      '<td><div class="row-actions"><button class="btn quiet sm" type="button" data-action="edit" data-id="' + esc(building.id) + '"' + disabled + '>编辑</button><button class="btn danger sm" type="button" data-action="delete" data-id="' + esc(building.id) + '"' + disabled + '>删除</button></div></td>' +
+      '</tr>';
+  }).join('');
+  body.querySelectorAll('button[data-action="edit"]').forEach((button) => {
+    button.addEventListener('click', () => openEdit(button.dataset.id));
+  });
+  body.querySelectorAll('button[data-action="delete"]').forEach((button) => {
+    button.addEventListener('click', () => deleteBuilding(button.dataset.id));
+  });
+}
+
+function searchableText(building) {
+  const tags = (building.tags || []).flatMap((tag) => [tag['zh-CN'], tag.en]);
+  const builders = (building.builders || []).map((builder) => builder.name);
+  return [building.id, building.name && building.name['zh-CN'], building.name && building.name.en, ...tags, ...builders]
+    .filter(Boolean).join(' ').toLowerCase();
+}
+
+function openCreate() {
+  state.editId = null;
+  $('modal-title').textContent = '新增建筑';
+  $('building-form').reset();
+  $('coord-x').value = '0';
+  $('coord-y').value = '64';
+  $('coord-z').value = '0';
+  $('build-type').value = 'original';
+  $('build-date').value = new Date().toISOString().slice(0, 10);
+  $('overlay').classList.add('open');
+  $('name-zh').focus();
+}
+
+function openEdit(id) {
+  const building = state.buildings.find((item) => item.id === id);
+  if (!building) return;
+  state.editId = id;
+  $('modal-title').textContent = '编辑建筑';
+  fillForm(building);
+  $('overlay').classList.add('open');
+  $('name-zh').focus();
+}
+
+function closeModal() {
+  $('overlay').classList.remove('open');
+  state.editId = null;
+}
+
+function openImport() {
+  $('import-form').reset();
+  $('import-json').value = '';
+  updateImportPreview();
+  $('import-overlay').classList.add('open');
+  $('import-json').focus();
+}
+
+function closeImport() {
+  $('import-overlay').classList.remove('open');
+}
+
+function fillForm(building) {
+  $('name-zh').value = building.name && building.name['zh-CN'] || '';
+  $('name-en').value = building.name && building.name.en || '';
+  $('desc-zh').value = building.description && building.description['zh-CN'] || '';
+  $('desc-en').value = building.description && building.description.en || '';
+  $('coord-x').value = building.coordinates?.x ?? 0;
+  $('coord-y').value = building.coordinates?.y ?? 64;
+  $('coord-z').value = building.coordinates?.z ?? 0;
+  $('build-type').value = building.buildType || 'original';
+  $('builders').value = (building.builders || []).map((item) => [item.name, item.uuid, item.weight].join(',')).join('\\n');
+  $('images').value = (building.images || []).join('\\n');
+  $('build-date').value = building.buildDate || '';
+  $('tags').value = (building.tags || []).map((tag) => [tag['zh-CN'] || '', tag.en || ''].join(',')).join('\\n');
+  const source = building.source || {};
+  $('source-author').value = source.originalAuthor || '';
+  $('source-link').value = source.originalLink || '';
+  $('source-note-zh').value = source.notes && source.notes['zh-CN'] || '';
+  $('source-note-en').value = source.notes && source.notes.en || '';
+}
+
+async function saveBuilding(event) {
+  event.preventDefault();
+  setBusy(true);
+  try {
+    const isEdit = Boolean(state.editId);
+    const res = await fetch(isEdit ? '/admin/api/buildings/' + encodeURIComponent(state.editId) : '/admin/api/buildings', {
+      method: isEdit ? 'PUT' : 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify(toPayload()),
+    });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    toast(isEdit ? '已更新' : '已创建', true);
+    closeModal();
+    await loadBuildings();
+  } catch (error) {
+    toast(error.message || '保存失败', false);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function deleteBuilding(id) {
+  const building = state.buildings.find((item) => item.id === id);
+  const label = building && building.name ? building.name['zh-CN'] || building.name.en || id : id;
+  if (!confirm('删除「' + label + '」？')) return;
+  setBusy(true);
+  try {
+    const res = await fetch('/admin/api/buildings/' + encodeURIComponent(id), {
+      method: 'DELETE',
+    });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    toast('已删除', true);
+    await loadBuildings();
+  } catch (error) {
+    toast(error.message || '删除失败', false);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function readImportFile() {
+  const file = $('import-file').files && $('import-file').files[0];
+  if (!file) return;
+
+  try {
+    $('import-json').value = await file.text();
+    updateImportPreview();
+  } catch {
+    toast('读取文件失败', false);
+  }
+}
+
+function updateImportPreview() {
+  const value = $('import-json').value.trim();
+
+  if (!value) {
+    $('import-preview').textContent = '等待 JSON';
+    return;
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    $('import-preview').textContent = '将导入 ' + items.length + ' 条';
+  } catch {
+    $('import-preview').textContent = 'JSON 格式错误';
+  }
+}
+
+async function importBuildings(event) {
+  event.preventDefault();
+
+  let items;
+
+  try {
+    const parsed = JSON.parse($('import-json').value);
+    items = Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    toast('JSON 格式错误', false);
+    return;
+  }
+
+  if (!items.length) {
+    toast('没有可导入的数据', false);
+    return;
+  }
+
+  setBusy(true);
+
+  try {
+    const payload = { buildings: items.map(toImportPayload) };
+    const res = await fetch('/admin/api/buildings/import', {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify(payload),
+    });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.error || res.statusText);
+
+    toast('已导入 ' + data.imported + ' 条', true);
+    closeImport();
+    await loadBuildings();
+  } catch (error) {
+    toast(error.message || '导入失败', false);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function toImportPayload(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) {
+    throw new Error('导入项必须是对象');
+  }
+
+  const payload = { ...item };
+  delete payload.id;
+  delete payload.createdAt;
+  delete payload.updatedAt;
+  return payload;
+}
+
+function toPayload() {
+  const sourceAuthor = $('source-author').value.trim();
+  const sourceLink = $('source-link').value.trim();
+  const sourceNoteZh = $('source-note-zh').value.trim();
+  const sourceNoteEn = $('source-note-en').value.trim();
+  const source = sourceAuthor || sourceLink || sourceNoteZh || sourceNoteEn ? {
+    originalAuthor: sourceAuthor || undefined,
+    originalLink: sourceLink || undefined,
+    notes: sourceNoteZh || sourceNoteEn ? { 'zh-CN': sourceNoteZh, en: sourceNoteEn } : undefined,
+  } : null;
+  return {
+    name: { 'zh-CN': $('name-zh').value.trim(), en: $('name-en').value.trim() },
+    description: { 'zh-CN': $('desc-zh').value.trim(), en: $('desc-en').value.trim() },
+    coordinates: { x: Number($('coord-x').value), y: Number($('coord-y').value), z: Number($('coord-z').value) },
+    builders: parseBuilders($('builders').value),
+    buildType: $('build-type').value,
+    images: splitLines($('images').value),
+    buildDate: $('build-date').value,
+    tags: parseTags($('tags').value),
+    source,
+  };
+}
+
+function parseBuilders(value) {
+  return splitLines(value).map((line) => {
+    const parts = line.split(',').map((part) => part.trim());
+    return { name: parts[0] || '', uuid: parts[1] || '', weight: Number(parts[2] || 0) };
+  });
+}
+
+function parseTags(value) {
+  return splitLines(value).map((line) => {
+    const parts = line.split(',').map((part) => part.trim());
+    const tag = {};
+    if (parts[0]) tag['zh-CN'] = parts[0];
+    if (parts[1]) tag.en = parts[1];
+    return tag;
+  }).filter((tag) => tag['zh-CN'] || tag.en);
+}
+
+function splitLines(value) {
+  return value.split('\\n').map((line) => line.trim()).filter(Boolean);
+}
+
+function writeHeaders() {
+  return { 'Content-Type': 'application/json' };
+}
+
+async function readJson(res) {
+  return res.json().catch(() => ({}));
+}
+
+function setBusy(busy) {
+  state.busy = busy;
+  $('save-btn').disabled = busy;
+  $('import-save-btn').disabled = busy;
+  $('refresh-btn').disabled = busy;
+  updateAuthState();
+}
+
+let toastTimer;
+function toast(message, ok) {
+  const el = $('toast');
+  el.textContent = message;
+  el.className = 'show ' + (ok ? 'ok' : 'err');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = ''; }, 2600);
+}
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+}
+
+function num(value) {
+  return Number.isFinite(Number(value)) ? String(value) : esc(value);
+}
+</script>
+</body>
+</html>`;

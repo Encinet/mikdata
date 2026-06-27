@@ -1,18 +1,10 @@
 # Required: main upstream data service.
 MINECRAFT_SERVER_URL=http://your-upstream.example
 
-# Required: buildings upstream data service.
-BUILDINGS_SERVER_URL=http://your-buildings-upstream.example
-
 # Required: Minecraft status fallback used when /api/players upstream is unavailable.
 MINECRAFT_SERVER_ADDRESS=play.example.com
 MINECRAFT_SERVER_PORT=25565
 
-# Required: comma-separated browser origins allowed to read this Worker.
-ALLOWED_ORIGINS=http://localhost:3000,https://your-site.example
-
-# Required: HMAC timestamp secret for MINECRAFT_SERVER_URL.
-MINECRAFT_HMAC_SECRET=
-
-# Required: HMAC timestamp secret for BUILDINGS_SERVER_URL.
-BUILDINGS_HMAC_SECRET=
+# Required: Cloudflare Access application settings for /admin*.
+CLOUDFLARE_ACCESS_ISSUER=https://your-team.cloudflareaccess.com
+CLOUDFLARE_ACCESS_AUD=your-access-application-aud

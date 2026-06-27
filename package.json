@@ -6,12 +6,16 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "check": "tsc --noEmit && wrangler deploy --dry-run"
+    "check": "bun test && tsc --noEmit && wrangler deploy --dry-run"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260620.0",
     "typescript": "^5.9.3",
     "wrangler": "^4.25.0"
+  },
+  "dependencies": {
+    "jose": "^6.2.3"
   }
 }
