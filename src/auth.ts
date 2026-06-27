@@ -20,44 +20,30 @@ const SESSION_TOUCH_INTERVAL_SECONDS = 60 * 10;
 const CHALLENGE_TTL_SECONDS = 5 * 60;
 const CHALLENGE_CLEANUP_INTERVAL_SECONDS = 5 * 60;
 const WEB_LOGIN_CODE_RE = /^[0-9]{6,10}$/;
-const REQUIRED_GROUPS = new Set(['member', 'helper', 'manager']);
+const ALLOWED_ROLES = new Set(['member', 'helper', 'manager']);
 const RP_ID = 'mcmik.top';
 const RP_NAME = 'Mik Casual';
 const EXPECTED_ORIGIN = 'https://mcmik.top';
 
 type AuthRouteResult = Response | null;
 
-interface PlayerRoles {
-  groups: string[];
-  permissions: string[];
-  refreshedAt?: string;
-  source?: 'plugin';
-}
-
 interface PlayerAccountSummary {
   playerUuid: string;
   currentName: string;
-  roles: PlayerRoles;
-  createdAt: string;
+  role: string;
   updatedAt: string;
-  lastLoginAt?: string;
   passkeyCount: number;
 }
 
 interface PluginChallengeResponse {
-  status: 'confirmed' | 'pending' | 'expired' | 'not_found' | 'consumed';
+  status: 'confirmed' | 'pending' | 'expired' | 'not_found' | 'consumed' | 'unavailable';
   player?: {
     uuid?: string;
     name?: string;
-    roles?: {
-      groups?: string[];
-      permissions?: string[];
-    };
+    role?: string;
   };
   confirmedAt?: string;
 }
-
-type PluginRoles = NonNullable<NonNullable<PluginChallengeResponse['player']>['roles']>;
 
 interface SessionRecord {
   sidHash: string;
@@ -67,17 +53,14 @@ interface SessionRecord {
   idleExpiresAt: string;
   absoluteExpiresAt: string;
   authMethod: 'minecraft-challenge' | 'passkey';
-  csrfSecretHash: string;
   revokedAt?: string;
 }
 
 interface AccountRecord {
   playerUuid: string;
   currentName: string;
-  createdAt: string;
   updatedAt: string;
-  lastLoginAt?: string;
-  roles: PlayerRoles;
+  role: string;
   disabledAt?: string;
 }
 
@@ -103,7 +86,7 @@ type ChallengeRecord =
       status: 'pending' | 'confirmed' | 'consumed' | 'expired';
       confirmedPlayerUuid?: string;
       confirmedPlayerName?: string;
-      confirmedRoles?: PlayerRoles;
+      confirmedRole?: string;
       confirmedAt?: string;
       lastPluginCheckAt?: string;
     }
@@ -362,11 +345,12 @@ export class AuthStore implements DurableObject {
 
     if (record.status === 'pending' && shouldCheckPlugin(record.lastPluginCheckAt)) {
       const plugin = await this.fetchPluginChallenge(record.displayCode, false);
-      if (plugin.status === 'confirmed' && plugin.player && isEligibleRoles(plugin.player.roles)) {
+      const role = normalizeRole(plugin.player?.role);
+      if (plugin.status === 'confirmed' && plugin.player && role) {
         record.status = 'confirmed';
         record.confirmedPlayerUuid = asString(plugin.player.uuid);
         record.confirmedPlayerName = asString(plugin.player.name);
-        record.confirmedRoles = normalizeRoles(plugin.player.roles);
+        record.confirmedRole = role;
         record.confirmedAt = plugin.confirmedAt ?? new Date().toISOString();
       }
       record.lastPluginCheckAt = new Date().toISOString();
@@ -395,14 +379,18 @@ export class AuthStore implements DurableObject {
     }
 
     const plugin = await this.fetchPluginChallenge(record.displayCode, true);
-    if (plugin.status !== 'confirmed' || !plugin.player || !isEligibleRoles(plugin.player.roles)) {
+    if (plugin.status === 'unavailable') {
+      return { status: 503, body: { error: 'plugin_unavailable' } };
+    }
+    const role = normalizeRole(plugin.player?.role);
+    if (plugin.status !== 'confirmed' || !plugin.player || !role) {
       return { status: 403, body: { error: 'member_required' } };
     }
 
     const account = await this.upsertAccount(
       asString(plugin.player.uuid),
       asString(plugin.player.name),
-      normalizeRoles(plugin.player.roles),
+      role,
     );
     const session = await this.createSession(account.playerUuid, 'minecraft-challenge');
     record.status = 'consumed';
@@ -416,7 +404,7 @@ export class AuthStore implements DurableObject {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 200, body: { authenticated: false } };
     const account = await this.readAccount(session.playerUuid);
-    if (!account || !isEligibleRoles(account.roles)) return { status: 200, body: { authenticated: false } };
+    if (!account) return { status: 200, body: { authenticated: false } };
     return { status: 200, body: { authenticated: true, account: await this.accountSummaryBody(account) } };
   }
 
@@ -434,7 +422,7 @@ export class AuthStore implements DurableObject {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     const account = await this.readAccount(session.playerUuid);
-    if (!account || !isEligibleRoles(account.roles)) return { status: 403, body: { error: 'member_required' } };
+    if (!account) return { status: 403, body: { error: 'member_required' } };
     await this.cleanupExpiredChallenges();
     const passkeys = await this.listPasskeys(account.playerUuid);
     const options = await generateRegistrationOptions({
@@ -449,7 +437,7 @@ export class AuthStore implements DurableObject {
         transports: passkey.transports,
       })),
       authenticatorSelection: {
-        residentKey: 'preferred',
+        residentKey: 'required',
         userVerification: 'required',
       },
     });
@@ -490,6 +478,12 @@ export class AuthStore implements DurableObject {
       return { status: 400, body: { error: 'passkey_verification_failed' } };
     }
 
+    const account = await this.readAccount(session.playerUuid);
+    if (!account) {
+      await this.storage.delete(webauthnChallengeKey(challenge.challenge));
+      return { status: 403, body: { error: 'member_required' } };
+    }
+
     const { credential: verifiedCredential } = verification.registrationInfo;
     const record: PasskeyRecord = {
       credentialId: verifiedCredential.id,
@@ -500,15 +494,17 @@ export class AuthStore implements DurableObject {
       createdAt: new Date().toISOString(),
       displayName,
     };
-    await this.storage.put(passkeyKey(record.credentialId), record);
-    await this.storage.delete(webauthnChallengeKey(challenge.challenge));
-    const account = await this.readAccount(session.playerUuid);
+    await Promise.all([
+      this.storage.put(passkeyKey(record.credentialId), record),
+      this.storage.put(accountPasskeyKey(record.playerUuid, record.credentialId), record.credentialId),
+      this.storage.delete(webauthnChallengeKey(challenge.challenge)),
+    ]);
     session.revokedAt = new Date().toISOString();
     await this.storage.put(sessionKey(session.sidHash), session);
     const newSession = await this.createSession(session.playerUuid, 'passkey');
     return {
       status: 200,
-      body: account ? sessionBody(newSession.sessionId, account) : { ok: true },
+      body: sessionBody(newSession.sessionId, account),
     };
   }
 
@@ -561,7 +557,7 @@ export class AuthStore implements DurableObject {
 
     if (!verification.verified) return { status: 400, body: { error: 'passkey_verification_failed' } };
     const account = await this.readAccount(passkey.playerUuid);
-    if (!account || !isEligibleRoles(account.roles)) return { status: 403, body: { error: 'member_required' } };
+    if (!account) return { status: 403, body: { error: 'member_required' } };
     passkey.counter = verification.authenticationInfo.newCounter;
     passkey.lastUsedAt = new Date().toISOString();
     await this.storage.put(passkeyKey(passkey.credentialId), passkey);
@@ -575,7 +571,10 @@ export class AuthStore implements DurableObject {
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     const passkey = await this.storage.get<PasskeyRecord>(passkeyKey(credentialId));
     if (!passkey || passkey.playerUuid !== session.playerUuid) return { status: 404, body: { error: 'not_found' } };
-    await this.storage.delete(passkeyKey(credentialId));
+    await Promise.all([
+      this.storage.delete(passkeyKey(credentialId)),
+      this.storage.delete(accountPasskeyKey(session.playerUuid, credentialId)),
+    ]);
     return { status: 200, body: { ok: true } };
   }
 
@@ -605,13 +604,13 @@ export class AuthStore implements DurableObject {
   private async upsertAccount(
     playerUuid: string,
     currentName: string,
-    roles: PlayerRoles,
+    role: string,
   ): Promise<AccountRecord> {
     const now = new Date().toISOString();
     const existing = await this.readAccount(playerUuid);
     const account: AccountRecord = existing
-      ? { ...existing, currentName, roles, updatedAt: now, lastLoginAt: now }
-      : { playerUuid, currentName, roles, createdAt: now, updatedAt: now, lastLoginAt: now };
+      ? { ...existing, currentName, role, updatedAt: now }
+      : { playerUuid, currentName, role, updatedAt: now };
     await this.storage.put(accountKey(playerUuid), account);
     return account;
   }
@@ -630,7 +629,6 @@ export class AuthStore implements DurableObject {
       idleExpiresAt: new Date(now + SESSION_IDLE_SECONDS * 1000).toISOString(),
       absoluteExpiresAt: new Date(now + SESSION_ABSOLUTE_SECONDS * 1000).toISOString(),
       authMethod,
-      csrfSecretHash: await sha256(randomToken(24)),
     };
     await this.storage.put(sessionKey(record.sidHash), record);
     return { sessionId, record };
@@ -653,24 +651,31 @@ export class AuthStore implements DurableObject {
   }
 
   private async readAccount(playerUuid: string): Promise<AccountRecord | null> {
-    return (await this.storage.get<AccountRecord>(accountKey(playerUuid))) ?? null;
+    const account = (await this.storage.get<AccountRecord>(accountKey(playerUuid))) ?? null;
+    if (!account) return null;
+    if (!isEligibleRole(account.role)) {
+      await this.storage.delete(accountKey(playerUuid));
+      return null;
+    }
+    return account;
   }
 
   private async accountSummaryBody(account: AccountRecord): Promise<PlayerAccountSummary> {
     return {
       playerUuid: account.playerUuid,
       currentName: account.currentName,
-      roles: account.roles,
-      createdAt: account.createdAt,
+      role: account.role,
       updatedAt: account.updatedAt,
-      lastLoginAt: account.lastLoginAt,
       passkeyCount: (await this.listPasskeys(account.playerUuid)).length,
     };
   }
 
   private async listPasskeys(playerUuid: string): Promise<PasskeyRecord[]> {
-    const list = await this.storage.list<PasskeyRecord>({ prefix: 'passkey:' });
-    return [...list.values()].filter((passkey) => passkey.playerUuid === playerUuid);
+    const index = await this.storage.list<string>({ prefix: accountPasskeyPrefix(playerUuid) });
+    const passkeys = await Promise.all(
+      [...index.values()].map((credentialId) => this.storage.get<PasskeyRecord>(passkeyKey(credentialId))),
+    );
+    return passkeys.filter((passkey): passkey is PasskeyRecord => !!passkey && passkey.playerUuid === playerUuid);
   }
 
   private async readMinecraftChallenge(challengeId: string): Promise<Extract<ChallengeRecord, { type: 'minecraft-login' }> | null> {
@@ -694,13 +699,17 @@ export class AuthStore implements DurableObject {
 
   private async fetchPluginChallenge(code: string, consume: boolean): Promise<PluginChallengeResponse> {
     const path = `/api/auth/challenges/${encodeURIComponent(code)}${consume ? '/consume' : ''}`;
-    const response = await this.env.VPC_SERVICE.fetch(new URL(path, this.env.MINECRAFT_SERVER_URL), {
-      method: consume ? 'POST' : 'GET',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!response.ok) return { status: 'not_found' };
-    return (await response.json()) as PluginChallengeResponse;
+    try {
+      const response = await this.env.VPC_SERVICE.fetch(new URL(path, this.env.MINECRAFT_SERVER_URL), {
+        method: consume ? 'POST' : 'GET',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) return { status: 'not_found' };
+      return (await response.json()) as PluginChallengeResponse;
+    } catch {
+      return { status: 'unavailable' };
+    }
   }
 
   private ensureInitialized(): Promise<void> {
@@ -860,10 +869,8 @@ function sessionBody(sessionId: string, account: AccountRecord): Record<string, 
     account: {
       playerUuid: account.playerUuid,
       currentName: account.currentName,
-      roles: account.roles,
-      createdAt: account.createdAt,
+      role: account.role,
       updatedAt: account.updatedAt,
-      lastLoginAt: account.lastLoginAt,
     },
   };
 }
@@ -886,7 +893,7 @@ function challengePublicBody(record: Extract<ChallengeRecord, { type: 'minecraft
       player: {
         uuid: record.confirmedPlayerUuid,
         name: record.confirmedPlayerName,
-        roles: record.confirmedRoles,
+        role: record.confirmedRole,
       },
       confirmedAt: record.confirmedAt,
     };
@@ -913,19 +920,13 @@ function publicPasskey(passkey: PasskeyRecord): Record<string, unknown> {
   };
 }
 
-function normalizeRoles(raw: PluginRoles | undefined): PlayerRoles {
-  return {
-    groups: Array.isArray(raw?.groups) ? raw.groups.filter((item) => typeof item === 'string') : [],
-    permissions: Array.isArray(raw?.permissions) ? raw.permissions.filter((item) => typeof item === 'string') : [],
-    refreshedAt: new Date().toISOString(),
-    source: 'plugin',
-  };
+function normalizeRole(raw: unknown): string {
+  const role = asString(raw);
+  return ALLOWED_ROLES.has(role) ? role : '';
 }
 
-function isEligibleRoles(raw: PluginRoles | PlayerRoles | undefined): boolean {
-  const groups = Array.isArray(raw?.groups) ? raw.groups : [];
-  const permissions = Array.isArray(raw?.permissions) ? raw.permissions : [];
-  return groups.some((group) => REQUIRED_GROUPS.has(group)) || permissions.includes('group.member');
+function isEligibleRole(raw: unknown): boolean {
+  return ALLOWED_ROLES.has(asString(raw));
 }
 
 function shouldCheckPlugin(value?: string): boolean {
@@ -1015,6 +1016,14 @@ function sessionKey(sidHash: string): string {
 
 function passkeyKey(credentialId: string): string {
   return `passkey:${credentialId}`;
+}
+
+function accountPasskeyPrefix(playerUuid: string): string {
+  return `account-passkey:${playerUuid}:`;
+}
+
+function accountPasskeyKey(playerUuid: string, credentialId: string): string {
+  return `${accountPasskeyPrefix(playerUuid)}${credentialId}`;
 }
 
 function webauthnChallengeKey(challenge: string): string {

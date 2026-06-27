@@ -12,7 +12,7 @@ test('minecraft challenge completion rejects non-member plugin confirmations', a
             player: {
               uuid: '00000000-0000-0000-0000-000000000001',
               name: 'GuestPlayer',
-              roles: { groups: [], permissions: [] },
+              role: '',
             },
           }),
         ),
@@ -43,6 +43,59 @@ test('passkey registration options require an authenticated session', async () =
 
   expect(response.status).toBe(401);
   expect(response.body).toEqual({ error: 'unauthenticated' });
+});
+
+test('minecraft challenge completion reports unavailable plugin without creating a session', async () => {
+  const store = createAuthStore({
+    VPC_SERVICE: {
+      fetch: () => Promise.reject(new Error('plugin unavailable')),
+    } as Fetcher,
+  });
+
+  const created = await callStore(store, { action: 'createMinecraftChallenge' });
+
+  const completed = await callStore(store, {
+    action: 'completeMinecraftChallenge',
+    challengeId: created.body.challengeId,
+    browserNonce: created.body.browserNonce,
+  });
+
+  expect(completed.status).toBe(503);
+  expect(completed.body).toEqual({ error: 'plugin_unavailable' });
+});
+
+test('passkey registration options require resident credentials', async () => {
+  const store = createAuthStore({
+    VPC_SERVICE: {
+      fetch: () =>
+        Promise.resolve(
+          Response.json({
+            status: 'confirmed',
+            player: {
+              uuid: '00000000-0000-0000-0000-000000000002',
+              name: 'MemberPlayer',
+              role: 'member',
+            },
+          }),
+        ),
+    } as Fetcher,
+  });
+
+  const created = await callStore(store, { action: 'createMinecraftChallenge' });
+  const completed = await callStore(store, {
+    action: 'completeMinecraftChallenge',
+    challengeId: created.body.challengeId,
+    browserNonce: created.body.browserNonce,
+  });
+
+  const options = await callStore(store, {
+    action: 'passkeyRegistrationOptions',
+    sessionId: completed.body.sessionId,
+  });
+
+  expect(options.status).toBe(200);
+  expect(options.body.options.authenticatorSelection.residentKey).toBe('required');
+  expect(options.body.options.authenticatorSelection.userVerification).toBe('required');
 });
 
 test('minecraft challenge creation is rate limited per client key', async () => {
@@ -117,7 +170,7 @@ function createAuthStore(overrides: Partial<Env> = {}): AuthStore {
 async function callStore(
   store: AuthStore,
   body: Record<string, unknown>,
-): Promise<{ status: number; body: Record<string, string> }> {
+): Promise<{ status: number; body: StoreTestBody }> {
   const response = await store.fetch(
     new Request('https://auth-store.local/', {
       method: 'POST',
@@ -125,8 +178,21 @@ async function callStore(
     }),
   );
 
-  return (await response.json()) as { status: number; body: Record<string, string> };
+  return (await response.json()) as { status: number; body: StoreTestBody };
 }
+
+type StoreTestBody = Record<string, unknown> & {
+  browserNonce?: string;
+  challengeId?: string;
+  error?: unknown;
+  options?: {
+    authenticatorSelection?: {
+      residentKey?: unknown;
+      userVerification?: unknown;
+    };
+  };
+  sessionId?: string;
+};
 
 function createStorage(): DurableObjectStorage {
   const values = new Map<string, unknown>();
