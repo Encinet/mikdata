@@ -191,6 +191,7 @@ const ADMIN_HTML = /* html */ `<!doctype html>
   }
   .danger:hover { background: color-mix(in srgb, var(--red), transparent 86%); }
   .sm { min-height: 28px; padding: 0 9px; font-size: 12px; }
+  .app.is-busy .row-actions .btn { pointer-events: none; opacity: .48; }
   main { width: min(1240px, calc(100vw - 28px)); margin: 18px auto 0; }
   .admin-hero {
     display: flex;
@@ -518,6 +519,7 @@ const state = {
   editId: null,
   reviewId: null,
   busy: false,
+  loadingSubmissions: false,
   theme: readTheme(),
 };
 const typeLabel = { original: '原创', derivative: '二创', replica: '复刻' };
@@ -525,13 +527,15 @@ const $ = (id) => document.getElementById(id);
 
 applyTheme();
 $('theme-btn').addEventListener('click', cycleTheme);
-$('refresh-btn').addEventListener('click', loadAll);
+$('refresh-btn').addEventListener('click', () => loadAll());
 $('submissions-refresh-btn').addEventListener('click', loadSubmissions);
 $('repair-approved-btn').addEventListener('click', repairApprovedSubmissions);
 $('import-btn').addEventListener('click', openImport);
 $('create-btn').addEventListener('click', openCreate);
 $('search').addEventListener('input', render);
 $('type-filter').addEventListener('change', render);
+$('rows').addEventListener('click', handleBuildingTableClick);
+$('submission-list').addEventListener('click', handleSubmissionListClick);
 $('close-btn').addEventListener('click', closeModal);
 $('cancel-btn').addEventListener('click', closeModal);
 $('overlay').addEventListener('click', (event) => {
@@ -552,7 +556,7 @@ $('import-json').addEventListener('input', updateImportPreview);
 
 updateAuthState();
 setReviewMode(false);
-loadAll();
+loadInitial();
 
 function readTheme() {
   try {
@@ -585,18 +589,27 @@ function cycleTheme() {
 }
 
 function updateAuthState() {
+  document.querySelector('.app').classList.toggle('is-busy', state.busy);
   $('create-btn').disabled = state.busy;
   $('import-btn').disabled = state.busy;
-  render();
-  renderSubmissions();
 }
 
-async function loadAll() {
+async function loadInitial() {
   setBusy(true);
+  try {
+    await loadBuildings(false);
+  } finally {
+    setBusy(false);
+  }
+  await loadSubmissions(false);
+}
+
+async function loadAll(manageBusy = true) {
+  if (manageBusy) setBusy(true);
   try {
     await Promise.all([loadBuildings(false), loadSubmissions(false)]);
   } finally {
-    setBusy(false);
+    if (manageBusy) setBusy(false);
   }
 }
 
@@ -618,16 +631,19 @@ async function loadBuildings(manageBusy = true) {
 
 async function loadSubmissions(manageBusy = true) {
   if (manageBusy) setBusy(true);
+  state.loadingSubmissions = true;
+  renderSubmissions();
   try {
-    const res = await fetch('/admin/api/building-submissions', { cache: 'no-store' });
+    const res = await fetch('/admin/api/building-submissions?status=pending', { cache: 'no-store' });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
     state.submissions = Array.isArray(data.submissions) ? data.submissions : [];
     updateAdminStatus();
-    renderSubmissions();
   } catch (error) {
     toast(error.message || '申请加载失败', false);
   } finally {
+    state.loadingSubmissions = false;
+    renderSubmissions();
     if (manageBusy) setBusy(false);
   }
 }
@@ -645,7 +661,7 @@ async function repairApprovedSubmissions() {
 
     const changed = (data.created || 0) + (data.restored || 0) + (data.linked || 0);
     toast('已扫描 ' + data.scanned + ' 条，修复 ' + changed + ' 条', true);
-    await loadAll();
+    await loadAll(false);
   } catch (error) {
     toast(error.message || '修复失败', false);
   } finally {
@@ -685,7 +701,6 @@ function render() {
   body.innerHTML = rows.map((building) => {
     const builders = [...(building.builders || [])].sort((a, b) => b.weight - a.weight).map((item) => item.name).join('、');
     const tags = (building.tags || []).map((tag) => tag['zh-CN'] || tag.en).filter(Boolean).join('、');
-    const disabled = state.busy ? ' disabled' : '';
     return '<tr>' +
       '<td><span class="mono">' + esc(building.id) + '</span></td>' +
       '<td><div class="title">' + esc(building.name && building.name['zh-CN']) + '</div><div class="meta">' + esc(building.name && building.name.en) + '</div>' + (tags ? '<div class="meta">' + esc(tags) + '</div>' : '') + '</td>' +
@@ -693,19 +708,17 @@ function render() {
       '<td><span class="badge ' + esc(building.buildType) + '">' + esc(typeLabel[building.buildType] || building.buildType) + '</span></td>' +
       '<td>' + esc(builders) + '</td>' +
       '<td><span class="mono">' + esc(building.buildDate) + '</span></td>' +
-      '<td><div class="row-actions"><button class="btn quiet sm" type="button" data-action="edit" data-id="' + esc(building.id) + '"' + disabled + '>编辑</button><button class="btn danger sm" type="button" data-action="delete" data-id="' + esc(building.id) + '"' + disabled + '>删除</button></div></td>' +
+      '<td><div class="row-actions"><button class="btn quiet sm" type="button" data-action="edit" data-id="' + esc(building.id) + '">编辑</button><button class="btn danger sm" type="button" data-action="delete" data-id="' + esc(building.id) + '">删除</button></div></td>' +
       '</tr>';
   }).join('');
-  body.querySelectorAll('button[data-action="edit"]').forEach((button) => {
-    button.addEventListener('click', () => openEdit(button.dataset.id));
-  });
-  body.querySelectorAll('button[data-action="delete"]').forEach((button) => {
-    button.addEventListener('click', () => deleteBuilding(button.dataset.id));
-  });
 }
 
 function renderSubmissions() {
   const list = $('submission-list');
+  if (state.loadingSubmissions && !state.submissions.length) {
+    list.innerHTML = '<div class="empty">正在加载申请</div>';
+    return;
+  }
   const pendingFirst = [...state.submissions].sort((a, b) => {
     if (a.status !== b.status) return a.status === 'pending' ? -1 : 1;
     return String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
@@ -719,7 +732,7 @@ function renderSubmissions() {
     const title = payload.name && (payload.name['zh-CN'] || payload.name.en) || submission.id;
     const builders = (payload.builders || []).map((item) => item.name).filter(Boolean).join('、');
     const coords = payload.coordinates || {};
-    const disabled = state.busy || submission.status !== 'pending' ? ' disabled' : '';
+    const disabled = submission.status !== 'pending' ? ' disabled' : '';
     const note = submission.reviewNote ? '<div class="meta">备注：' + esc(submission.reviewNote) + '</div>' : '';
     const expires = submission.status === 'rejected' && submission.expiresAt ? '<div class="meta">保留至：' + esc(formatTime(submission.expiresAt)) + '</div>' : '';
     return '<article class="review-item">' +
@@ -732,9 +745,22 @@ function renderSubmissions() {
       '<div class="row-actions"><button class="btn quiet sm" type="button" data-action="review" data-id="' + esc(submission.id) + '"' + disabled + '>编辑审核</button></div>' +
       '</article>';
   }).join('');
-  list.querySelectorAll('button[data-action="review"]').forEach((button) => {
-    button.addEventListener('click', () => openSubmissionReview(button.dataset.id));
-  });
+}
+
+function handleBuildingTableClick(event) {
+  if (!(event.target instanceof Element)) return;
+  const button = event.target.closest('button[data-action]');
+  if (!button || state.busy) return;
+  const id = button.dataset.id;
+  if (button.dataset.action === 'edit') openEdit(id);
+  if (button.dataset.action === 'delete') deleteBuilding(id);
+}
+
+function handleSubmissionListClick(event) {
+  if (!(event.target instanceof Element)) return;
+  const button = event.target.closest('button[data-action="review"]');
+  if (!button || state.busy || button.disabled) return;
+  openSubmissionReview(button.dataset.id);
 }
 
 function searchableText(building) {
@@ -840,14 +866,14 @@ async function saveBuilding(event) {
     const isEdit = Boolean(state.editId);
     const res = await fetch(isEdit ? '/admin/api/buildings/' + encodeURIComponent(state.editId) : '/admin/api/buildings', {
       method: isEdit ? 'PUT' : 'POST',
-      headers: writeHeaders(),
+      headers: isEdit ? writeHeaders(expectedBuildingHeader(state.editId)) : writeHeaders(),
       body: JSON.stringify(toPayload()),
     });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
     toast(isEdit ? '已更新' : '已创建', true);
     closeModal();
-    await loadBuildings();
+    await loadBuildings(false);
   } catch (error) {
     toast(error.message || '保存失败', false);
   } finally {
@@ -863,7 +889,7 @@ async function saveSubmissionEdit() {
     const payload = toPayload();
     const res = await fetch('/admin/api/building-submissions/' + encodeURIComponent(submission.id), {
       method: 'PUT',
-      headers: writeHeaders(),
+      headers: writeHeaders(expectedSubmissionHeader(submission)),
       body: JSON.stringify({
         payload,
         images: imageMetadataForPayload(payload, submission.images || []),
@@ -872,7 +898,7 @@ async function saveSubmissionEdit() {
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
     toast('申请已保存', true);
-    await loadSubmissions();
+    await loadSubmissions(false);
   } catch (error) {
     toast(error.message || '保存申请失败', false);
   } finally {
@@ -888,7 +914,7 @@ async function approveSubmission() {
     const payload = toPayload();
     const res = await fetch('/admin/api/building-submissions/' + encodeURIComponent(submission.id) + '/approve', {
       method: 'PUT',
-      headers: writeHeaders(),
+      headers: writeHeaders(expectedSubmissionHeader(submission)),
       body: JSON.stringify({
         payload,
         images: imageMetadataForPayload(payload, submission.images || []),
@@ -898,7 +924,7 @@ async function approveSubmission() {
     if (!res.ok) throw new Error(data.error || res.statusText);
     toast('已批准并收入建筑', true);
     closeModal();
-    await loadAll();
+    await loadAll(false);
   } catch (error) {
     toast(error.message || '批准失败', false);
   } finally {
@@ -915,14 +941,14 @@ async function rejectSubmission() {
   try {
     const res = await fetch('/admin/api/building-submissions/' + encodeURIComponent(submission.id) + '/reject', {
       method: 'PUT',
-      headers: writeHeaders(),
+      headers: writeHeaders(expectedSubmissionHeader(submission)),
       body: JSON.stringify({ reviewNote: reviewNote.trim() }),
     });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
     toast('已拒绝', true);
     closeModal();
-    await loadSubmissions();
+    await loadSubmissions(false);
   } catch (error) {
     toast(error.message || '拒绝失败', false);
   } finally {
@@ -938,11 +964,12 @@ async function deleteBuilding(id) {
   try {
     const res = await fetch('/admin/api/buildings/' + encodeURIComponent(id), {
       method: 'DELETE',
+      headers: writeHeaders(expectedBuildingHeader(id)),
     });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
     toast('已删除', true);
-    await loadBuildings();
+    await loadBuildings(false);
   } catch (error) {
     toast(error.message || '删除失败', false);
   } finally {
@@ -1011,7 +1038,7 @@ async function importBuildings(event) {
 
     toast('已导入 ' + data.imported + ' 条', true);
     closeImport();
-    await loadBuildings();
+    await loadBuildings(false);
   } catch (error) {
     toast(error.message || '导入失败', false);
   } finally {
@@ -1100,8 +1127,17 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN');
 }
 
-function writeHeaders() {
-  return { 'Content-Type': 'application/json' };
+function writeHeaders(extra) {
+  return { 'Content-Type': 'application/json', ...(extra || {}) };
+}
+
+function expectedBuildingHeader(id) {
+  const building = state.buildings.find((item) => item.id === id);
+  return building && building.updatedAt ? { 'X-Expected-Updated-At': building.updatedAt } : {};
+}
+
+function expectedSubmissionHeader(submission) {
+  return submission && submission.updatedAt ? { 'X-Expected-Updated-At': submission.updatedAt } : {};
 }
 
 async function readJson(res) {

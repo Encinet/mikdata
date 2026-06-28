@@ -51,6 +51,14 @@ export class TtlMemoryCache<T> {
     this.records.delete(key);
   }
 
+  deletePrefix(prefix: string): void {
+    for (const key of this.records.keys()) {
+      if (key.startsWith(prefix)) {
+        this.records.delete(key);
+      }
+    }
+  }
+
   clear(): void {
     this.records.clear();
   }

@@ -9,14 +9,15 @@ import {
   type WebAuthnCredential,
 } from '@simplewebauthn/server';
 import type { Env } from './env';
+import { AUTH_STORE_NAME } from './constants';
 import {
   createPlayerBuildingSubmission,
+  handleAdminBuildingsRouteDirect,
   listPlayerBuildingSubmissions,
 } from './buildings';
 import { authJson } from './http';
 import { TtlMemoryCache } from './memory-cache';
 
-const AUTH_STORE_NAME = 'global';
 const SESSION_COOKIE_NAME = '__Host-mik_sid';
 const LOGIN_COOKIE_NAME = '__Host-mik_login';
 const SESSION_IDLE_SECONDS = 60 * 60 * 24 * 30;
@@ -27,8 +28,9 @@ const CHALLENGE_CLEANUP_INTERVAL_SECONDS = 5 * 60;
 const ACCOUNT_CACHE_TTL_MS = 60 * 1000;
 const PASSKEY_CACHE_TTL_MS = 60 * 1000;
 const PLAYER_RESOLVE_CACHE_TTL_MS = 60 * 1000;
+const MAX_AUTH_BODY_BYTES = 64 * 1024;
 const WEB_LOGIN_CODE_RE = /^[0-9]{6,10}$/;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALLOWED_ROLES = new Set(['member', 'helper', 'manager']);
 const DEFAULT_WEBAUTHN_RP_ID = 'mcmik.top';
 const DEFAULT_WEBAUTHN_ORIGIN = 'https://mcmik.top';
@@ -159,10 +161,11 @@ export async function handleAuthRoute(
   const challengeComplete = routePath.match(/^\/auth\/challenges\/([^/]+)\/complete$/);
   if (challengeComplete && request.method === 'POST') {
     const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
     const response = await callStore(store, {
       action: 'completeMinecraftChallenge',
       challengeId: challengeComplete[1],
-      browserNonce: payload.browserNonce,
+      browserNonce: payload.data.browserNonce,
       clientKey,
     });
     return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
@@ -170,32 +173,36 @@ export async function handleAuthRoute(
 
   if (routePath === '/auth/me' && request.method === 'POST') {
     const payload = await readJsonObject(request);
-    const response = await callStore(store, { action: 'me', sessionId: payload.sessionId });
+    if (!payload.ok) return payload.response;
+    const response = await callStore(store, { action: 'me', sessionId: payload.data.sessionId });
     return authJson(response.body, response.status);
   }
 
   if (routePath === '/auth/logout' && request.method === 'POST') {
     const payload = await readJsonObject(request);
-    const response = await callStore(store, { action: 'logout', sessionId: payload.sessionId });
+    if (!payload.ok) return payload.response;
+    const response = await callStore(store, { action: 'logout', sessionId: payload.data.sessionId });
     return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
   }
 
   if (routePath === '/auth/passkeys/options/register' && request.method === 'POST') {
     const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
     const response = await callStore(store, {
       action: 'passkeyRegistrationOptions',
-      sessionId: payload.sessionId,
+      sessionId: payload.data.sessionId,
     });
     return authJson(response.body, response.status);
   }
 
   if (routePath === '/auth/passkeys/register' && request.method === 'POST') {
     const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
     const response = await callStore(store, {
       action: 'passkeyRegister',
-      sessionId: payload.sessionId,
-      credential: payload.credential,
-      displayName: payload.displayName,
+      sessionId: payload.data.sessionId,
+      credential: payload.data.credential,
+      displayName: payload.data.displayName,
     });
     return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
   }
@@ -207,9 +214,10 @@ export async function handleAuthRoute(
 
   if (routePath === '/auth/passkeys/login' && request.method === 'POST') {
     const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
     const response = await callStore(store, {
       action: 'passkeyLogin',
-      credential: payload.credential,
+      credential: payload.data.credential,
       clientKey,
     });
     return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
@@ -218,61 +226,68 @@ export async function handleAuthRoute(
   const removePasskey = routePath.match(/^\/auth\/passkeys\/([^/]+)$/);
   if (removePasskey && request.method === 'DELETE') {
     const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
     const response = await callStore(store, {
       action: 'passkeyDelete',
       credentialId: removePasskey[1],
-      sessionId: payload.sessionId,
+      sessionId: payload.data.sessionId,
     });
     return authJson(response.body, response.status);
   }
 
   if (routePath === '/me/summary' && request.method === 'POST') {
     const payload = await readJsonObject(request);
-    const response = await callStore(store, { action: 'accountSummary', sessionId: payload.sessionId });
+    if (!payload.ok) return payload.response;
+    const response = await callStore(store, { action: 'accountSummary', sessionId: payload.data.sessionId });
     return authJson(response.body, response.status);
   }
 
   if (routePath === '/me/security' && request.method === 'POST') {
     const payload = await readJsonObject(request);
-    const response = await callStore(store, { action: 'accountSecurity', sessionId: payload.sessionId });
+    if (!payload.ok) return payload.response;
+    const response = await callStore(store, { action: 'accountSecurity', sessionId: payload.data.sessionId });
     return authJson(response.body, response.status);
   }
 
   if (routePath === '/me/sessions/revoke' && request.method === 'POST') {
     const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
     const response = await callStore(store, {
       action: 'revokeAccountSession',
-      sessionId: payload.sessionId,
-      targetSessionId: payload.targetSessionId,
+      sessionId: payload.data.sessionId,
+      targetSessionId: payload.data.targetSessionId,
     });
     return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
   }
 
   if (routePath === '/me/players/resolve' && request.method === 'POST') {
     const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
     const response = await callStore(store, {
       action: 'resolvePlayer',
-      sessionId: payload.sessionId,
-      name: payload.name,
+      sessionId: payload.data.sessionId,
+      name: payload.data.name,
     });
     return authJson(response.body, response.status);
   }
 
   if (routePath === '/me/building-submissions' && request.method === 'POST') {
     const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
     const response = await callStore(store, {
       action: 'createBuildingSubmission',
-      sessionId: payload.sessionId,
-      payload,
+      sessionId: payload.data.sessionId,
+      payload: payload.data,
     });
     return authJson(response.body, response.status);
   }
 
   if (routePath === '/me/building-submissions/mine' && request.method === 'POST') {
     const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
     const response = await callStore(store, {
       action: 'listBuildingSubmissions',
-      sessionId: payload.sessionId,
+      sessionId: payload.data.sessionId,
     });
     return authJson(response.body, response.status);
   }
@@ -300,6 +315,8 @@ export class AuthStore implements DurableObject {
     defaultTtlMs: PLAYER_RESOLVE_CACHE_TTL_MS,
     maxEntries: 1024,
   });
+  private adminMutationQueue: Promise<unknown> = Promise.resolve();
+  private readonly submissionQueues = new Map<string, Promise<unknown>>();
   private lastChallengeCleanupAt = 0;
   private initialized: Promise<void> | null = null;
 
@@ -310,7 +327,19 @@ export class AuthStore implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     await this.ensureInitialized();
-    const body = (await request.json()) as StoreRequest;
+    let body: StoreRequest;
+
+    try {
+      const text = await readLimitedRequestText(request);
+      body = (text.trim() ? JSON.parse(text) : {}) as StoreRequest;
+    } catch (error) {
+      return json({
+        status: error instanceof RequestBodyTooLargeError ? 413 : 400,
+        body: {
+          error: error instanceof RequestBodyTooLargeError ? 'request_body_too_large' : 'invalid_json_body',
+        },
+      });
+    }
 
     try {
       return json(await this.dispatch(body));
@@ -358,9 +387,43 @@ export class AuthStore implements DurableObject {
         return this.createBuildingSubmission(asString(body.sessionId), body.payload);
       case 'listBuildingSubmissions':
         return this.listBuildingSubmissions(asString(body.sessionId));
+      case 'adminBuildingMutation':
+        return this.adminBuildingMutation(body);
       default:
         return { status: 404, body: { error: 'not_found' } };
     }
+  }
+
+  private async adminBuildingMutation(body: StoreRequest): Promise<{ status: number; body: unknown }> {
+    const task = this.adminMutationQueue
+      .catch(() => undefined)
+      .then(() => this.runAdminBuildingMutation(body));
+    this.adminMutationQueue = task.catch(() => undefined);
+    return task;
+  }
+
+  private async runAdminBuildingMutation(body: StoreRequest): Promise<{ status: number; body: unknown }> {
+    const routePath = asString(body.routePath);
+    const method = asString(body.method) || 'GET';
+    const url = asString(body.url) || `https://data.mcmik.top/admin/api${routePath}`;
+    const headers = new Headers();
+    const rawHeaders = body.headers;
+
+    if (rawHeaders && typeof rawHeaders === 'object' && !Array.isArray(rawHeaders)) {
+      for (const [key, value] of Object.entries(rawHeaders)) {
+        if (typeof value === 'string') {
+          headers.set(key, value);
+        }
+      }
+    }
+
+    const request = new Request(url, {
+      method,
+      headers,
+      body: method === 'GET' || method === 'HEAD' ? undefined : asString(body.requestBody),
+    });
+    const actor = adminActorFromStoreBody(body.actor);
+    return responseToStoreResult(await handleAdminBuildingsRouteDirect(routePath, request, this.env, actor));
   }
 
   private async createMinecraftChallenge(clientKey: string): Promise<{ status: number; body: unknown }> {
@@ -425,10 +488,11 @@ export class AuthStore implements DurableObject {
     if (record.status === 'pending' && shouldCheckPlugin(record.lastPluginCheckAt)) {
       const plugin = await this.fetchPluginChallenge(record.displayCode, false);
       const role = normalizeRole(plugin.player?.role);
-      if (plugin.status === 'confirmed' && plugin.player && role) {
+      const player = normalizePluginPlayer(plugin.player);
+      if (plugin.status === 'confirmed' && player && role) {
         record.status = 'confirmed';
-        record.confirmedPlayerUuid = asString(plugin.player.uuid);
-        record.confirmedPlayerName = asString(plugin.player.name);
+        record.confirmedPlayerUuid = player.uuid;
+        record.confirmedPlayerName = player.name;
         record.confirmedRole = role;
         record.confirmedAt = plugin.confirmedAt ?? new Date().toISOString();
       }
@@ -462,13 +526,14 @@ export class AuthStore implements DurableObject {
       return { status: 503, body: { error: 'plugin_unavailable' } };
     }
     const role = normalizeRole(plugin.player?.role);
-    if (plugin.status !== 'confirmed' || !plugin.player || !role) {
+    const player = normalizePluginPlayer(plugin.player);
+    if (plugin.status !== 'confirmed' || !player || !role) {
       return { status: 403, body: { error: 'member_required' } };
     }
 
     const account = await this.upsertAccount(
-      asString(plugin.player.uuid),
-      asString(plugin.player.name),
+      player.uuid,
+      player.name,
       role,
     );
     const session = await this.createSession(account.playerUuid, 'minecraft-challenge');
@@ -489,7 +554,7 @@ export class AuthStore implements DurableObject {
 
   private async logout(sessionId: string): Promise<{ status: number; body: unknown }> {
     const sidHash = await sha256(sessionId);
-    const session = await this.storage.get<SessionRecord>(sessionKey(sidHash));
+    const session = await this.readSessionByHash(sidHash);
     if (session) {
       session.revokedAt = new Date().toISOString();
       await Promise.all([
@@ -551,13 +616,7 @@ export class AuthStore implements DurableObject {
     }
 
     const webAuthn = webAuthnConfig(this.env);
-    const verification = await verifyRegistrationResponse({
-      response: credential as RegistrationResponseJSON,
-      expectedChallenge: challenge.challenge,
-      expectedOrigin: webAuthn.origins,
-      expectedRPID: webAuthn.rpID,
-      requireUserVerification: true,
-    });
+    const verification = await verifyPasskeyRegistration(credential, challenge.challenge, webAuthn);
 
     if (!verification.verified || !verification.registrationInfo) {
       return { status: 400, body: { error: 'passkey_verification_failed' } };
@@ -570,6 +629,12 @@ export class AuthStore implements DurableObject {
     }
 
     const { credential: verifiedCredential } = verification.registrationInfo;
+    const existingPasskey = await this.storage.get<PasskeyRecord>(passkeyKey(verifiedCredential.id));
+    if (existingPasskey) {
+      await this.storage.delete(webauthnChallengeKey(challenge.challenge));
+      return { status: 409, body: { error: 'passkey_already_registered' } };
+    }
+
     const record: PasskeyRecord = {
       credentialId: verifiedCredential.id,
       playerUuid: session.playerUuid,
@@ -633,19 +698,7 @@ export class AuthStore implements DurableObject {
     const challenge = await this.readWebauthnChallenge('passkey-authentication', credentialChallengeId(credential));
     if (!challenge) return { status: 400, body: { error: 'invalid_challenge' } };
     const webAuthn = webAuthnConfig(this.env);
-    const verification = await verifyAuthenticationResponse({
-      response,
-      expectedChallenge: challenge.challenge,
-      expectedOrigin: webAuthn.origins,
-      expectedRPID: webAuthn.rpID,
-      requireUserVerification: true,
-      credential: {
-        id: passkey.credentialId,
-        publicKey: base64urlToBuffer(passkey.publicKey),
-        counter: passkey.counter,
-        transports: passkey.transports,
-      } satisfies WebAuthnCredential,
-    });
+    const verification = await verifyPasskeyAuthentication(response, passkey, challenge.challenge, webAuthn);
 
     if (!verification.verified) return { status: 400, body: { error: 'passkey_verification_failed' } };
     const account = await this.readAccount(passkey.playerUuid);
@@ -704,7 +757,7 @@ export class AuthStore implements DurableObject {
     if (!currentSession) return { status: 401, body: { error: 'unauthenticated' } };
     if (!targetSessionId) return { status: 422, body: { error: 'invalid_session' } };
 
-    const targetSession = await this.storage.get<SessionRecord>(sessionKey(targetSessionId));
+    const targetSession = await this.readSessionByHash(targetSessionId);
     if (!targetSession || targetSession.playerUuid !== currentSession.playerUuid) {
       return { status: 404, body: { error: 'not_found' } };
     }
@@ -769,15 +822,18 @@ export class AuthStore implements DurableObject {
     const account = await this.readAccount(session.playerUuid);
     if (!account) return { status: 403, body: { error: 'member_required' } };
 
-    return responseToStoreResult(
-      await createPlayerBuildingSubmission(
-        new Request('https://auth-store.local/building-submissions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload ?? {}),
-        }),
-        this.env,
-        account,
+    return this.queuePlayerSubmission(
+      account.playerUuid,
+      async () => responseToStoreResult(
+        await createPlayerBuildingSubmission(
+          new Request('https://auth-store.local/building-submissions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload ?? {}),
+          }),
+          this.env,
+          account,
+        ),
       ),
     );
   }
@@ -845,8 +901,7 @@ export class AuthStore implements DurableObject {
   private async readValidSession(sessionId: string): Promise<SessionRecord | null> {
     if (!sessionId) return null;
     const sidHash = await sha256(sessionId);
-    let session = this.sessionCache.get(sidHash);
-    session ??= (await this.storage.get<SessionRecord>(sessionKey(sidHash))) ?? null;
+    const session = await this.readSessionByHash(sidHash);
     if (!session || session.revokedAt || isExpired(session.idleExpiresAt) || isExpired(session.absoluteExpiresAt)) {
       this.sessionCache.delete(sidHash);
       if (session) {
@@ -864,12 +919,23 @@ export class AuthStore implements DurableObject {
     return session;
   }
 
+  private async readSessionByHash(sidHash: string): Promise<SessionRecord | null> {
+    let session = this.sessionCache.get(sidHash);
+    session ??= (await this.storage.get<SessionRecord>(sessionKey(sidHash))) ?? null;
+
+    if (session) {
+      this.sessionCache.set(sidHash, session, sessionCacheTtlMs(session));
+    }
+
+    return session;
+  }
+
   private async listAccountSessions(playerUuid: string, currentSidHash: string): Promise<Record<string, unknown>[]> {
     const index = await this.storage.list<string>({ prefix: accountSessionPrefix(playerUuid) });
     const sessionEntries = await Promise.all(
       [...index.entries()].map(async ([indexKey, sidHash]) => ({
         indexKey,
-        session: await this.storage.get<SessionRecord>(sessionKey(sidHash)),
+        session: await this.readSessionByHash(sidHash),
       })),
     );
     const activeSessions: SessionRecord[] = [];
@@ -897,7 +963,7 @@ export class AuthStore implements DurableObject {
     }
 
     if (!activeSessions.some((session) => session.sidHash === currentSidHash)) {
-      const currentSession = await this.storage.get<SessionRecord>(sessionKey(currentSidHash));
+      const currentSession = await this.readSessionByHash(currentSidHash);
       if (currentSession && currentSession.playerUuid === playerUuid) {
         activeSessions.push(currentSession);
         await this.storage.put(accountSessionKey(playerUuid, currentSidHash), currentSidHash);
@@ -911,6 +977,20 @@ export class AuthStore implements DurableObject {
 
   private async deleteSessionIndex(session: SessionRecord): Promise<void> {
     await this.storage.delete(accountSessionKey(session.playerUuid, session.sidHash));
+  }
+
+  private queuePlayerSubmission<T>(playerUuid: string, task: () => Promise<T>): Promise<T> {
+    const key = playerUuid.toLowerCase();
+    const previous = this.submissionQueues.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(task);
+    const settled = next.catch(() => undefined);
+    this.submissionQueues.set(key, settled);
+    settled.finally(() => {
+      if (this.submissionQueues.get(key) === settled) {
+        this.submissionQueues.delete(key);
+      }
+    });
+    return next;
   }
 
   private async readAccount(playerUuid: string): Promise<AccountRecord | null> {
@@ -1108,6 +1188,18 @@ function authStore(env: Env): DurableObjectStub {
   return env.AUTH_STORE.get(id);
 }
 
+function adminActorFromStoreBody(value: unknown): { email?: string; subject?: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  const actor = value as Record<string, unknown>;
+  return {
+    email: optionalString(actor.email),
+    subject: optionalString(actor.subject),
+  };
+}
+
 async function callStore(
   store: DurableObjectStub,
   body: StoreRequest,
@@ -1131,9 +1223,76 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
-  const body = await request.json().catch(() => ({}));
-  return body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+async function readJsonObject(
+  request: Request,
+): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; response: Response }> {
+  let text: string;
+  try {
+    text = await readLimitedRequestText(request);
+  } catch (error) {
+    return {
+      ok: false,
+      response: authJson(
+        { error: error instanceof RequestBodyTooLargeError ? 'request_body_too_large' : 'invalid_request_body' },
+        error instanceof RequestBodyTooLargeError ? 413 : 400,
+      ),
+    };
+  }
+
+  if (!text.trim()) {
+    return { ok: true, data: {} };
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(text) as unknown;
+  } catch {
+    return { ok: false, response: authJson({ error: 'invalid_json_body' }, 400) };
+  }
+
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, response: authJson({ error: 'body_must_be_object' }, 400) };
+  }
+
+  return { ok: true, data: body as Record<string, unknown> };
+}
+
+class RequestBodyTooLargeError extends Error {}
+
+async function readLimitedRequestText(request: Request): Promise<string> {
+  const contentLength = request.headers.get('content-length');
+
+  if (contentLength && Number.parseInt(contentLength, 10) > MAX_AUTH_BODY_BYTES) {
+    throw new RequestBodyTooLargeError('request body too large');
+  }
+
+  if (!request.body) {
+    return '';
+  }
+
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+
+    if (done) {
+      break;
+    }
+
+    size += value.byteLength;
+    if (size > MAX_AUTH_BODY_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new RequestBodyTooLargeError('request body too large');
+    }
+
+    text += decoder.decode(value, { stream: true });
+  }
+
+  text += decoder.decode();
+  return text;
 }
 
 function isMikwebClientRequest(request: Request, env: Env): boolean {
@@ -1255,6 +1414,71 @@ function webAuthnConfig(env: Env): { rpID: string; origins: string[] } {
   return { rpID, origins: origins.length ? origins : [DEFAULT_WEBAUTHN_ORIGIN] };
 }
 
+async function verifyPasskeyRegistration(
+  credential: unknown,
+  expectedChallenge: string,
+  webAuthn: { rpID: string; origins: string[] },
+): ReturnType<typeof verifyRegistrationResponse> {
+  try {
+    return await verifyRegistrationResponse({
+      response: credential as RegistrationResponseJSON,
+      expectedChallenge,
+      expectedOrigin: webAuthn.origins,
+      expectedRPID: webAuthn.rpID,
+      requireUserVerification: true,
+    });
+  } catch {
+    return { verified: false };
+  }
+}
+
+async function verifyPasskeyAuthentication(
+  response: AuthenticationResponseJSON,
+  passkey: PasskeyRecord,
+  expectedChallenge: string,
+  webAuthn: { rpID: string; origins: string[] },
+): ReturnType<typeof verifyAuthenticationResponse> {
+  try {
+    return await verifyAuthenticationResponse({
+      response,
+      expectedChallenge,
+      expectedOrigin: webAuthn.origins,
+      expectedRPID: webAuthn.rpID,
+      requireUserVerification: true,
+      credential: {
+        id: passkey.credentialId,
+        publicKey: base64urlToBuffer(passkey.publicKey),
+        counter: passkey.counter,
+        transports: passkey.transports,
+      } satisfies WebAuthnCredential,
+    });
+  } catch {
+    return {
+      verified: false,
+      authenticationInfo: {
+        credentialID: passkey.credentialId,
+        newCounter: passkey.counter,
+        userVerified: false,
+        credentialDeviceType: 'singleDevice',
+        credentialBackedUp: false,
+        origin: webAuthn.origins[0] ?? DEFAULT_WEBAUTHN_ORIGIN,
+        rpID: webAuthn.rpID,
+      },
+    };
+  }
+}
+
+function normalizePluginPlayer(raw: PluginChallengeResponse['player']): { uuid: string; name: string } | null {
+  const uuid = asString(raw?.uuid).trim().toLowerCase();
+  const name = asString(raw?.name).trim();
+
+  if (!UUID_RE.test(uuid) || !name || name.length > 64) {
+    return null;
+  }
+
+  return { uuid, name };
+}
+
 function normalizeRole(raw: unknown): string {
   const role = asString(raw);
   return ALLOWED_ROLES.has(role) ? role : '';
@@ -1275,7 +1499,8 @@ function isExpired(value: string): boolean {
 function sessionCacheTtlMs(session: SessionRecord, now = Date.now()): number {
   const idleTtl = new Date(session.idleExpiresAt).getTime() - now;
   const absoluteTtl = new Date(session.absoluteExpiresAt).getTime() - now;
-  return Math.max(1, Math.min(idleTtl, absoluteTtl, SESSION_TOUCH_INTERVAL_SECONDS * 1000));
+  const ttl = Math.min(idleTtl, absoluteTtl, SESSION_TOUCH_INTERVAL_SECONDS * 1000);
+  return Number.isFinite(ttl) ? Math.max(1, ttl) : 1;
 }
 
 function createDisplayCode(): string {

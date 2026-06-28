@@ -1,4 +1,5 @@
 import type { Env } from './env';
+import { AUTH_STORE_NAME } from './constants';
 import { json } from './http';
 import { TtlMemoryCache } from './memory-cache';
 import type {
@@ -51,7 +52,6 @@ const INPUT_FIELDS = [
 ] as const;
 const VALID_FIELDS = new Set<string>(INPUT_FIELDS);
 const BUILDING_KEY_PREFIX = 'building:';
-const LEGACY_SUMMARY_KEY = '__summary__';
 const SUMMARY_KV_KEY = 'building-summary:v1';
 const BUILDINGS_CACHE_VERSION = 'v1';
 const SUMMARY_CACHE_KEY = `${BUILDINGS_CACHE_VERSION}:summary`;
@@ -68,11 +68,13 @@ const SUBMISSION_PLAYER_PENDING_INDEX_PREFIX = 'building-submission-player-pendi
 const SUBMISSION_STATUS_INDEX_PREFIX = 'building-submission-status:';
 const SUBMISSION_INDEX_READY_KEY = 'building-submission-indexes:v1';
 const SUBMISSION_STATUSES: BuildingSubmission['status'][] = ['pending', 'approved', 'rejected'];
-const IMGBB_IMAGE_RE = /^https:\/\/i\.ibb\.co\/[^/]+\/[^/?#]+$/;
+const IMGBB_IMAGE_RE = /^https:\/\/i\.ibb\.co\/[^/]+\/[^/?#]+\.webp$/i;
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const PUBLIC_CACHE_HEADERS = {
   'Cache-Control': 'public, max-age=300, stale-while-revalidate=600',
 } as const;
 const BUILDINGS_MEMORY_CACHE_TTL_MS = BUILDINGS_CACHE_TTL_SECONDS * 1000;
+const SUMMARY_MEMORY_CACHE_TTL_MS = 15 * 1000;
 const buildingMemoryCache = new TtlMemoryCache<Building>({
   defaultTtlMs: BUILDINGS_MEMORY_CACHE_TTL_MS,
   maxEntries: 512,
@@ -82,9 +84,16 @@ const buildingListMemoryCache = new TtlMemoryCache<unknown[]>({
   maxEntries: 128,
 });
 const summaryMemoryCache = new TtlMemoryCache<Building[]>({
-  defaultTtlMs: BUILDINGS_MEMORY_CACHE_TTL_MS,
+  defaultTtlMs: SUMMARY_MEMORY_CACHE_TTL_MS,
+  maxEntries: 32,
+});
+const submissionIndexReadyMemoryCache = new TtlMemoryCache<boolean>({
+  defaultTtlMs: 5 * 60 * 1000,
   maxEntries: 1,
 });
+const memoryCacheScopes = new WeakMap<object, string>();
+const summaryUpdateQueues = new WeakMap<object, Promise<unknown>>();
+let nextMemoryCacheScope = 0;
 
 export async function handlePublicBuildingsRoute(
   routePath: string,
@@ -120,30 +129,29 @@ export async function handleAdminBuildingsRoute(
   env: Env,
   actor: AdminActor,
 ): Promise<Response | null> {
-  if (
-    routePath !== '/buildings' &&
-    routePath !== '/buildings/import' &&
-    routePath !== '/building-submissions' &&
-    routePath !== '/building-submissions/repair-approved'
-  ) {
-    const match = routePath.match(/^\/buildings\/([a-z0-9]{8,24})$/i);
-    const submissionEditMatch = routePath.match(/^\/building-submissions\/([a-z0-9]{8,24})$/i);
-    const submissionMatch = routePath.match(
-      /^\/building-submissions\/([a-z0-9]{8,24})\/(approve|reject)$/i,
-    );
-
-    if (!match && !submissionEditMatch && !submissionMatch) {
-      return null;
-    }
+  if (!isAdminBuildingsRoute(routePath)) {
+    return null;
   }
 
-  const mutatingMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-
-  if (mutatingMethods.has(request.method)) {
+  if (MUTATING_METHODS.has(request.method)) {
     const authError = authorizeMutation(request, env);
     if (authError) {
       return authError;
     }
+    return coordinateAdminBuildingMutation(routePath, request, env, actor);
+  }
+
+  return handleAdminBuildingsRouteDirect(routePath, request, env, actor);
+}
+
+export async function handleAdminBuildingsRouteDirect(
+  routePath: string,
+  request: Request,
+  env: Env,
+  actor: AdminActor,
+): Promise<Response> {
+  if (!isAdminBuildingsRoute(routePath)) {
+    return error('not found', 404, request, env);
   }
 
   if (isSubmissionRoute(routePath)) {
@@ -151,8 +159,8 @@ export async function handleAdminBuildingsRoute(
   }
 
   const response = await handleAdminKvBuildingsRoute(routePath, request, env);
-  if (response.ok && isMutatingMethod(request.method)) {
-    await syncBuildingCachesAfterMutation(routePath, request.method, env, response.clone());
+  if (response.ok && MUTATING_METHODS.has(request.method)) {
+    await cacheMutationResponseBuildings(response.clone(), env);
   }
   return response;
 }
@@ -228,7 +236,7 @@ async function handleSubmissionRoute(routePath: string, request: Request, env: E
 async function handleAdminKvBuildingsRoute(routePath: string, request: Request, env: Env): Promise<Response> {
   if (routePath === '/buildings') {
     if (request.method === 'GET') {
-      const buildings = await readSummaryKvOrRebuild(env);
+      const buildings = await readBuildingsMutationSnapshot(env);
       return json(buildings, 200, request, env);
     }
     if (request.method === 'POST') {
@@ -271,7 +279,7 @@ async function listBuildings(request: Request, env: Env): Promise<Response> {
 
   const buildings = await readBuildingsSummary(env);
   const cacheKey = buildingListCacheKey(request, buildings);
-  const cached = await readBuildingListCache(cacheKey);
+  const cached = await readBuildingListCache(env, cacheKey);
 
   if (cached) {
     return json(cached, 200, request, env, PUBLIC_CACHE_HEADERS);
@@ -298,12 +306,12 @@ async function listBuildings(request: Request, env: Env): Promise<Response> {
   result.sort((a, b) => b.buildDate.localeCompare(a.buildDate));
 
   const body = locale ? result.map((building) => localizeBuilding(building, locale)) : result;
-  await writeBuildingListCache(cacheKey, body);
+  await writeBuildingListCache(env, cacheKey, body);
   return json(body, 200, request, env, PUBLIC_CACHE_HEADERS);
 }
 
 async function getBuilding(id: string, request: Request, env: Env): Promise<Response> {
-  const cached = await readCachedBuilding(id);
+  const cached = await readCachedBuilding(env, id);
 
   if (cached) {
     return json(cached, 200, request, env, PUBLIC_CACHE_HEADERS);
@@ -316,7 +324,7 @@ async function getBuilding(id: string, request: Request, env: Env): Promise<Resp
     return error('building not found', 404, request, env);
   }
 
-  await writeBuildingCache(building);
+  await writeBuildingCache(env, building);
   return json(building, 200, request, env, PUBLIC_CACHE_HEADERS);
 }
 
@@ -351,7 +359,7 @@ async function createBuilding(
   };
 
   await writeBuilding(env, building);
-  await rebuildBuildingsSummary(env);
+  await upsertBuildingSummary(env, building);
   auditBuildingMutation('create', building.id, request);
 
   return json(building, 201, request, env);
@@ -385,6 +393,10 @@ async function replaceBuilding(
   if (!previous) {
     return error('building record is corrupt', 500, request, env);
   }
+  const versionConflict = expectedUpdatedAtConflict(request, previous.updatedAt);
+  if (versionConflict) {
+    return error('building has changed, refresh before saving', 409, request, env);
+  }
 
   const building: Building = {
     id,
@@ -394,7 +406,7 @@ async function replaceBuilding(
   };
 
   await writeBuilding(env, building);
-  await rebuildBuildingsSummary(env);
+  await upsertBuildingSummary(env, building);
   auditBuildingMutation('replace', id, request);
   return json(building, 200, request, env);
 }
@@ -433,6 +445,10 @@ async function patchBuilding(
   if (!previous) {
     return error('building record is corrupt', 500, request, env);
   }
+  const versionConflict = expectedUpdatedAtConflict(request, previous.updatedAt);
+  if (versionConflict) {
+    return error('building has changed, refresh before saving', 409, request, env);
+  }
 
   const merged: Record<string, unknown> = { ...previous };
 
@@ -467,7 +483,7 @@ async function patchBuilding(
   };
 
   await writeBuilding(env, building);
-  await rebuildBuildingsSummary(env);
+  await upsertBuildingSummary(env, building);
   auditBuildingMutation('patch', id, request);
   return json(building, 200, request, env);
 }
@@ -477,12 +493,22 @@ async function deleteBuilding(
   request: Request,
   env: Env,
 ): Promise<Response> {
-  if (!(await buildingsKv(env).get(buildingKey(id)))) {
+  const raw = await buildingsKv(env).get(buildingKey(id));
+  if (!raw) {
     return error('building not found', 404, request, env);
+  }
+  const building = parseBuilding(raw, id);
+  if (!building) {
+    return error('building record is corrupt', 500, request, env);
+  }
+  const versionConflict = expectedUpdatedAtConflict(request, building.updatedAt);
+  if (versionConflict) {
+    return error('building has changed, refresh before deleting', 409, request, env);
   }
 
   await buildingsKv(env).delete(buildingKey(id));
-  await rebuildBuildingsSummary(env);
+  await removeBuildingFromSummary(env, id);
+  await deleteBuildingCache(env, id);
   auditBuildingMutation('delete', id, request);
 
   return json({ deleted: id }, 200, request, env);
@@ -504,7 +530,7 @@ async function importBuildings(
     return error(validation.message, 422, request, env);
   }
 
-  const existing = await readAllBuildings(env);
+  const existing = await readBuildingsMutationSnapshot(env);
   const duplicate = findDuplicateInput(validation.value, existing);
 
   if (duplicate) {
@@ -524,7 +550,7 @@ async function importBuildings(
   }
 
   await Promise.all(buildings.map((building) => writeBuilding(env, building)));
-  await rebuildBuildingsSummary(env);
+  await upsertBuildingsSummary(env, buildings);
 
   for (const building of buildings) {
     auditBuildingMutation('import', building.id, request);
@@ -624,8 +650,10 @@ async function listSubmissions(
   env: Env,
 ): Promise<Response> {
   await ensureSubmissionIndexes(env);
+  const statusFilter = parseSubmissionStatus(new URL(request.url).searchParams.get('status'));
+  const statuses = statusFilter ? [statusFilter] : SUBMISSION_STATUSES;
   const statusKeys = await Promise.all(
-    SUBMISSION_STATUSES.map(async (status) => ({
+    statuses.map(async (status) => ({
       status,
       keys: await listKvKeys(env, submissionStatusPrefix(status)),
     })),
@@ -672,16 +700,23 @@ async function approveSubmission(
   if (submission.status !== 'pending') {
     return error('submission is not pending', 409, request, env);
   }
+  const versionConflict = expectedUpdatedAtConflict(request, submission.updatedAt);
+  if (versionConflict) {
+    return error('submission has changed, refresh before reviewing', 409, request, env);
+  }
 
-  const body = await readJsonBodyObject(request);
+  const body = await readJsonObjectBody(request, env);
+  if (!body.ok) {
+    return body.response;
+  }
   let payload = submission.payload;
   let images = submission.images;
-  if (body.payload !== undefined || body.images !== undefined) {
-    const validation = validateBuildingInput(body.payload ?? submission.payload);
+  if (body.data.payload !== undefined || body.data.images !== undefined) {
+    const validation = validateBuildingInput(body.data.payload ?? submission.payload);
     if (!validation.ok) {
       return error(validation.message, 422, request, env);
     }
-    const imageValidation = validateSubmissionImages(body.images ?? submission.images, validation.value.images);
+    const imageValidation = validateSubmissionImages(body.data.images ?? submission.images, validation.value.images);
     if (!imageValidation.ok) {
       return error(imageValidation.message, 422, request, env);
     }
@@ -707,7 +742,7 @@ async function approveSubmission(
 
   submission.status = 'approved';
   submission.reviewer = adminActorLabel(request);
-  submission.reviewNote = optionalReviewNote(body.reviewNote);
+  submission.reviewNote = optionalReviewNote(body.data.reviewNote);
   submission.payload = payload;
   submission.images = images;
   submission.buildingId = building.id;
@@ -715,8 +750,8 @@ async function approveSubmission(
 
   await writeBuilding(env, building);
   await deleteSubmission(env, submission);
-  await rebuildBuildingsSummary(env);
-  await writeBuildingCache(building);
+  await upsertBuildingSummary(env, building);
+  await writeBuildingCache(env, building);
   auditBuildingMutation('approve-submission', building.id, request);
   return json({ submission, building }, 200, request, env);
 }
@@ -821,7 +856,7 @@ async function repairApprovedSubmissions(
   }
 
   await rebuildBuildingsSummary(env);
-  await Promise.all(changedBuildings.map(writeBuildingCache));
+  await Promise.all(changedBuildings.map((building) => writeBuildingCache(env, building)));
 
   return json(
     {
@@ -853,14 +888,21 @@ async function updateSubmission(
   if (submission.status !== 'pending') {
     return error('submission is not pending', 409, request, env);
   }
+  const versionConflict = expectedUpdatedAtConflict(request, submission.updatedAt);
+  if (versionConflict) {
+    return error('submission has changed, refresh before saving', 409, request, env);
+  }
 
-  const body = await readJsonBodyObject(request);
-  const validation = validateBuildingInput(body.payload);
+  const body = await readJsonObjectBody(request, env);
+  if (!body.ok) {
+    return body.response;
+  }
+  const validation = validateBuildingInput(body.data.payload);
   if (!validation.ok) {
     return error(validation.message, 422, request, env);
   }
 
-  const images = validateSubmissionImages(body.images, validation.value.images);
+  const images = validateSubmissionImages(body.data.images, validation.value.images);
   if (!images.ok) {
     return error(images.message, 422, request, env);
   }
@@ -872,7 +914,7 @@ async function updateSubmission(
   submission.payload = validation.value;
   submission.images = images.value;
   submission.reviewer = adminActorLabel(request);
-  submission.reviewNote = optionalReviewNote(body.reviewNote);
+  submission.reviewNote = optionalReviewNote(body.data.reviewNote);
   submission.updatedAt = new Date().toISOString();
   await writeSubmission(env, submission);
   return json({ submission }, 200, request, env);
@@ -890,9 +932,16 @@ async function rejectSubmission(
   if (submission.status !== 'pending') {
     return error('submission is not pending', 409, request, env);
   }
+  const versionConflict = expectedUpdatedAtConflict(request, submission.updatedAt);
+  if (versionConflict) {
+    return error('submission has changed, refresh before reviewing', 409, request, env);
+  }
 
-  const body = await readJsonBodyObject(request);
-  const note = optionalReviewNote(body.reviewNote);
+  const body = await readJsonObjectBody(request, env);
+  if (!body.ok) {
+    return body.response;
+  }
+  const note = optionalReviewNote(body.data.reviewNote);
   if (!note) {
     return error('reviewNote is required', 422, request, env);
   }
@@ -921,32 +970,52 @@ async function readBody(
     };
   }
 
-  const contentLength = request.headers.get('content-length');
-
-  if (contentLength && Number.parseInt(contentLength, 10) > MAX_BODY_BYTES) {
-    return { ok: false, response: error('request body too large', 413, request, env) };
-  }
-
   try {
-    const text = await request.text();
-
-    if (text.length > MAX_BODY_BYTES) {
-      return { ok: false, response: error('request body too large', 413, request, env) };
+    const text = await readLimitedRequestText(request, env);
+    if (!text.ok) {
+      return text;
     }
 
-    return { ok: true, data: JSON.parse(text) };
+    return { ok: true, data: JSON.parse(text.text) };
   } catch {
     return { ok: false, response: error('invalid JSON body', 400, request, env) };
   }
 }
 
-async function readJsonBodyObject(request: Request): Promise<Record<string, unknown>> {
-  const contentType = request.headers.get('content-type') ?? '';
-  if (!contentType.toLowerCase().includes('application/json')) {
-    return {};
+async function readJsonObjectBody(
+  request: Request,
+  env: Env,
+): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; response: Response }> {
+  const text = await readLimitedRequestText(request, env);
+  if (!text.ok) {
+    return text;
   }
-  const body = await request.json().catch(() => ({}));
-  return body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+
+  if (!text.text.trim()) {
+    return { ok: true, data: {} };
+  }
+
+  const contentType = request.headers.get('content-type') ?? '';
+
+  if (!contentType.toLowerCase().includes('application/json')) {
+    return {
+      ok: false,
+      response: error('content-type must be application/json', 415, request, env),
+    };
+  }
+
+  let data: unknown;
+  try {
+    data = JSON.parse(text.text);
+  } catch {
+    return { ok: false, response: error('invalid JSON body', 400, request, env) };
+  }
+
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, response: error('body must be a JSON object', 400, request, env) };
+  }
+
+  return { ok: true, data: data as Record<string, unknown> };
 }
 
 function validateSubmissionImages(
@@ -970,7 +1039,14 @@ function validateSubmissionImages(
     if (value.url !== urls[index] || typeof value.url !== 'string' || !IMGBB_IMAGE_RE.test(value.url)) {
       return { ok: false, message: `images[${index}].url must be an uploaded image URL` };
     }
-    if (!Number.isFinite(value.width) || !Number.isFinite(value.height) || !Number.isFinite(value.size)) {
+    if (
+      !Number.isFinite(value.width) ||
+      !Number.isFinite(value.height) ||
+      !Number.isFinite(value.size) ||
+      (value.width as number) <= 0 ||
+      (value.height as number) <= 0 ||
+      (value.size as number) <= 0
+    ) {
       return { ok: false, message: `images[${index}] dimensions and size are required` };
     }
     if (typeof value.mime !== 'string' || value.mime !== 'image/webp') {
@@ -1023,7 +1099,30 @@ async function listPlayerSubmissions(
 
 async function countPlayerPendingSubmissions(env: Env, playerUuid: string): Promise<number> {
   await ensureSubmissionIndexes(env);
-  return (await listPlayerSubmissions(env, playerUuid.toLowerCase(), 'pending')).length;
+  const prefix = playerPendingSubmissionPrefix(playerUuid.toLowerCase());
+  const keys = await listKvKeys(env, prefix);
+
+  if (keys.length < MAX_PENDING_SUBMISSIONS_PER_PLAYER) {
+    return keys.length;
+  }
+
+  const submissions = await Promise.all(
+    keys.map(async (key) => {
+      const submission = await readSubmission(
+        env,
+        key.slice(prefix.length),
+      );
+
+      if (!submission || submission.status !== 'pending') {
+        await buildingsKv(env).delete(key);
+        return null;
+      }
+
+      return submission;
+    }),
+  );
+
+  return submissions.filter(Boolean).length;
 }
 
 async function createSubmissionId(env: Env): Promise<string> {
@@ -1042,6 +1141,11 @@ function optionalReviewNote(value: unknown): string | undefined {
   }
   const note = value.trim();
   return note ? note.slice(0, MAX_SUBMISSION_REVIEW_NOTE_LEN) : undefined;
+}
+
+function expectedUpdatedAtConflict(request: Request, currentUpdatedAt: string): boolean {
+  const expected = request.headers.get('X-Expected-Updated-At')?.trim();
+  return !!expected && expected !== currentUpdatedAt;
 }
 
 function adminActorLabel(request: Request): string {
@@ -1363,29 +1467,23 @@ async function readAllBuildings(env: Env): Promise<Building[]> {
 }
 
 async function readBuildingsSummary(env: Env): Promise<Building[]> {
-  const memorySummary = summaryMemoryCache.get(SUMMARY_CACHE_KEY);
+  const memorySummary = summaryMemoryCache.get(summaryMemoryKey(env));
 
   if (memorySummary) {
     return memorySummary;
   }
 
-  const cached = await readCachedSummary();
-
-  if (cached) {
-    return cached;
-  }
-
   const snapshot = await readSummaryFromKv(env);
 
   if (snapshot) {
-    await writeSummaryCache(snapshot);
+    await writeSummaryCache(env, snapshot);
     return snapshot;
   }
 
   const buildings = await readAllBuildings(env);
   buildings.sort(compareBuildingsForSummary);
   await writeSummaryKv(env, buildings);
-  await writeSummaryCache(buildings);
+  await writeSummaryCache(env, buildings);
   return buildings;
 }
 
@@ -1393,18 +1491,44 @@ async function rebuildBuildingsSummary(env: Env): Promise<Building[]> {
   const buildings = await readAllBuildings(env);
   buildings.sort(compareBuildingsForSummary);
   await writeSummaryKv(env, buildings);
-  await writeSummaryCache(buildings);
+  await writeSummaryCache(env, buildings);
   return buildings;
 }
 
-async function readSummaryKvOrRebuild(env: Env): Promise<Building[]> {
-  const stored = await readSummaryFromKv(env);
+async function upsertBuildingSummary(env: Env, building: Building): Promise<Building[]> {
+  return upsertBuildingsSummary(env, [building]);
+}
 
-  if (stored) {
-    return stored;
-  }
+async function upsertBuildingsSummary(env: Env, buildings: Building[]): Promise<Building[]> {
+  return updateBuildingsSummary(env, (current) => {
+    const byId = new Map(current.map((building) => [building.id, building]));
+    for (const building of buildings) {
+      byId.set(building.id, building);
+    }
+    return [...byId.values()];
+  });
+}
 
-  return rebuildBuildingsSummary(env);
+async function removeBuildingFromSummary(env: Env, id: string): Promise<Building[]> {
+  return updateBuildingsSummary(env, (current) => current.filter((building) => building.id !== id));
+}
+
+async function updateBuildingsSummary(
+  env: Env,
+  update: (buildings: Building[]) => Building[],
+): Promise<Building[]> {
+  return queueSummaryUpdate(env, async () => {
+    const current = await readBuildingsMutationSnapshot(env);
+    const buildings = update([...current]);
+    buildings.sort(compareBuildingsForSummary);
+    await writeSummaryKv(env, buildings);
+    await writeSummaryCache(env, buildings);
+    return buildings;
+  });
+}
+
+async function readBuildingsMutationSnapshot(env: Env): Promise<Building[]> {
+  return await readSummaryFromKv(env) ?? await rebuildBuildingsSummary(env);
 }
 
 async function readSummaryFromKv(env: Env): Promise<Building[] | null> {
@@ -1418,28 +1542,7 @@ async function readSummaryFromKv(env: Env): Promise<Building[] | null> {
     }
   }
 
-  const legacy = await readLegacySummary(env);
-  if (legacy) {
-    await writeSummaryKv(env, legacy);
-    return legacy;
-  }
-
   return null;
-}
-
-async function readLegacySummary(env: Env): Promise<Building[] | null> {
-  const raw = await buildingsKv(env).get(LEGACY_SUMMARY_KEY);
-
-  if (!raw) {
-    return null;
-  }
-
-  try {
-    return normalizeSummary(JSON.parse(raw) as unknown);
-  } catch (error) {
-    console.warn('Legacy building summary is corrupt', error);
-    return null;
-  }
 }
 
 async function writeSummaryKv(env: Env, buildings: Building[]): Promise<void> {
@@ -1468,7 +1571,11 @@ function parseBuilding(raw: string, id: string): Building | null {
       throw new Error('record is not an object');
     }
 
-    return building as Building;
+    if (!isBuildingDocument(building) || building.id !== id) {
+      throw new Error('record does not match current building schema');
+    }
+
+    return building;
   } catch (error) {
     console.warn('Skipping corrupt building record', id, error);
     return null;
@@ -1488,7 +1595,16 @@ function isBuildingDocument(building: unknown): building is Building {
     return false;
   }
 
-  return typeof building.id === 'string' && isValidBuildingId(building.id);
+  const record = building as Partial<Building>;
+  return (
+    typeof record.id === 'string' &&
+    isValidBuildingId(record.id) &&
+    typeof record.createdAt === 'string' &&
+    !Number.isNaN(Date.parse(record.createdAt)) &&
+    typeof record.updatedAt === 'string' &&
+    !Number.isNaN(Date.parse(record.updatedAt)) &&
+    validateBuildingInput(stripStoredBuildingFields(building)).ok
+  );
 }
 
 function isBuildingSubmission(value: unknown): value is BuildingSubmission {
@@ -1510,7 +1626,7 @@ function isBuildingSubmission(value: unknown): value is BuildingSubmission {
 }
 
 async function findDuplicateBuildingId(env: Env, input: Input): Promise<string | null> {
-  return findDuplicateBuildingIdInList(await readAllBuildings(env), input);
+  return findDuplicateBuildingIdInList(await readBuildingsMutationSnapshot(env), input);
 }
 
 function findDuplicateBuildingIdInList(buildings: (Input | Building)[], input: Input): string | null {
@@ -1705,7 +1821,14 @@ function writeSubmissionIndexes(
 }
 
 async function ensureSubmissionIndexes(env: Env): Promise<void> {
+  const readyMemoryKey = submissionIndexReadyMemoryKey(env);
+
+  if (submissionIndexReadyMemoryCache.get(readyMemoryKey)) {
+    return;
+  }
+
   if ((await buildingsKv(env).get(SUBMISSION_INDEX_READY_KEY)) === 'ready') {
+    submissionIndexReadyMemoryCache.set(readyMemoryKey, true);
     return;
   }
 
@@ -1738,6 +1861,7 @@ async function ensureSubmissionIndexes(env: Env): Promise<void> {
     }),
   );
   await buildingsKv(env).put(SUBMISSION_INDEX_READY_KEY, 'ready');
+  submissionIndexReadyMemoryCache.set(readyMemoryKey, true);
 }
 
 function deleteSubmission(env: Env, submission: BuildingSubmission): Promise<void[]> {
@@ -1777,6 +1901,10 @@ function rejectedSubmissionExpiresAt(submission: BuildingSubmission): number {
   );
 }
 
+function parseSubmissionStatus(value: string | null): BuildingSubmission['status'] | null {
+  return value === 'pending' || value === 'approved' || value === 'rejected' ? value : null;
+}
+
 function addRetentionDays(value: string | undefined): string {
   const timestamp = Date.parse(value ?? '');
   if (!Number.isFinite(timestamp)) {
@@ -1798,26 +1926,13 @@ async function listKvKeys(env: Env, prefix: string): Promise<string[]> {
   return keys;
 }
 
-async function readCachedSummary(): Promise<Building[] | null> {
-  const cached = await readJsonCache(SUMMARY_CACHE_KEY);
-
-  if (!Array.isArray(cached)) {
-    return null;
-  }
-
-  const buildings = cached.filter(isBuildingDocument);
-  summaryMemoryCache.set(SUMMARY_CACHE_KEY, buildings);
-  return buildings;
+async function writeSummaryCache(env: Env, buildings: Building[]): Promise<void> {
+  summaryMemoryCache.set(summaryMemoryKey(env), buildings);
+  buildingListMemoryCache.deletePrefix(buildingListMemoryPrefix(env));
 }
 
-async function writeSummaryCache(buildings: Building[]): Promise<void> {
-  summaryMemoryCache.set(SUMMARY_CACHE_KEY, buildings);
-  buildingListMemoryCache.clear();
-  await writeJsonCache(SUMMARY_CACHE_KEY, buildings);
-}
-
-async function readCachedBuilding(id: string): Promise<Building | null> {
-  const memoryBuilding = buildingMemoryCache.get(id);
+async function readCachedBuilding(env: Env, id: string): Promise<Building | null> {
+  const memoryBuilding = buildingMemoryCache.get(buildingMemoryKey(env, id));
 
   if (memoryBuilding) {
     return memoryBuilding;
@@ -1829,17 +1944,18 @@ async function readCachedBuilding(id: string): Promise<Building | null> {
     return null;
   }
 
-  buildingMemoryCache.set(id, cached);
+  buildingMemoryCache.set(buildingMemoryKey(env, id), cached);
   return cached;
 }
 
-async function writeBuildingCache(building: Building): Promise<void> {
-  buildingMemoryCache.set(building.id, building);
+async function writeBuildingCache(env: Env, building: Building): Promise<void> {
+  buildingMemoryCache.set(buildingMemoryKey(env, building.id), building);
   await writeJsonCache(buildingCacheKey(building.id), building);
 }
 
-async function readBuildingListCache(cacheKey: string): Promise<unknown[] | null> {
-  const memoryList = buildingListMemoryCache.get(cacheKey);
+async function readBuildingListCache(env: Env, cacheKey: string): Promise<unknown[] | null> {
+  const memoryKey = buildingListMemoryKey(env, cacheKey);
+  const memoryList = buildingListMemoryCache.get(memoryKey);
 
   if (memoryList) {
     return memoryList;
@@ -1851,17 +1967,17 @@ async function readBuildingListCache(cacheKey: string): Promise<unknown[] | null
     return null;
   }
 
-  buildingListMemoryCache.set(cacheKey, cached);
+  buildingListMemoryCache.set(memoryKey, cached);
   return cached;
 }
 
-async function writeBuildingListCache(cacheKey: string, body: unknown[]): Promise<void> {
-  buildingListMemoryCache.set(cacheKey, body);
+async function writeBuildingListCache(env: Env, cacheKey: string, body: unknown[]): Promise<void> {
+  buildingListMemoryCache.set(buildingListMemoryKey(env, cacheKey), body);
   await writeJsonCache(cacheKey, body);
 }
 
-async function deleteBuildingCache(id: string): Promise<void> {
-  buildingMemoryCache.delete(id);
+async function deleteBuildingCache(env: Env, id: string): Promise<void> {
+  buildingMemoryCache.delete(buildingMemoryKey(env, id));
   const cache = getWorkerCache();
 
   if (!cache) {
@@ -1938,15 +2054,16 @@ function buildingListCacheKey(request: Request, buildings: Building[]): string {
 }
 
 function buildingsSummaryVersion(buildings: Building[]): string {
-  let latest = '';
+  let hash = 5381;
 
   for (const building of buildings) {
-    if (building.updatedAt > latest) {
-      latest = building.updatedAt;
+    const part = `${building.id}:${building.updatedAt};`;
+    for (let index = 0; index < part.length; index += 1) {
+      hash = ((hash << 5) + hash + part.charCodeAt(index)) >>> 0;
     }
   }
 
-  return `${buildings.length}:${latest}`;
+  return `${buildings.length}:${hash.toString(36)}`;
 }
 
 function canonicalBuildingListQuery(request: Request): string {
@@ -1967,12 +2084,137 @@ function getWorkerCache(): Cache | null {
   return typeof caches === 'undefined' ? null : caches.default;
 }
 
+function summaryMemoryKey(env: Env): string {
+  return `${memoryCacheScope(env)}:${SUMMARY_CACHE_KEY}`;
+}
+
+function buildingMemoryKey(env: Env, id: string): string {
+  return `${memoryCacheScope(env)}:${id}`;
+}
+
+function buildingListMemoryKey(env: Env, cacheKey: string): string {
+  return `${memoryCacheScope(env)}:${cacheKey}`;
+}
+
+function buildingListMemoryPrefix(env: Env): string {
+  return `${memoryCacheScope(env)}:${BUILDINGS_CACHE_VERSION}:building-list:`;
+}
+
+function submissionIndexReadyMemoryKey(env: Env): string {
+  return `${memoryCacheScope(env)}:${SUBMISSION_INDEX_READY_KEY}`;
+}
+
+function queueSummaryUpdate<T>(env: Env, task: () => Promise<T>): Promise<T> {
+  const kv = buildingsKv(env) as object;
+  const previous = summaryUpdateQueues.get(kv) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(task);
+  summaryUpdateQueues.set(kv, next.catch(() => undefined));
+  return next;
+}
+
+function memoryCacheScope(env: Env): string {
+  const kv = buildingsKv(env) as object;
+  const existing = memoryCacheScopes.get(kv);
+
+  if (existing) {
+    return existing;
+  }
+
+  const scope = `kv${nextMemoryCacheScope++}`;
+  memoryCacheScopes.set(kv, scope);
+  return scope;
+}
+
 function isValidBuildingId(id: string): boolean {
   return ID_RE.test(id);
 }
 
 function methodNotAllowed(request: Request, env: Env): Response {
   return error('method not allowed', 405, request, env);
+}
+
+async function coordinateAdminBuildingMutation(
+  routePath: string,
+  request: Request,
+  env: Env,
+  actor: AdminActor,
+): Promise<Response> {
+  const requestBody = await readLimitedRequestText(request, env);
+
+  if (!requestBody.ok) {
+    return requestBody.response;
+  }
+
+  const response = await env.AUTH_STORE.get(env.AUTH_STORE.idFromName(AUTH_STORE_NAME)).fetch('https://auth-store.local/', {
+    method: 'POST',
+    body: JSON.stringify({
+      action: 'adminBuildingMutation',
+      routePath,
+      method: request.method,
+      url: request.url,
+      headers: adminMutationHeaders(request),
+      requestBody: requestBody.text,
+      actor,
+    }),
+  });
+  const result = (await response.json().catch(() => ({}))) as { status?: unknown; body?: unknown };
+  const status = typeof result.status === 'number' ? result.status : 500;
+  if (status >= 200 && status < 300) {
+    await refreshFrontCacheAfterAdminMutation(routePath, result.body, env);
+  }
+  return json(result.body ?? { error: 'internal_error' }, status, request, env);
+}
+
+async function readLimitedRequestText(
+  request: Request,
+  env: Env,
+): Promise<{ ok: true; text: string } | { ok: false; response: Response }> {
+  const contentLength = request.headers.get('content-length');
+
+  if (contentLength && Number.parseInt(contentLength, 10) > MAX_BODY_BYTES) {
+    return { ok: false, response: error('request body too large', 413, request, env) };
+  }
+
+  if (!request.body) {
+    return { ok: true, text: '' };
+  }
+
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+
+    if (done) {
+      break;
+    }
+
+    size += value.byteLength;
+    if (size > MAX_BODY_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      return { ok: false, response: error('request body too large', 413, request, env) };
+    }
+
+    text += decoder.decode(value, { stream: true });
+  }
+
+  text += decoder.decode();
+  return { ok: true, text };
+}
+
+function adminMutationHeaders(request: Request): Record<string, string> {
+  const headers: Record<string, string> = {};
+
+  for (const name of ['Content-Type', 'Origin', 'Sec-Fetch-Site', 'X-Expected-Updated-At']) {
+    const value = request.headers.get(name);
+    if (value) {
+      headers[name] = value;
+    }
+  }
+
+  return headers;
 }
 
 function authorizeMutation(request: Request, env: Env): Response | null {
@@ -1998,6 +2240,45 @@ function isSameOriginBrowserRequest(request: Request): boolean {
   }
 
   return true;
+}
+
+async function refreshFrontCacheAfterAdminMutation(routePath: string, body: unknown, env: Env): Promise<void> {
+  try {
+    await deleteMutationBodyBuildingCache(body, env);
+    await cacheMutationBodyBuildings(body, env);
+
+    if (!mutationChangesBuildingSummary(routePath)) {
+      return;
+    }
+
+    const summary = await readSummaryFromKv(env);
+    if (summary) {
+      await writeSummaryCache(env, summary);
+    }
+  } catch (error) {
+    console.warn('Front building cache refresh failed', error);
+  }
+}
+
+async function deleteMutationBodyBuildingCache(body: unknown, env: Env): Promise<void> {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return;
+  }
+
+  const deleted = (body as Record<string, unknown>).deleted;
+  if (typeof deleted === 'string' && isValidBuildingId(deleted)) {
+    await deleteBuildingCache(env, deleted);
+  }
+}
+
+function mutationChangesBuildingSummary(routePath: string): boolean {
+  return (
+    routePath === '/buildings' ||
+    routePath === '/buildings/import' ||
+    routePath === '/building-submissions/repair-approved' ||
+    /^\/buildings\/[a-z0-9]{8,24}$/i.test(routePath) ||
+    /^\/building-submissions\/[a-z0-9]{8,24}\/approve$/i.test(routePath)
+  );
 }
 
 function error(message: string, status: number, request: Request, env: Env): Response {
@@ -2028,34 +2309,18 @@ function isSubmissionRoute(routePath: string): boolean {
   );
 }
 
-function isMutatingMethod(method: string): boolean {
-  return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+function isAdminBuildingsRoute(routePath: string): boolean {
+  return (
+    routePath === '/buildings' ||
+    routePath === '/buildings/import' ||
+    routePath === '/building-submissions' ||
+    routePath === '/building-submissions/repair-approved' ||
+    /^\/buildings\/[a-z0-9]{8,24}$/i.test(routePath) ||
+    /^\/building-submissions\/[a-z0-9]{8,24}(?:\/(?:approve|reject))?$/i.test(routePath)
+  );
 }
 
-async function syncBuildingCachesAfterMutation(
-  routePath: string,
-  method: string,
-  env: Env,
-  response: Response,
-): Promise<void> {
-  if (method === 'DELETE') {
-    const match = routePath.match(/^\/buildings\/([a-z0-9]{8,24})$/i);
-
-    if (match) {
-      await deleteBuildingCache(match[1]);
-    }
-  } else {
-    await cacheMutationResponseBuildings(response);
-  }
-
-  const summary = await readSummaryFromKv(env);
-
-  if (summary) {
-    await writeSummaryCache(summary);
-  }
-}
-
-async function cacheMutationResponseBuildings(response: Response): Promise<void> {
+async function cacheMutationResponseBuildings(response: Response, env: Env): Promise<void> {
   const contentType = response.headers.get('Content-Type') ?? '';
 
   if (!contentType.toLowerCase().includes('application/json')) {
@@ -2064,23 +2329,31 @@ async function cacheMutationResponseBuildings(response: Response): Promise<void>
 
   try {
     const body = (await response.json()) as unknown;
-
-    if (isBuildingDocument(body)) {
-      await writeBuildingCache(body);
-      return;
-    }
-
-    if (!body || typeof body !== 'object' || Array.isArray(body)) {
-      return;
-    }
-
-    const buildings = (body as Record<string, unknown>).buildings;
-
-    if (Array.isArray(buildings)) {
-      await Promise.all(buildings.filter(isBuildingDocument).map(writeBuildingCache));
-    }
+    await cacheMutationBodyBuildings(body, env);
   } catch (error) {
     console.warn('Building mutation cache update failed', error);
+  }
+}
+
+async function cacheMutationBodyBuildings(body: unknown, env: Env): Promise<void> {
+  if (isBuildingDocument(body)) {
+    await writeBuildingCache(env, body);
+    return;
+  }
+
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return;
+  }
+
+  const building = (body as Record<string, unknown>).building;
+  if (isBuildingDocument(building)) {
+    await writeBuildingCache(env, building);
+  }
+
+  const buildings = (body as Record<string, unknown>).buildings;
+
+  if (Array.isArray(buildings)) {
+    await Promise.all(buildings.filter(isBuildingDocument).map((item) => writeBuildingCache(env, item)));
   }
 }
 
