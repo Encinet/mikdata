@@ -714,7 +714,7 @@ async function approveSubmission(
   submission.updatedAt = now;
 
   await writeBuilding(env, building);
-  await writeApprovedSubmission(env, submission);
+  await deleteSubmission(env, submission);
   await rebuildBuildingsSummary(env);
   await writeBuildingCache(building);
   auditBuildingMutation('approve-submission', building.id, request);
@@ -742,6 +742,7 @@ async function repairApprovedSubmissions(
   let restored = 0;
   let linked = 0;
   let skipped = 0;
+  let deletedApproved = 0;
   let removedIndexes = 0;
   let failed = 0;
 
@@ -777,17 +778,18 @@ async function repairApprovedSubmissions(
         : null;
 
     if (existingId && buildingsById.has(existingId)) {
+      await deleteSubmission(env, submission);
       skipped += 1;
+      deletedApproved += 1;
       results.push({ submissionId, action: 'skipped', buildingId: existingId });
       continue;
     }
 
     const duplicateId = findDuplicateBuildingIdInList(existingBuildings, payload);
     if (duplicateId && duplicateId !== existingId) {
-      submission.payload = payload;
-      submission.buildingId = duplicateId;
-      await writeApprovedSubmission(env, submission);
+      await deleteSubmission(env, submission);
       linked += 1;
+      deletedApproved += 1;
       results.push({ submissionId, action: 'linked', buildingId: duplicateId });
       continue;
     }
@@ -802,11 +804,12 @@ async function repairApprovedSubmissions(
 
     submission.payload = payload;
     submission.buildingId = building.id;
-    await Promise.all([writeBuilding(env, building), writeApprovedSubmission(env, submission)]);
+    await Promise.all([writeBuilding(env, building), deleteSubmission(env, submission)]);
 
     existingBuildings.push(building);
     buildingsById.set(building.id, building);
     changedBuildings.push(building);
+    deletedApproved += 1;
 
     if (existingId) {
       restored += 1;
@@ -827,6 +830,7 @@ async function repairApprovedSubmissions(
       restored,
       linked,
       skipped,
+      deletedApproved,
       removedIndexes,
       failed,
       results,
@@ -1662,15 +1666,6 @@ async function readSubmissionByKey(env: Env, key: string): Promise<BuildingSubmi
 
 function writeSubmission(env: Env, submission: BuildingSubmission): Promise<void> {
   return buildingsKv(env).put(submissionKey(submission.id), JSON.stringify(submission));
-}
-
-function writeApprovedSubmission(env: Env, submission: BuildingSubmission): Promise<void[]> {
-  return Promise.all([
-    writeSubmission(env, submission),
-    buildingsKv(env).delete(playerPendingSubmissionKey(submission.submitterUuid.toLowerCase(), submission.id)),
-    buildingsKv(env).delete(submissionStatusKey('pending', submission.id)),
-    ...writeSubmissionIndexes(env, submission),
-  ]);
 }
 
 function writeRejectedSubmission(

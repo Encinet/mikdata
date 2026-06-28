@@ -6,7 +6,7 @@ import {
   handlePublicBuildingsRoute,
   validateBuildingInput,
 } from '../src/buildings';
-import type { Building } from '../src/types';
+import type { Building, BuildingSubmission } from '../src/types';
 
 const validBuilding = {
   name: { 'zh-CN': '测试建筑', en: 'Test Building' },
@@ -136,6 +136,10 @@ test('approved submissions are added to managed public buildings', async () => {
   expect(approvedBody.submission.status).toBe('approved');
   expect(approvedBody.submission.buildingId).toBe(approvedBody.building.id);
   expect(await env.BUILDINGS_KV.get(`building:${approvedBody.building.id}`)).not.toBe(null);
+  expect(await env.BUILDINGS_KV.get(`building-submission:${payload.submission.id}`)).toBe(null);
+  expect(await env.BUILDINGS_KV.get(`building-submission-player-pending:00000000-0000-0000-0000-000000000000:${payload.submission.id}`)).toBe(null);
+  expect(await env.BUILDINGS_KV.get(`building-submission-status:pending:${payload.submission.id}`)).toBe(null);
+  expect(await env.BUILDINGS_KV.get(`building-submission-status:approved:${payload.submission.id}`)).toBe(null);
 
   const adminList = await handleAdminBuildingsRoute(
     '/buildings',
@@ -176,7 +180,9 @@ test('approved submission repair rebuilds stale building summary when building a
   );
 
   expect(approved?.status).toBe(200);
-  const approvedBody = (await approved?.json()) as { building: Building };
+  const approvedBody = (await approved?.json()) as { building: Building; submission: BuildingSubmission };
+  await env.BUILDINGS_KV.put(`building-submission:${approvedBody.submission.id}`, JSON.stringify(approvedBody.submission));
+  await env.BUILDINGS_KV.put(`building-submission-status:approved:${approvedBody.submission.id}`, approvedBody.submission.id);
   await env.BUILDINGS_KV.put('building-summary:v1', JSON.stringify([]));
 
   const staleList = await handleAdminBuildingsRoute(
@@ -199,7 +205,9 @@ test('approved submission repair rebuilds stale building summary when building a
   );
 
   expect(repair?.status).toBe(200);
-  expect(await repair?.json()).toMatchObject({ scanned: 1, skipped: 1, failed: 0 });
+  expect(await repair?.json()).toMatchObject({ scanned: 1, skipped: 1, deletedApproved: 1, failed: 0 });
+  expect(await env.BUILDINGS_KV.get(`building-submission:${approvedBody.submission.id}`)).toBe(null);
+  expect(await env.BUILDINGS_KV.get(`building-submission-status:approved:${approvedBody.submission.id}`)).toBe(null);
   expect(JSON.parse((await env.BUILDINGS_KV.get('building-summary:v1')) ?? '[]')).toEqual([approvedBody.building]);
 
   const repairedList = await handleAdminBuildingsRoute(
