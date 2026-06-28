@@ -1,5 +1,6 @@
 import type { Env } from './env';
 import { proxyJson, type CacheStatus, type DataSource } from './http';
+import { TtlMemoryCache } from './memory-cache';
 
 interface RouteConfig {
   id: string;
@@ -18,7 +19,10 @@ interface CacheRecord {
 }
 
 const CACHE_VERSION = 'v1';
-const memoryCache = new Map<string, CacheRecord>();
+const memoryCache = new TtlMemoryCache<CacheRecord>({
+  defaultTtlMs: 60 * 1000,
+  maxEntries: 32,
+});
 const refreshes = new Map<string, Promise<CacheRecord>>();
 
 const ROUTES: RouteConfig[] = [
@@ -64,7 +68,7 @@ export async function serveProxyRoute(
 ): Promise<Response> {
   const cacheKey = buildCacheKey(route);
   const now = Date.now();
-  const cached = await readCache(env, cacheKey);
+  const cached = await readCache(cacheKey);
 
   if (cached && cached.freshUntil > now) {
     return cachedJsonResponse(route, cached, request, env, 'HIT', 'UPSTREAM');
@@ -195,7 +199,7 @@ function upstreamStatusError(route: RouteConfig, targetUrl: URL, response: Respo
   return new Error(`Upstream status ${response.status}`);
 }
 
-async function readCache(_env: Env, cacheKey: string): Promise<CacheRecord | null> {
+async function readCache(cacheKey: string): Promise<CacheRecord | null> {
   const memoryRecord = memoryCache.get(cacheKey);
 
   if (memoryRecord) {
@@ -230,7 +234,7 @@ async function readCache(_env: Env, cacheKey: string): Promise<CacheRecord | nul
     const parsed = JSON.parse(raw) as unknown;
 
     if (isCacheRecord(parsed)) {
-      memoryCache.set(cacheKey, parsed);
+      memoryCache.set(cacheKey, parsed, Math.max(parsed.staleUntil - Date.now(), 1));
       return parsed;
     }
   } catch {
@@ -248,7 +252,7 @@ async function readCache(_env: Env, cacheKey: string): Promise<CacheRecord | nul
 
 async function writeCache(route: RouteConfig, record: CacheRecord): Promise<void> {
   const cacheKey = buildCacheKey(route);
-  memoryCache.set(cacheKey, record);
+  memoryCache.set(cacheKey, record, Math.max(record.staleUntil - Date.now(), 1));
   const cache = getWorkerCache();
 
   if (!cache) {

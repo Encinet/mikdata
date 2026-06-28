@@ -1,6 +1,11 @@
 import { expect, test } from 'bun:test';
 import type { Env } from '../src/env';
-import { handlePublicBuildingsRoute, validateBuildingInput } from '../src/buildings';
+import {
+  createPlayerBuildingSubmission,
+  handleAdminBuildingsRoute,
+  handlePublicBuildingsRoute,
+  validateBuildingInput,
+} from '../src/buildings';
 import type { Building } from '../src/types';
 
 const validBuilding = {
@@ -65,6 +70,47 @@ test('public building reads use KV summary without Durable Object summary storag
   expect(await list?.json()).toEqual([building]);
 });
 
+test('player pending limits use the pending-only player index', async () => {
+  const env = createMemoryEnv();
+
+  const created = await createPlayerBuildingSubmission(createSubmissionRequest(), env, {
+    playerUuid: '00000000-0000-0000-0000-000000000000',
+    currentName: 'Player',
+    role: 'member',
+  });
+  const payload = (await created.json()) as { submission: { id: string } };
+
+  expect(created.status).toBe(201);
+  expect(await env.BUILDINGS_KV.get(`building-submission-player-pending:00000000-0000-0000-0000-000000000000:${payload.submission.id}`)).toBe(payload.submission.id);
+  expect(await env.BUILDINGS_KV.get(`building-submission-status:pending:${payload.submission.id}`)).toBe(payload.submission.id);
+});
+
+test('submission status transitions maintain pending and status indexes', async () => {
+  const env = createMemoryEnv();
+  const created = await createPlayerBuildingSubmission(createSubmissionRequest(), env, {
+    playerUuid: '00000000-0000-0000-0000-000000000000',
+    currentName: 'Player',
+    role: 'member',
+  });
+  const payload = (await created.json()) as { submission: { id: string } };
+
+  const rejected = await handleAdminBuildingsRoute(
+    `/building-submissions/${payload.submission.id}/reject`,
+    new Request(`https://data.mcmik.top/admin/api/building-submissions/${payload.submission.id}/reject`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reviewNote: '资料不足' }),
+    }),
+    env,
+    { email: 'admin@example.com' },
+  );
+
+  expect(rejected?.status).toBe(200);
+  expect(await env.BUILDINGS_KV.get(`building-submission-player-pending:00000000-0000-0000-0000-000000000000:${payload.submission.id}`)).toBe(null);
+  expect(await env.BUILDINGS_KV.get(`building-submission-status:pending:${payload.submission.id}`)).toBe(null);
+  expect(await env.BUILDINGS_KV.get(`building-submission-status:rejected:${payload.submission.id}`)).toBe(payload.submission.id);
+});
+
 function createEnvWithSummary(buildings: Building[]): Env {
   const kv = {
     get: (key: string) => {
@@ -82,6 +128,63 @@ function createEnvWithSummary(buildings: Building[]): Env {
     list: () => {
       throw new Error('KV unavailable');
     },
+  } as unknown as KVNamespace;
+
+  return {
+    BUILDINGS_KV: kv,
+    AUTH_STORE: {} as DurableObjectNamespace,
+    VPC_SERVICE: {} as Fetcher,
+    MINECRAFT_SERVER_URL: 'https://upstream.example',
+    MINECRAFT_SERVER_ADDRESS: 'mc.example',
+    MINECRAFT_SERVER_PORT: '25565',
+    CLOUDFLARE_ACCESS_ISSUER: 'https://team.cloudflareaccess.com',
+    CLOUDFLARE_ACCESS_AUD: 'aud',
+  };
+}
+
+function createSubmissionRequest(): Request {
+  return new Request('https://data.mcmik.top/api/account/building-submissions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      payload: {
+        ...validBuilding,
+        images: ['https://i.ibb.co/example/test.webp'],
+      },
+      images: [
+        {
+          url: 'https://i.ibb.co/example/test.webp',
+          width: 1280,
+          height: 720,
+          size: 1024,
+          mime: 'image/webp',
+        },
+      ],
+    }),
+  });
+}
+
+function createMemoryEnv(): Env & { BUILDINGS_KV: KVNamespace } {
+  const values = new Map<string, string>();
+  const kv = {
+    get: (key: string) => Promise.resolve(values.get(key) ?? null),
+    put: (key: string, value: string) => {
+      values.set(key, value);
+      return Promise.resolve();
+    },
+    delete: (key: string) => {
+      values.delete(key);
+      return Promise.resolve();
+    },
+    list: ({ prefix = '' }: { prefix?: string } = {}) =>
+      Promise.resolve({
+        keys: [...values.keys()]
+          .filter((key) => key.startsWith(prefix))
+          .sort()
+          .map((name) => ({ name })),
+        list_complete: true,
+        cursor: undefined,
+      }),
   } as unknown as KVNamespace;
 
   return {

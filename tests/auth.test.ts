@@ -159,6 +159,63 @@ test('auth preflight does not return wildcard cors headers', async () => {
   expect(response.headers.get('Access-Control-Allow-Origin')).toBeNull();
 });
 
+test('player resolve reuses durable object memory cache', async () => {
+  let resolveRequests = 0;
+  const store = createAuthStore({
+    VPC_SERVICE: {
+      fetch: (input: RequestInfo | URL) => {
+        const url = new URL(input.toString());
+        if (url.pathname.endsWith('/consume')) {
+          return Promise.resolve(
+            Response.json({
+              status: 'confirmed',
+              player: {
+                uuid: '00000000-0000-0000-0000-000000000010',
+                name: 'MemberPlayer',
+                role: 'member',
+              },
+            }),
+          );
+        }
+        if (url.pathname === '/api/players/resolve') {
+          resolveRequests += 1;
+          return Promise.resolve(
+            Response.json({
+              player: {
+                uuid: '00000000-0000-4000-8000-000000000011',
+                name: 'BuilderOne',
+              },
+            }),
+          );
+        }
+        return Promise.resolve(Response.json({ status: 'pending' }));
+      },
+    } as Fetcher,
+  });
+
+  const created = await callStore(store, { action: 'createMinecraftChallenge' });
+  const completed = await callStore(store, {
+    action: 'completeMinecraftChallenge',
+    challengeId: created.body.challengeId,
+    browserNonce: created.body.browserNonce,
+  });
+
+  const first = await callStore(store, {
+    action: 'resolvePlayer',
+    sessionId: completed.body.sessionId,
+    name: 'BuilderOne',
+  });
+  const second = await callStore(store, {
+    action: 'resolvePlayer',
+    sessionId: completed.body.sessionId,
+    name: 'builderone',
+  });
+
+  expect(first.status).toBe(200);
+  expect(second.status).toBe(200);
+  expect(resolveRequests).toBe(1);
+});
+
 function createAuthStore(overrides: Partial<Env> = {}): AuthStore {
   const state = {
     storage: createStorage(),

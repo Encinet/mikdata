@@ -695,11 +695,13 @@ function renderSubmissions() {
     const coords = payload.coordinates || {};
     const disabled = state.busy || submission.status !== 'pending' ? ' disabled' : '';
     const note = submission.reviewNote ? '<div class="meta">备注：' + esc(submission.reviewNote) + '</div>' : '';
+    const expires = submission.status === 'rejected' && submission.expiresAt ? '<div class="meta">保留至：' + esc(formatTime(submission.expiresAt)) + '</div>' : '';
     return '<article class="review-item">' +
       '<div><div class="title">' + esc(title) + '</div>' +
       '<div class="meta">提交者：' + esc(submission.submitterName) + ' · ' + esc(formatTime(submission.createdAt)) + '</div>' +
       '<div class="meta">坐标：(' + num(coords.x) + ', ' + num(coords.y) + ', ' + num(coords.z) + ') · 建造者：' + esc(builders || '-') + '</div>' +
       note +
+      expires +
       '<div class="review-item__meta"><span class="badge status-' + esc(submission.status) + '">' + esc(statusLabel(submission.status)) + '</span><span class="badge ' + esc(payload.buildType || '') + '">' + esc(typeLabel[payload.buildType] || payload.buildType || '-') + '</span></div></div>' +
       '<div class="row-actions"><button class="btn quiet sm" type="button" data-action="review" data-id="' + esc(submission.id) + '"' + disabled + '>编辑审核</button></div>' +
       '</article>';

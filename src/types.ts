@@ -57,6 +57,8 @@ export interface BuildingSubmission {
   images: BuildingSubmissionImage[];
   reviewer?: string;
   reviewNote?: string;
+  rejectedAt?: string;
+  expiresAt?: string;
   buildingId?: string;
   createdAt: string;
   updatedAt: string;

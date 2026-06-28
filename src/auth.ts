@@ -14,6 +14,7 @@ import {
   listPlayerBuildingSubmissions,
 } from './buildings';
 import { authJson } from './http';
+import { TtlMemoryCache } from './memory-cache';
 
 const AUTH_STORE_NAME = 'global';
 const SESSION_COOKIE_NAME = '__Host-mik_sid';
@@ -23,6 +24,9 @@ const SESSION_ABSOLUTE_SECONDS = 60 * 60 * 24 * 90;
 const SESSION_TOUCH_INTERVAL_SECONDS = 60 * 10;
 const CHALLENGE_TTL_SECONDS = 5 * 60;
 const CHALLENGE_CLEANUP_INTERVAL_SECONDS = 5 * 60;
+const ACCOUNT_CACHE_TTL_MS = 60 * 1000;
+const PASSKEY_CACHE_TTL_MS = 60 * 1000;
+const PLAYER_RESOLVE_CACHE_TTL_MS = 60 * 1000;
 const WEB_LOGIN_CODE_RE = /^[0-9]{6,10}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALLOWED_ROLES = new Set(['member', 'helper', 'manager']);
@@ -270,6 +274,22 @@ export class AuthStore implements DurableObject {
   private readonly storage: DurableObjectStorage;
   private readonly env: Env;
   private readonly rateLimits = new Map<string, RateLimitRecord>();
+  private readonly sessionCache = new TtlMemoryCache<SessionRecord>({
+    defaultTtlMs: SESSION_TOUCH_INTERVAL_SECONDS * 1000,
+    maxEntries: 2048,
+  });
+  private readonly accountCache = new TtlMemoryCache<AccountRecord>({
+    defaultTtlMs: ACCOUNT_CACHE_TTL_MS,
+    maxEntries: 1024,
+  });
+  private readonly passkeyCache = new TtlMemoryCache<PasskeyRecord[]>({
+    defaultTtlMs: PASSKEY_CACHE_TTL_MS,
+    maxEntries: 1024,
+  });
+  private readonly playerResolveCache = new TtlMemoryCache<{ uuid: string; name: string }>({
+    defaultTtlMs: PLAYER_RESOLVE_CACHE_TTL_MS,
+    maxEntries: 1024,
+  });
   private lastChallengeCleanupAt = 0;
   private initialized: Promise<void> | null = null;
 
@@ -462,6 +482,7 @@ export class AuthStore implements DurableObject {
       session.revokedAt = new Date().toISOString();
       await this.storage.put(sessionKey(sidHash), session);
     }
+    this.sessionCache.delete(sidHash);
     return { status: 200, body: { ok: true, clearSession: true } };
   }
 
@@ -548,6 +569,8 @@ export class AuthStore implements DurableObject {
     ]);
     session.revokedAt = new Date().toISOString();
     await this.storage.put(sessionKey(session.sidHash), session);
+    this.sessionCache.delete(session.sidHash);
+    this.passkeyCache.delete(record.playerUuid);
     const newSession = await this.createSession(session.playerUuid, 'passkey');
     return {
       status: 200,
@@ -609,6 +632,7 @@ export class AuthStore implements DurableObject {
     passkey.lastUsedAt = new Date().toISOString();
     await this.storage.put(passkeyKey(passkey.credentialId), passkey);
     await this.storage.delete(webauthnChallengeKey(challenge.challenge));
+    this.passkeyCache.delete(passkey.playerUuid);
     const session = await this.createSession(account.playerUuid, 'passkey');
     return { status: 200, body: sessionBody(session.sessionId, account) };
   }
@@ -622,6 +646,7 @@ export class AuthStore implements DurableObject {
       this.storage.delete(passkeyKey(credentialId)),
       this.storage.delete(accountPasskeyKey(session.playerUuid, credentialId)),
     ]);
+    this.passkeyCache.delete(session.playerUuid);
     return { status: 200, body: { ok: true } };
   }
 
@@ -662,7 +687,7 @@ export class AuthStore implements DurableObject {
       return { status: 422, body: { error: 'invalid_name' } };
     }
 
-    const player = await this.fetchPluginPlayer(normalizedName);
+    const player = await this.resolvePluginPlayer(normalizedName);
     if (!player) {
       return { status: 404, body: { error: 'player_not_found' } };
     }
@@ -733,6 +758,7 @@ export class AuthStore implements DurableObject {
       writes.push(this.storage.delete(accountNameKey(existing.currentName)));
     }
     await Promise.all(writes);
+    this.accountCache.set(account.playerUuid, account);
     return account;
   }
 
@@ -752,14 +778,17 @@ export class AuthStore implements DurableObject {
       authMethod,
     };
     await this.storage.put(sessionKey(record.sidHash), record);
+    this.sessionCache.set(record.sidHash, record, sessionCacheTtlMs(record));
     return { sessionId, record };
   }
 
   private async readValidSession(sessionId: string): Promise<SessionRecord | null> {
     if (!sessionId) return null;
     const sidHash = await sha256(sessionId);
-    const session = await this.storage.get<SessionRecord>(sessionKey(sidHash));
+    let session = this.sessionCache.get(sidHash);
+    session ??= (await this.storage.get<SessionRecord>(sessionKey(sidHash))) ?? null;
     if (!session || session.revokedAt || isExpired(session.idleExpiresAt) || isExpired(session.absoluteExpiresAt)) {
+      this.sessionCache.delete(sidHash);
       return null;
     }
     const now = Date.now();
@@ -768,19 +797,23 @@ export class AuthStore implements DurableObject {
       session.idleExpiresAt = new Date(now + SESSION_IDLE_SECONDS * 1000).toISOString();
       await this.storage.put(sessionKey(sidHash), session);
     }
+    this.sessionCache.set(sidHash, session, sessionCacheTtlMs(session, now), now);
     return session;
   }
 
   private async readAccount(playerUuid: string): Promise<AccountRecord | null> {
-    const account = (await this.storage.get<AccountRecord>(accountKey(playerUuid))) ?? null;
+    let account = this.accountCache.get(playerUuid);
+    account ??= (await this.storage.get<AccountRecord>(accountKey(playerUuid))) ?? null;
     if (!account) return null;
     if (!isEligibleRole(account.role)) {
       await Promise.all([
         this.storage.delete(accountKey(playerUuid)),
         this.storage.delete(accountNameKey(account.currentName)),
       ]);
+      this.accountCache.delete(playerUuid);
       return null;
     }
+    this.accountCache.set(playerUuid, account);
     return account;
   }
 
@@ -795,11 +828,18 @@ export class AuthStore implements DurableObject {
   }
 
   private async listPasskeys(playerUuid: string): Promise<PasskeyRecord[]> {
+    const cached = this.passkeyCache.get(playerUuid);
+    if (cached) {
+      return cached;
+    }
+
     const index = await this.storage.list<string>({ prefix: accountPasskeyPrefix(playerUuid) });
     const passkeys = await Promise.all(
       [...index.values()].map((credentialId) => this.storage.get<PasskeyRecord>(passkeyKey(credentialId))),
     );
-    return passkeys.filter((passkey): passkey is PasskeyRecord => !!passkey && passkey.playerUuid === playerUuid);
+    const result = passkeys.filter((passkey): passkey is PasskeyRecord => !!passkey && passkey.playerUuid === playerUuid);
+    this.passkeyCache.set(playerUuid, result);
+    return result;
   }
 
   private async readMinecraftChallenge(challengeId: string): Promise<Extract<ChallengeRecord, { type: 'minecraft-login' }> | null> {
@@ -855,6 +895,23 @@ export class AuthStore implements DurableObject {
     } catch {
       return null;
     }
+  }
+
+  private async resolvePluginPlayer(name: string): Promise<{ uuid: string; name: string } | null> {
+    const cached = this.playerResolveCache.get(name);
+
+    if (cached) {
+      return cached;
+    }
+
+    const player = await this.fetchPluginPlayer(name);
+
+    if (player) {
+      this.playerResolveCache.set(name, player);
+      this.playerResolveCache.set(normalizePlayerName(player.name), player);
+    }
+
+    return player;
   }
 
   private ensureInitialized(): Promise<void> {
@@ -1090,6 +1147,12 @@ function shouldCheckPlugin(value?: string): boolean {
 
 function isExpired(value: string): boolean {
   return new Date(value).getTime() <= Date.now();
+}
+
+function sessionCacheTtlMs(session: SessionRecord, now = Date.now()): number {
+  const idleTtl = new Date(session.idleExpiresAt).getTime() - now;
+  const absoluteTtl = new Date(session.absoluteExpiresAt).getTime() - now;
+  return Math.max(1, Math.min(idleTtl, absoluteTtl, SESSION_TOUCH_INTERVAL_SECONDS * 1000));
 }
 
 function createDisplayCode(): string {
