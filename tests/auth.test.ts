@@ -216,6 +216,62 @@ test('player resolve reuses durable object memory cache', async () => {
   expect(resolveRequests).toBe(1);
 });
 
+test('account security lists and revokes browser sessions', async () => {
+  const store = createAuthStore({
+    VPC_SERVICE: {
+      fetch: () =>
+        Promise.resolve(
+          Response.json({
+            status: 'confirmed',
+            player: {
+              uuid: '00000000-0000-0000-0000-000000000004',
+              name: 'SessionPlayer',
+              role: 'member',
+            },
+          }),
+        ),
+    } as Fetcher,
+  });
+
+  const firstChallenge = await callStore(store, { action: 'createMinecraftChallenge' });
+  const firstLogin = await callStore(store, {
+    action: 'completeMinecraftChallenge',
+    challengeId: firstChallenge.body.challengeId,
+    browserNonce: firstChallenge.body.browserNonce,
+  });
+  const secondChallenge = await callStore(store, { action: 'createMinecraftChallenge' });
+  const secondLogin = await callStore(store, {
+    action: 'completeMinecraftChallenge',
+    challengeId: secondChallenge.body.challengeId,
+    browserNonce: secondChallenge.body.browserNonce,
+  });
+
+  const security = await callStore(store, {
+    action: 'accountSecurity',
+    sessionId: firstLogin.body.sessionId,
+  });
+
+  expect(security.status).toBe(200);
+  expect(security.body.sessions).toHaveLength(2);
+  const secondSession = security.body.sessions?.find((session) => !session.current);
+  expect(typeof secondSession?.id).toBe('string');
+
+  const revoked = await callStore(store, {
+    action: 'revokeAccountSession',
+    sessionId: firstLogin.body.sessionId,
+    targetSessionId: secondSession?.id,
+  });
+
+  expect(revoked.status).toBe(200);
+  expect(revoked.body.clearSession).toBe(false);
+
+  const revokedSecurity = await callStore(store, {
+    action: 'accountSecurity',
+    sessionId: secondLogin.body.sessionId,
+  });
+  expect(revokedSecurity.status).toBe(401);
+});
+
 function createAuthStore(overrides: Partial<Env> = {}): AuthStore {
   const state = {
     storage: createStorage(),
@@ -249,6 +305,10 @@ type StoreTestBody = Record<string, unknown> & {
     };
   };
   sessionId?: string;
+  sessions?: {
+    id: string;
+    current: boolean;
+  }[];
 };
 
 function createStorage(): DurableObjectStorage {

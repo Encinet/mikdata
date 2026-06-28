@@ -238,6 +238,16 @@ export async function handleAuthRoute(
     return authJson(response.body, response.status);
   }
 
+  if (routePath === '/me/sessions/revoke' && request.method === 'POST') {
+    const payload = await readJsonObject(request);
+    const response = await callStore(store, {
+      action: 'revokeAccountSession',
+      sessionId: payload.sessionId,
+      targetSessionId: payload.targetSessionId,
+    });
+    return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
+  }
+
   if (routePath === '/me/players/resolve' && request.method === 'POST') {
     const payload = await readJsonObject(request);
     const response = await callStore(store, {
@@ -340,6 +350,8 @@ export class AuthStore implements DurableObject {
         return this.accountSummary(asString(body.sessionId));
       case 'accountSecurity':
         return this.accountSecurity(asString(body.sessionId));
+      case 'revokeAccountSession':
+        return this.revokeAccountSession(asString(body.sessionId), asString(body.targetSessionId));
       case 'resolvePlayer':
         return this.resolvePlayer(asString(body.sessionId), asString(body.name));
       case 'createBuildingSubmission':
@@ -480,7 +492,10 @@ export class AuthStore implements DurableObject {
     const session = await this.storage.get<SessionRecord>(sessionKey(sidHash));
     if (session) {
       session.revokedAt = new Date().toISOString();
-      await this.storage.put(sessionKey(sidHash), session);
+      await Promise.all([
+        this.storage.put(sessionKey(sidHash), session),
+        this.deleteSessionIndex(session),
+      ]);
     }
     this.sessionCache.delete(sidHash);
     return { status: 200, body: { ok: true, clearSession: true } };
@@ -570,7 +585,10 @@ export class AuthStore implements DurableObject {
       this.storage.delete(webauthnChallengeKey(challenge.challenge)),
     ]);
     session.revokedAt = new Date().toISOString();
-    await this.storage.put(sessionKey(session.sidHash), session);
+    await Promise.all([
+      this.storage.put(sessionKey(session.sidHash), session),
+      this.deleteSessionIndex(session),
+    ]);
     this.sessionCache.delete(session.sidHash);
     this.passkeyCache.delete(record.playerUuid);
     const newSession = await this.createSession(session.playerUuid, 'passkey');
@@ -672,7 +690,42 @@ export class AuthStore implements DurableObject {
       body: {
         account: await this.accountSummaryBody(account),
         session: publicSession(session),
+        sessions: await this.listAccountSessions(account.playerUuid, session.sidHash),
         passkeys: (await this.listPasskeys(account.playerUuid)).map(publicPasskey),
+      },
+    };
+  }
+
+  private async revokeAccountSession(
+    sessionId: string,
+    targetSessionId: string,
+  ): Promise<{ status: number; body: unknown }> {
+    const currentSession = await this.readValidSession(sessionId);
+    if (!currentSession) return { status: 401, body: { error: 'unauthenticated' } };
+    if (!targetSessionId) return { status: 422, body: { error: 'invalid_session' } };
+
+    const targetSession = await this.storage.get<SessionRecord>(sessionKey(targetSessionId));
+    if (!targetSession || targetSession.playerUuid !== currentSession.playerUuid) {
+      return { status: 404, body: { error: 'not_found' } };
+    }
+    if (targetSession.revokedAt || isExpired(targetSession.idleExpiresAt) || isExpired(targetSession.absoluteExpiresAt)) {
+      await this.deleteSessionIndex(targetSession);
+      this.sessionCache.delete(targetSession.sidHash);
+      return { status: 404, body: { error: 'not_found' } };
+    }
+
+    targetSession.revokedAt = new Date().toISOString();
+    await Promise.all([
+      this.storage.put(sessionKey(targetSession.sidHash), targetSession),
+      this.deleteSessionIndex(targetSession),
+    ]);
+    this.sessionCache.delete(targetSession.sidHash);
+
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        clearSession: targetSession.sidHash === currentSession.sidHash,
       },
     };
   }
@@ -781,7 +834,10 @@ export class AuthStore implements DurableObject {
       absoluteExpiresAt: new Date(now + SESSION_ABSOLUTE_SECONDS * 1000).toISOString(),
       authMethod,
     };
-    await this.storage.put(sessionKey(record.sidHash), record);
+    await Promise.all([
+      this.storage.put(sessionKey(record.sidHash), record),
+      this.storage.put(accountSessionKey(record.playerUuid, record.sidHash), record.sidHash),
+    ]);
     this.sessionCache.set(record.sidHash, record, sessionCacheTtlMs(record));
     return { sessionId, record };
   }
@@ -793,6 +849,9 @@ export class AuthStore implements DurableObject {
     session ??= (await this.storage.get<SessionRecord>(sessionKey(sidHash))) ?? null;
     if (!session || session.revokedAt || isExpired(session.idleExpiresAt) || isExpired(session.absoluteExpiresAt)) {
       this.sessionCache.delete(sidHash);
+      if (session) {
+        await this.deleteSessionIndex(session);
+      }
       return null;
     }
     const now = Date.now();
@@ -803,6 +862,55 @@ export class AuthStore implements DurableObject {
     }
     this.sessionCache.set(sidHash, session, sessionCacheTtlMs(session, now), now);
     return session;
+  }
+
+  private async listAccountSessions(playerUuid: string, currentSidHash: string): Promise<Record<string, unknown>[]> {
+    const index = await this.storage.list<string>({ prefix: accountSessionPrefix(playerUuid) });
+    const sessionEntries = await Promise.all(
+      [...index.entries()].map(async ([indexKey, sidHash]) => ({
+        indexKey,
+        session: await this.storage.get<SessionRecord>(sessionKey(sidHash)),
+      })),
+    );
+    const activeSessions: SessionRecord[] = [];
+    const cleanup: Promise<unknown>[] = [];
+    for (const { indexKey, session } of sessionEntries) {
+      if (
+        !session ||
+        session.playerUuid !== playerUuid ||
+        session.revokedAt ||
+        isExpired(session.idleExpiresAt) ||
+        isExpired(session.absoluteExpiresAt)
+      ) {
+        if (session) {
+          cleanup.push(this.deleteSessionIndex(session));
+          this.sessionCache.delete(session.sidHash);
+        } else {
+          cleanup.push(this.storage.delete(indexKey));
+        }
+        continue;
+      }
+      activeSessions.push(session);
+    }
+    if (cleanup.length) {
+      await Promise.all(cleanup);
+    }
+
+    if (!activeSessions.some((session) => session.sidHash === currentSidHash)) {
+      const currentSession = await this.storage.get<SessionRecord>(sessionKey(currentSidHash));
+      if (currentSession && currentSession.playerUuid === playerUuid) {
+        activeSessions.push(currentSession);
+        await this.storage.put(accountSessionKey(playerUuid, currentSidHash), currentSidHash);
+      }
+    }
+
+    return activeSessions
+      .sort((left, right) => new Date(right.lastSeenAt).getTime() - new Date(left.lastSeenAt).getTime())
+      .map((session) => publicSession(session, session.sidHash === currentSidHash));
+  }
+
+  private async deleteSessionIndex(session: SessionRecord): Promise<void> {
+    await this.storage.delete(accountSessionKey(session.playerUuid, session.sidHash));
   }
 
   private async readAccount(playerUuid: string): Promise<AccountRecord | null> {
@@ -1117,8 +1225,10 @@ function challengePublicBody(record: Extract<ChallengeRecord, { type: 'minecraft
   return { status: record.status, expiresAt: record.expiresAt };
 }
 
-function publicSession(session: SessionRecord): Record<string, unknown> {
+function publicSession(session: SessionRecord, current = false): Record<string, unknown> {
   return {
+    id: session.sidHash,
+    current,
     issuedAt: session.issuedAt,
     lastSeenAt: session.lastSeenAt,
     idleExpiresAt: session.idleExpiresAt,
@@ -1247,6 +1357,14 @@ function codeKey(code: string): string {
 
 function sessionKey(sidHash: string): string {
   return `session:${sidHash}`;
+}
+
+function accountSessionPrefix(playerUuid: string): string {
+  return `account-session:${playerUuid}:`;
+}
+
+function accountSessionKey(playerUuid: string, sidHash: string): string {
+  return `${accountSessionPrefix(playerUuid)}${sidHash}`;
 }
 
 function passkeyKey(credentialId: string): string {
