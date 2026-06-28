@@ -155,6 +155,62 @@ test('approved submissions are added to managed public buildings', async () => {
   expect(await publicList?.json()).toEqual([approvedBody.building]);
 });
 
+test('approved submission repair rebuilds stale building summary when building already exists', async () => {
+  const env = createMemoryEnv();
+  const created = await createPlayerBuildingSubmission(createSubmissionRequest(), env, {
+    playerUuid: '00000000-0000-0000-0000-000000000000',
+    currentName: 'Player',
+    role: 'member',
+  });
+  const payload = (await created.json()) as { submission: { id: string } };
+
+  const approved = await handleAdminBuildingsRoute(
+    `/building-submissions/${payload.submission.id}/approve`,
+    new Request(`https://data.mcmik.top/admin/api/building-submissions/${payload.submission.id}/approve`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }),
+    env,
+    { email: 'admin@example.com' },
+  );
+
+  expect(approved?.status).toBe(200);
+  const approvedBody = (await approved?.json()) as { building: Building };
+  await env.BUILDINGS_KV.put('building-summary:v1', JSON.stringify([]));
+
+  const staleList = await handleAdminBuildingsRoute(
+    '/buildings',
+    new Request('https://data.mcmik.top/admin/api/buildings'),
+    env,
+    { email: 'admin@example.com' },
+  );
+  expect(await staleList?.json()).toEqual([]);
+
+  const repair = await handleAdminBuildingsRoute(
+    '/building-submissions/repair-approved',
+    new Request('https://data.mcmik.top/admin/api/building-submissions/repair-approved', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }),
+    env,
+    { email: 'admin@example.com' },
+  );
+
+  expect(repair?.status).toBe(200);
+  expect(await repair?.json()).toMatchObject({ scanned: 1, skipped: 1, failed: 0 });
+  expect(JSON.parse((await env.BUILDINGS_KV.get('building-summary:v1')) ?? '[]')).toEqual([approvedBody.building]);
+
+  const repairedList = await handleAdminBuildingsRoute(
+    '/buildings',
+    new Request('https://data.mcmik.top/admin/api/buildings'),
+    env,
+    { email: 'admin@example.com' },
+  );
+  expect(await repairedList?.json()).toEqual([approvedBody.building]);
+});
+
 function createEnvWithSummary(buildings: Building[]): Env {
   const kv = {
     get: (key: string) => {

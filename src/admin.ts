@@ -284,6 +284,7 @@ const ADMIN_HTML = /* html */ `<!doctype html>
     line-height: 1.1;
   }
   .review-board__head p { display: none; }
+  .review-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
   .review-list {
     display: grid;
     border: 1px solid var(--line);
@@ -437,7 +438,10 @@ const ADMIN_HTML = /* html */ `<!doctype html>
         <div>
           <h2>玩家建筑申请</h2>
         </div>
-        <button class="btn quiet sm" id="submissions-refresh-btn" type="button">刷新申请</button>
+        <div class="review-actions">
+          <button class="btn quiet sm" id="repair-approved-btn" type="button">修复已批准</button>
+          <button class="btn quiet sm" id="submissions-refresh-btn" type="button">刷新申请</button>
+        </div>
       </div>
       <div class="review-list" id="submission-list"></div>
     </section>
@@ -523,6 +527,7 @@ applyTheme();
 $('theme-btn').addEventListener('click', cycleTheme);
 $('refresh-btn').addEventListener('click', loadAll);
 $('submissions-refresh-btn').addEventListener('click', loadSubmissions);
+$('repair-approved-btn').addEventListener('click', repairApprovedSubmissions);
 $('import-btn').addEventListener('click', openImport);
 $('create-btn').addEventListener('click', openCreate);
 $('search').addEventListener('input', render);
@@ -624,6 +629,27 @@ async function loadSubmissions(manageBusy = true) {
     toast(error.message || '申请加载失败', false);
   } finally {
     if (manageBusy) setBusy(false);
+  }
+}
+
+async function repairApprovedSubmissions() {
+  setBusy(true);
+  try {
+    const res = await fetch('/admin/api/building-submissions/repair-approved', {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({}),
+    });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.error || res.statusText);
+
+    const changed = (data.created || 0) + (data.restored || 0) + (data.linked || 0);
+    toast('已扫描 ' + data.scanned + ' 条，修复 ' + changed + ' 条', true);
+    await loadAll();
+  } catch (error) {
+    toast(error.message || '修复失败', false);
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -1091,6 +1117,7 @@ function setBusy(busy) {
   $('import-save-btn').disabled = busy;
   $('refresh-btn').disabled = busy;
   $('submissions-refresh-btn').disabled = busy;
+  $('repair-approved-btn').disabled = busy;
   updateAuthState();
 }
 

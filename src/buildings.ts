@@ -817,10 +817,8 @@ async function repairApprovedSubmissions(
     }
   }
 
-  if (changedBuildings.length > 0 || linked > 0 || removedIndexes > 0) {
-    await rebuildBuildingsSummary(env);
-    await Promise.all(changedBuildings.map(writeBuildingCache));
-  }
+  await rebuildBuildingsSummary(env);
+  await Promise.all(changedBuildings.map(writeBuildingCache));
 
   return json(
     {
