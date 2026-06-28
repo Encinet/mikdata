@@ -11,3 +11,8 @@ CLOUDFLARE_ACCESS_AUD=your-access-application-aud
 
 # Required: shared server-side secret accepted from MikWeb auth BFF requests.
 MIKWEB_AUTH_CLIENT_SECRET=replace-with-the-same-server-secret-as-mikweb
+
+# Optional: WebAuthn Passkey relying party settings. Defaults to production.
+# For local MikWeb development, use WEBAUTHN_RP_ID=localhost and WEBAUTHN_ORIGIN=http://localhost:3000.
+WEBAUTHN_RP_ID=mcmik.top
+WEBAUTHN_ORIGIN=https://mcmik.top

@@ -8,4 +8,6 @@ export interface Env {
   CLOUDFLARE_ACCESS_ISSUER: string;
   CLOUDFLARE_ACCESS_AUD: string;
   MIKWEB_AUTH_CLIENT_SECRET?: string;
+  WEBAUTHN_RP_ID?: string;
+  WEBAUTHN_ORIGIN?: string;
 }

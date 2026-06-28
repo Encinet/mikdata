@@ -30,9 +30,9 @@ const PLAYER_RESOLVE_CACHE_TTL_MS = 60 * 1000;
 const WEB_LOGIN_CODE_RE = /^[0-9]{6,10}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALLOWED_ROLES = new Set(['member', 'helper', 'manager']);
-const RP_ID = 'mcmik.top';
+const DEFAULT_WEBAUTHN_RP_ID = 'mcmik.top';
+const DEFAULT_WEBAUTHN_ORIGIN = 'https://mcmik.top';
 const RP_NAME = 'Mik Casual';
-const EXPECTED_ORIGIN = 'https://mcmik.top';
 
 type AuthRouteResult = Response | null;
 
@@ -493,9 +493,10 @@ export class AuthStore implements DurableObject {
     if (!account) return { status: 403, body: { error: 'member_required' } };
     await this.cleanupExpiredChallenges();
     const passkeys = await this.listPasskeys(account.playerUuid);
+    const webAuthn = webAuthnConfig(this.env);
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
-      rpID: RP_ID,
+      rpID: webAuthn.rpID,
       userName: account.currentName,
       userID: toArrayBufferBytes(new TextEncoder().encode(account.playerUuid)),
       userDisplayName: account.currentName,
@@ -534,11 +535,12 @@ export class AuthStore implements DurableObject {
       return { status: 400, body: { error: 'invalid_challenge' } };
     }
 
+    const webAuthn = webAuthnConfig(this.env);
     const verification = await verifyRegistrationResponse({
       response: credential as RegistrationResponseJSON,
       expectedChallenge: challenge.challenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
+      expectedOrigin: webAuthn.origins,
+      expectedRPID: webAuthn.rpID,
       requireUserVerification: true,
     });
 
@@ -582,9 +584,10 @@ export class AuthStore implements DurableObject {
     const rateLimited = this.consumeRateLimit(rateLimitKey('passkey-authentication:create', clientKey), 20, 60);
     if (rateLimited) return rateLimited;
     await this.cleanupExpiredChallenges();
+    const webAuthn = webAuthnConfig(this.env);
 
     const options = await generateAuthenticationOptions({
-      rpID: RP_ID,
+      rpID: webAuthn.rpID,
       userVerification: 'required',
     });
 
@@ -611,11 +614,12 @@ export class AuthStore implements DurableObject {
     if (!passkey) return { status: 404, body: { error: 'passkey_not_found' } };
     const challenge = await this.readWebauthnChallenge('passkey-authentication', credentialChallengeId(credential));
     if (!challenge) return { status: 400, body: { error: 'invalid_challenge' } };
+    const webAuthn = webAuthnConfig(this.env);
     const verification = await verifyAuthenticationResponse({
       response,
       expectedChallenge: challenge.challenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
+      expectedOrigin: webAuthn.origins,
+      expectedRPID: webAuthn.rpID,
       requireUserVerification: true,
       credential: {
         id: passkey.credentialId,
@@ -1130,6 +1134,15 @@ function publicPasskey(passkey: PasskeyRecord): Record<string, unknown> {
     lastUsedAt: passkey.lastUsedAt,
     displayName: passkey.displayName,
   };
+}
+
+function webAuthnConfig(env: Env): { rpID: string; origins: string[] } {
+  const rpID = env.WEBAUTHN_RP_ID?.trim() || DEFAULT_WEBAUTHN_RP_ID;
+  const origins = (env.WEBAUTHN_ORIGIN ?? DEFAULT_WEBAUTHN_ORIGIN)
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  return { rpID, origins: origins.length ? origins : [DEFAULT_WEBAUTHN_ORIGIN] };
 }
 
 function normalizeRole(raw: unknown): string {

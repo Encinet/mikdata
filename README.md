@@ -76,9 +76,13 @@ Do not put upstream addresses or secrets in `wrangler.jsonc`. Store all runtime 
 | `CLOUDFLARE_ACCESS_ISSUER` | Yes | Access issuer, for example `https://your-team.cloudflareaccess.com` |
 | `CLOUDFLARE_ACCESS_AUD` | Yes | Access application AUD tag for `/admin*` |
 | `MIKWEB_AUTH_CLIENT_SECRET` | Yes | Shared server-side secret for MikWeb `/api/auth/*` and `/api/account/*` BFF requests |
+| `WEBAUTHN_RP_ID` | No | Passkey RP ID, defaults to `mcmik.top`. It must match the MikWeb hostname or a registrable parent domain |
+| `WEBAUTHN_ORIGIN` | No | Allowed Passkey origins, defaults to `https://mcmik.top`. Use comma-separated values for multiple origins |
 
 Minecraft upstream requests use the `VPC_SERVICE` binding configured in `wrangler.jsonc`; `MINECRAFT_SERVER_URL` should be reachable through that VPC service.
 Buildings and building submissions require the `BUILDINGS_KV` binding. The only active Durable Object binding is `AUTH_STORE`.
+
+Passkey registration and login must happen on an origin compatible with `WEBAUTHN_RP_ID`. Production should use `WEBAUTHN_RP_ID=mcmik.top` and `WEBAUTHN_ORIGIN=https://mcmik.top`. For local MikWeb development, run MikData locally too and set `WEBAUTHN_RP_ID=localhost` with `WEBAUTHN_ORIGIN=http://localhost:3000`.
 
 ```sh
 bunx wrangler secret put MINECRAFT_SERVER_URL
@@ -87,6 +91,8 @@ bunx wrangler secret put MINECRAFT_SERVER_PORT
 bunx wrangler secret put CLOUDFLARE_ACCESS_ISSUER
 bunx wrangler secret put CLOUDFLARE_ACCESS_AUD
 bunx wrangler secret put MIKWEB_AUTH_CLIENT_SECRET
+bunx wrangler secret put WEBAUTHN_RP_ID
+bunx wrangler secret put WEBAUTHN_ORIGIN
 ```
 
 For local development, copy `.dev.vars.example` to `.dev.vars` and fill values. `.dev.vars` is ignored by git.
