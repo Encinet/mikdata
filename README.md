@@ -34,7 +34,7 @@ Authenticated MikWeb account API:
 
 - `POST /api/account/building-submissions`
 - `POST /api/account/building-submissions/mine`
-- `POST /api/account/members/resolve`
+- `POST /api/account/players/resolve`
 
 ## Security Model
 

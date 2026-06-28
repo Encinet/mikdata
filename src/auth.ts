@@ -50,11 +50,10 @@ interface PluginChallengeResponse {
   confirmedAt?: string;
 }
 
-interface PluginMemberResolveResponse {
-  member?: {
+interface PluginPlayerResolveResponse {
+  player?: {
     uuid?: string;
     name?: string;
-    role?: string;
   };
 }
 
@@ -235,10 +234,10 @@ export async function handleAuthRoute(
     return authJson(response.body, response.status);
   }
 
-  if (routePath === '/me/members/resolve' && request.method === 'POST') {
+  if (routePath === '/me/players/resolve' && request.method === 'POST') {
     const payload = await readJsonObject(request);
     const response = await callStore(store, {
-      action: 'resolveMember',
+      action: 'resolvePlayer',
       sessionId: payload.sessionId,
       name: payload.name,
     });
@@ -321,8 +320,8 @@ export class AuthStore implements DurableObject {
         return this.accountSummary(asString(body.sessionId));
       case 'accountSecurity':
         return this.accountSecurity(asString(body.sessionId));
-      case 'resolveMember':
-        return this.resolveMember(asString(body.sessionId), asString(body.name));
+      case 'resolvePlayer':
+        return this.resolvePlayer(asString(body.sessionId), asString(body.name));
       case 'createBuildingSubmission':
         return this.createBuildingSubmission(asString(body.sessionId), body.payload);
       case 'listBuildingSubmissions':
@@ -649,7 +648,7 @@ export class AuthStore implements DurableObject {
     };
   }
 
-  private async resolveMember(
+  private async resolvePlayer(
     sessionId: string,
     name: string,
   ): Promise<{ status: number; body: unknown }> {
@@ -663,19 +662,17 @@ export class AuthStore implements DurableObject {
       return { status: 422, body: { error: 'invalid_name' } };
     }
 
-    const accountMember = await this.readAccountByName(normalizedName);
-    const member = accountMember ?? (await this.fetchPluginMember(normalizedName));
-    if (!member) {
-      return { status: 404, body: { error: 'member_not_found' } };
+    const player = await this.fetchPluginPlayer(normalizedName);
+    if (!player) {
+      return { status: 404, body: { error: 'player_not_found' } };
     }
 
     return {
       status: 200,
       body: {
-        member: {
-          uuid: member.playerUuid,
-          name: member.currentName,
-          role: member.role,
+        player: {
+          uuid: player.uuid,
+          name: player.name,
         },
       },
     };
@@ -787,30 +784,6 @@ export class AuthStore implements DurableObject {
     return account;
   }
 
-  private async readAccountByName(name: string): Promise<AccountRecord | null> {
-    const normalizedName = normalizePlayerName(name);
-    if (!normalizedName) return null;
-
-    const indexedUuid = await this.storage.get<string>(accountNameKey(normalizedName));
-    if (indexedUuid) {
-      const indexedAccount = await this.readAccount(indexedUuid);
-      if (indexedAccount && normalizePlayerName(indexedAccount.currentName) === normalizedName) {
-        return indexedAccount;
-      }
-      await this.storage.delete(accountNameKey(normalizedName));
-    }
-
-    const accounts = await this.storage.list<AccountRecord>({ prefix: 'account:' });
-    for (const account of accounts.values()) {
-      if (normalizePlayerName(account.currentName) !== normalizedName || !isEligibleRole(account.role)) {
-        continue;
-      }
-      await this.storage.put(accountNameKey(normalizedName), account.playerUuid);
-      return account;
-    }
-    return null;
-  }
-
   private async accountSummaryBody(account: AccountRecord): Promise<PlayerAccountSummary> {
     return {
       playerUuid: account.playerUuid,
@@ -863,8 +836,8 @@ export class AuthStore implements DurableObject {
     }
   }
 
-  private async fetchPluginMember(name: string): Promise<AccountRecord | null> {
-    const path = `/api/members/resolve?name=${encodeURIComponent(name)}`;
+  private async fetchPluginPlayer(name: string): Promise<{ uuid: string; name: string } | null> {
+    const path = `/api/players/resolve?name=${encodeURIComponent(name)}`;
     try {
       const response = await this.env.VPC_SERVICE.fetch(new URL(path, this.env.MINECRAFT_SERVER_URL), {
         method: 'GET',
@@ -872,14 +845,13 @@ export class AuthStore implements DurableObject {
         signal: AbortSignal.timeout(5000),
       });
       if (!response.ok) return null;
-      const payload = (await response.json()) as PluginMemberResolveResponse;
-      const uuid = asString(payload.member?.uuid).toLowerCase();
-      const currentName = asString(payload.member?.name);
-      const role = normalizeRole(payload.member?.role);
-      if (!UUID_RE.test(uuid) || !currentName || !role) {
+      const payload = (await response.json()) as PluginPlayerResolveResponse;
+      const uuid = asString(payload.player?.uuid).toLowerCase();
+      const currentName = asString(payload.player?.name);
+      if (!UUID_RE.test(uuid) || !currentName) {
         return null;
       }
-      return this.upsertAccount(uuid, currentName, role);
+      return { uuid, name: currentName };
     } catch {
       return null;
     }
