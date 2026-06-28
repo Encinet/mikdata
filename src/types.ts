@@ -37,6 +37,31 @@ export interface Building {
   updatedAt: string;
 }
 
+export type BuildingInput = Omit<Building, 'id' | 'createdAt' | 'updatedAt'>;
+
+export interface BuildingSubmissionImage {
+  url: string;
+  width: number;
+  height: number;
+  size: number;
+  mime: string;
+}
+
+export interface BuildingSubmission {
+  id: string;
+  status: 'pending' | 'approved' | 'rejected';
+  submitterUuid: string;
+  submitterName: string;
+  submitterRole: string;
+  payload: BuildingInput;
+  images: BuildingSubmissionImage[];
+  reviewer?: string;
+  reviewNote?: string;
+  buildingId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AdminActor {
   email?: string;
   subject?: string;

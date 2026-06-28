@@ -310,6 +310,53 @@ const ADMIN_HTML = /* html */ `<!doctype html>
   .replica { background: color-mix(in srgb, var(--amber), transparent 88%); color: var(--amber); }
   .row-actions { display: flex; flex-wrap: wrap; gap: 7px; }
   .empty { color: var(--muted); text-align: center; padding: 56px 12px; }
+  .review-board {
+    margin-top: 20px;
+    display: grid;
+    gap: 12px;
+  }
+  .review-board__head {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .review-board__head h2 {
+    margin: 0;
+    color: var(--heading);
+    font-size: 22px;
+    line-height: 1.1;
+  }
+  .review-board__head p {
+    margin: 5px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .review-list {
+    display: grid;
+    gap: 10px;
+  }
+  .review-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 14px;
+    align-items: center;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 14px;
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(18px) saturate(132%);
+  }
+  .review-item__meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .status-pending { background: color-mix(in srgb, var(--amber), transparent 88%); color: var(--amber); }
+  .status-approved { background: color-mix(in srgb, var(--green), transparent 88%); color: var(--green); }
+  .status-rejected { background: color-mix(in srgb, var(--red), transparent 88%); color: var(--red); }
   .overlay {
     display: none;
     position: fixed;
@@ -435,6 +482,16 @@ const ADMIN_HTML = /* html */ `<!doctype html>
         <tbody id="rows"></tbody>
       </table>
     </div>
+    <section class="review-board">
+      <div class="review-board__head">
+        <div>
+          <h2>玩家建筑申请</h2>
+          <p>审核正式成员提交的建筑收入申请，可编辑后保存或批准</p>
+        </div>
+        <button class="btn quiet sm" id="submissions-refresh-btn" type="button">刷新申请</button>
+      </div>
+      <div class="review-list" id="submission-list"></div>
+    </section>
   </main>
 </div>
 <div class="overlay" id="overlay">
@@ -470,6 +527,9 @@ const ADMIN_HTML = /* html */ `<!doctype html>
     </div>
     <div class="modal-foot">
       <button class="btn quiet" id="cancel-btn" type="button">取消</button>
+      <button class="btn quiet" id="review-save-btn" type="button">保存修改</button>
+      <button class="btn danger" id="review-reject-btn" type="button">拒绝</button>
+      <button class="btn primary" id="review-approve-btn" type="button">批准收入</button>
       <button class="btn primary" id="save-btn" type="submit">保存</button>
     </div>
   </form>
@@ -499,13 +559,21 @@ const ADMIN_HTML = /* html */ `<!doctype html>
 const THEME_KEY = 'mikdata-admin-theme';
 const THEMES = ['system', 'light', 'dark'];
 const themeLabel = { system: '系统', light: '浅色', dark: '深色' };
-const state = { buildings: [], editId: null, busy: false, theme: readTheme() };
+const state = {
+  buildings: [],
+  submissions: [],
+  editId: null,
+  reviewId: null,
+  busy: false,
+  theme: readTheme(),
+};
 const typeLabel = { original: '原创', derivative: '二创', replica: '复刻' };
 const $ = (id) => document.getElementById(id);
 
 applyTheme();
 $('theme-btn').addEventListener('click', cycleTheme);
-$('refresh-btn').addEventListener('click', loadBuildings);
+$('refresh-btn').addEventListener('click', loadAll);
+$('submissions-refresh-btn').addEventListener('click', loadSubmissions);
 $('import-btn').addEventListener('click', openImport);
 $('create-btn').addEventListener('click', openCreate);
 $('search').addEventListener('input', render);
@@ -516,6 +584,9 @@ $('overlay').addEventListener('click', (event) => {
   if (event.target === event.currentTarget) closeModal();
 });
 $('building-form').addEventListener('submit', saveBuilding);
+$('review-save-btn').addEventListener('click', saveSubmissionEdit);
+$('review-approve-btn').addEventListener('click', approveSubmission);
+$('review-reject-btn').addEventListener('click', rejectSubmission);
 $('import-close-btn').addEventListener('click', closeImport);
 $('import-cancel-btn').addEventListener('click', closeImport);
 $('import-overlay').addEventListener('click', (event) => {
@@ -526,7 +597,8 @@ $('import-file').addEventListener('change', readImportFile);
 $('import-json').addEventListener('input', updateImportPreview);
 
 updateAuthState();
-loadBuildings();
+setReviewMode(false);
+loadAll();
 
 function readTheme() {
   try {
@@ -562,12 +634,22 @@ function updateAuthState() {
   $('create-btn').disabled = state.busy;
   $('import-btn').disabled = state.busy;
   render();
+  renderSubmissions();
 }
 
-async function loadBuildings() {
+async function loadAll() {
   setBusy(true);
   try {
-    const res = await fetch('/api/buildings', { cache: 'no-store' });
+    await Promise.all([loadBuildings(false), loadSubmissions(false)]);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function loadBuildings(manageBusy = true) {
+  if (manageBusy) setBusy(true);
+  try {
+    const res = await fetch('/admin/api/buildings', { cache: 'no-store' });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
     state.buildings = Array.isArray(data) ? data : [];
@@ -576,7 +658,22 @@ async function loadBuildings() {
   } catch (error) {
     toast(error.message || '加载失败', false);
   } finally {
-    setBusy(false);
+    if (manageBusy) setBusy(false);
+  }
+}
+
+async function loadSubmissions(manageBusy = true) {
+  if (manageBusy) setBusy(true);
+  try {
+    const res = await fetch('/admin/api/building-submissions', { cache: 'no-store' });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    state.submissions = Array.isArray(data.submissions) ? data.submissions : [];
+    renderSubmissions();
+  } catch (error) {
+    toast(error.message || '申请加载失败', false);
+  } finally {
+    if (manageBusy) setBusy(false);
   }
 }
 
@@ -625,6 +722,37 @@ function render() {
   });
 }
 
+function renderSubmissions() {
+  const list = $('submission-list');
+  const pendingFirst = [...state.submissions].sort((a, b) => {
+    if (a.status !== b.status) return a.status === 'pending' ? -1 : 1;
+    return String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
+  });
+  if (!pendingFirst.length) {
+    list.innerHTML = '<div class="empty">暂无玩家申请</div>';
+    return;
+  }
+  list.innerHTML = pendingFirst.map((submission) => {
+    const payload = submission.payload || {};
+    const title = payload.name && (payload.name['zh-CN'] || payload.name.en) || submission.id;
+    const builders = (payload.builders || []).map((item) => item.name).filter(Boolean).join('、');
+    const coords = payload.coordinates || {};
+    const disabled = state.busy || submission.status !== 'pending' ? ' disabled' : '';
+    const note = submission.reviewNote ? '<div class="meta">备注：' + esc(submission.reviewNote) + '</div>' : '';
+    return '<article class="review-item">' +
+      '<div><div class="title">' + esc(title) + '</div>' +
+      '<div class="meta">提交者：' + esc(submission.submitterName) + ' · ' + esc(formatTime(submission.createdAt)) + '</div>' +
+      '<div class="meta">坐标：(' + num(coords.x) + ', ' + num(coords.y) + ', ' + num(coords.z) + ') · 建造者：' + esc(builders || '-') + '</div>' +
+      note +
+      '<div class="review-item__meta"><span class="badge status-' + esc(submission.status) + '">' + esc(statusLabel(submission.status)) + '</span><span class="badge ' + esc(payload.buildType || '') + '">' + esc(typeLabel[payload.buildType] || payload.buildType || '-') + '</span></div></div>' +
+      '<div class="row-actions"><button class="btn quiet sm" type="button" data-action="review" data-id="' + esc(submission.id) + '"' + disabled + '>编辑审核</button></div>' +
+      '</article>';
+  }).join('');
+  list.querySelectorAll('button[data-action="review"]').forEach((button) => {
+    button.addEventListener('click', () => openSubmissionReview(button.dataset.id));
+  });
+}
+
 function searchableText(building) {
   const tags = (building.tags || []).flatMap((tag) => [tag['zh-CN'], tag.en]);
   const builders = (building.builders || []).map((builder) => builder.name);
@@ -634,6 +762,7 @@ function searchableText(building) {
 
 function openCreate() {
   state.editId = null;
+  state.reviewId = null;
   $('modal-title').textContent = '新增建筑';
   $('building-form').reset();
   $('coord-x').value = '0';
@@ -641,6 +770,7 @@ function openCreate() {
   $('coord-z').value = '0';
   $('build-type').value = 'original';
   $('build-date').value = new Date().toISOString().slice(0, 10);
+  setReviewMode(false);
   $('overlay').classList.add('open');
   $('name-zh').focus();
 }
@@ -649,8 +779,22 @@ function openEdit(id) {
   const building = state.buildings.find((item) => item.id === id);
   if (!building) return;
   state.editId = id;
+  state.reviewId = null;
   $('modal-title').textContent = '编辑建筑';
   fillForm(building);
+  setReviewMode(false);
+  $('overlay').classList.add('open');
+  $('name-zh').focus();
+}
+
+function openSubmissionReview(id) {
+  const submission = state.submissions.find((item) => item.id === id);
+  if (!submission || submission.status !== 'pending') return;
+  state.editId = null;
+  state.reviewId = id;
+  $('modal-title').textContent = '审核申请 · ' + (submission.submitterName || submission.id);
+  fillForm(submission.payload || {});
+  setReviewMode(true);
   $('overlay').classList.add('open');
   $('name-zh').focus();
 }
@@ -658,6 +802,15 @@ function openEdit(id) {
 function closeModal() {
   $('overlay').classList.remove('open');
   state.editId = null;
+  state.reviewId = null;
+  setReviewMode(false);
+}
+
+function setReviewMode(isReview) {
+  $('save-btn').style.display = isReview ? 'none' : '';
+  $('review-save-btn').style.display = isReview ? '' : 'none';
+  $('review-reject-btn').style.display = isReview ? '' : 'none';
+  $('review-approve-btn').style.display = isReview ? '' : 'none';
 }
 
 function openImport() {
@@ -694,6 +847,10 @@ function fillForm(building) {
 
 async function saveBuilding(event) {
   event.preventDefault();
+  if (state.reviewId) {
+    await saveSubmissionEdit();
+    return;
+  }
   setBusy(true);
   try {
     const isEdit = Boolean(state.editId);
@@ -709,6 +866,81 @@ async function saveBuilding(event) {
     await loadBuildings();
   } catch (error) {
     toast(error.message || '保存失败', false);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function saveSubmissionEdit() {
+  const submission = currentReviewSubmission();
+  if (!submission) return;
+  setBusy(true);
+  try {
+    const payload = toPayload();
+    const res = await fetch('/admin/api/building-submissions/' + encodeURIComponent(submission.id), {
+      method: 'PUT',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        payload,
+        images: imageMetadataForPayload(payload, submission.images || []),
+      }),
+    });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    toast('申请已保存', true);
+    await loadSubmissions();
+  } catch (error) {
+    toast(error.message || '保存申请失败', false);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function approveSubmission() {
+  const submission = currentReviewSubmission();
+  if (!submission) return;
+  setBusy(true);
+  try {
+    const payload = toPayload();
+    const res = await fetch('/admin/api/building-submissions/' + encodeURIComponent(submission.id) + '/approve', {
+      method: 'PUT',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        payload,
+        images: imageMetadataForPayload(payload, submission.images || []),
+      }),
+    });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    toast('已批准并收入建筑', true);
+    closeModal();
+    await loadAll();
+  } catch (error) {
+    toast(error.message || '批准失败', false);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function rejectSubmission() {
+  const submission = currentReviewSubmission();
+  if (!submission) return;
+  const reviewNote = prompt('拒绝原因');
+  if (!reviewNote || !reviewNote.trim()) return;
+  setBusy(true);
+  try {
+    const res = await fetch('/admin/api/building-submissions/' + encodeURIComponent(submission.id) + '/reject', {
+      method: 'PUT',
+      headers: writeHeaders(),
+      body: JSON.stringify({ reviewNote: reviewNote.trim() }),
+    });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    toast('已拒绝', true);
+    closeModal();
+    await loadSubmissions();
+  } catch (error) {
+    toast(error.message || '拒绝失败', false);
   } finally {
     setBusy(false);
   }
@@ -859,6 +1091,31 @@ function splitLines(value) {
   return value.split('\\n').map((line) => line.trim()).filter(Boolean);
 }
 
+function currentReviewSubmission() {
+  return state.reviewId ? state.submissions.find((item) => item.id === state.reviewId) : null;
+}
+
+function imageMetadataForPayload(payload, existingImages) {
+  const byUrl = new Map((existingImages || []).map((image) => [image.url, image]));
+  return (payload.images || []).map((url) => {
+    const image = byUrl.get(url);
+    if (!image) {
+      throw new Error('申请图片只能使用玩家已上传的 WebP 图片');
+    }
+    return image;
+  });
+}
+
+function statusLabel(status) {
+  return { pending: '待审核', approved: '已批准', rejected: '已拒绝' }[status] || status;
+}
+
+function formatTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN');
+}
+
 function writeHeaders() {
   return { 'Content-Type': 'application/json' };
 }
@@ -870,8 +1127,12 @@ async function readJson(res) {
 function setBusy(busy) {
   state.busy = busy;
   $('save-btn').disabled = busy;
+  $('review-save-btn').disabled = busy;
+  $('review-reject-btn').disabled = busy;
+  $('review-approve-btn').disabled = busy;
   $('import-save-btn').disabled = busy;
   $('refresh-btn').disabled = busy;
+  $('submissions-refresh-btn').disabled = busy;
   updateAuthState();
 }
 

@@ -1,9 +1,28 @@
 import type { Env } from './env';
 import { json } from './http';
-import type { AdminActor, Building, Coord, I18n, Source } from './types';
-export type { AdminActor, Building, Builder, Coord, I18n, Source } from './types';
+import type {
+  AdminActor,
+  Building,
+  BuildingInput,
+  BuildingSubmission,
+  BuildingSubmissionImage,
+  Coord,
+  I18n,
+  Source,
+} from './types';
+export type {
+  AdminActor,
+  Building,
+  Builder,
+  BuildingInput,
+  BuildingSubmission,
+  BuildingSubmissionImage,
+  Coord,
+  I18n,
+  Source,
+} from './types';
 
-type Input = Omit<Building, 'id' | 'createdAt' | 'updatedAt'>;
+type Input = BuildingInput;
 type ValidationResult = { ok: true; value: Input } | { ok: false; message: string };
 interface MemoryRecord<T> {
   value: T;
@@ -36,12 +55,17 @@ const INPUT_FIELDS = [
 const VALID_FIELDS = new Set<string>(INPUT_FIELDS);
 const BUILDING_KEY_PREFIX = 'building:';
 const LEGACY_SUMMARY_KEY = '__summary__';
-const SUMMARY_STORAGE_KEY = 'summary:v1';
+const SUMMARY_KV_KEY = 'building-summary:v1';
 const INTERNAL_SUMMARY_PATH = '/__internal/buildings-summary';
 const BUILDINGS_CACHE_VERSION = 'v1';
 const SUMMARY_CACHE_KEY = `${BUILDINGS_CACHE_VERSION}:summary`;
 const BUILDINGS_CACHE_TTL_SECONDS = 300;
 const MAX_IMPORT_ITEMS = 100;
+const MAX_PENDING_SUBMISSIONS_PER_PLAYER = 10;
+const MAX_SUBMISSION_REVIEW_NOTE_LEN = 500;
+const SUBMISSION_KEY_PREFIX = 'building-submission:';
+const SUBMISSION_PLAYER_INDEX_PREFIX = 'building-submission-player:';
+const IMGBB_IMAGE_RE = /^https:\/\/i\.ibb\.co\/[^/]+\/[^/?#]+$/;
 const PUBLIC_CACHE_HEADERS = {
   'Cache-Control': 'public, max-age=300, stale-while-revalidate=600',
 } as const;
@@ -82,10 +106,18 @@ export async function handleAdminBuildingsRoute(
   env: Env,
   actor: AdminActor,
 ): Promise<Response | null> {
-  if (routePath !== '/buildings' && routePath !== '/buildings/import') {
+  if (
+    routePath !== '/buildings' &&
+    routePath !== '/buildings/import' &&
+    routePath !== '/building-submissions'
+  ) {
     const match = routePath.match(/^\/buildings\/([a-z0-9]{8,24})$/i);
+    const submissionEditMatch = routePath.match(/^\/building-submissions\/([a-z0-9]{8,24})$/i);
+    const submissionMatch = routePath.match(
+      /^\/building-submissions\/([a-z0-9]{8,24})\/(approve|reject)$/i,
+    );
 
-    if (!match) {
+    if (!match && !submissionEditMatch && !submissionMatch) {
       return null;
     }
   }
@@ -100,6 +132,28 @@ export async function handleAdminBuildingsRoute(
   }
 
   return forwardWriteToDurableObject(routePath, request, env, actor);
+}
+
+export async function createPlayerBuildingSubmission(
+  request: Request,
+  env: Env,
+  account: { playerUuid: string; currentName: string; role: string },
+): Promise<Response> {
+  const headers = new Headers(request.headers);
+  headers.set('X-Player-Uuid', account.playerUuid);
+  headers.set('X-Player-Name', account.currentName);
+  headers.set('X-Player-Role', account.role);
+  return forwardPlayerSubmissionToDurableObject('/building-submissions', request, env, headers);
+}
+
+export async function listPlayerBuildingSubmissions(
+  request: Request,
+  env: Env,
+  account: { playerUuid: string },
+): Promise<Response> {
+  const headers = new Headers(request.headers);
+  headers.set('X-Player-Uuid', account.playerUuid);
+  return forwardPlayerSubmissionToDurableObject('/building-submissions/mine', request, env, headers);
 }
 
 async function listBuildings(request: Request, env: Env): Promise<Response> {
@@ -164,7 +218,6 @@ async function getBuilding(id: string, request: Request, env: Env): Promise<Resp
 async function createBuilding(
   request: Request,
   env: Env,
-  summaryStorage: DurableObjectStorage,
 ): Promise<Response> {
   const body = await readBody(request, env);
 
@@ -193,7 +246,7 @@ async function createBuilding(
   };
 
   await writeBuilding(env, building);
-  await rebuildBuildingsSummary(env, summaryStorage);
+  await rebuildBuildingsSummary(env);
   auditBuildingMutation('create', building.id, request);
 
   return json(building, 201, request, env);
@@ -203,7 +256,6 @@ async function replaceBuilding(
   id: string,
   request: Request,
   env: Env,
-  summaryStorage: DurableObjectStorage,
 ): Promise<Response> {
   const existing = await buildingsKv(env).get(buildingKey(id));
 
@@ -237,7 +289,7 @@ async function replaceBuilding(
   };
 
   await writeBuilding(env, building);
-  await rebuildBuildingsSummary(env, summaryStorage);
+  await rebuildBuildingsSummary(env);
   auditBuildingMutation('replace', id, request);
   return json(building, 200, request, env);
 }
@@ -246,7 +298,6 @@ async function patchBuilding(
   id: string,
   request: Request,
   env: Env,
-  summaryStorage: DurableObjectStorage,
 ): Promise<Response> {
   const raw = await buildingsKv(env).get(buildingKey(id));
 
@@ -311,7 +362,7 @@ async function patchBuilding(
   };
 
   await writeBuilding(env, building);
-  await rebuildBuildingsSummary(env, summaryStorage);
+  await rebuildBuildingsSummary(env);
   auditBuildingMutation('patch', id, request);
   return json(building, 200, request, env);
 }
@@ -320,14 +371,13 @@ async function deleteBuilding(
   id: string,
   request: Request,
   env: Env,
-  summaryStorage: DurableObjectStorage,
 ): Promise<Response> {
   if (!(await buildingsKv(env).get(buildingKey(id)))) {
     return error('building not found', 404, request, env);
   }
 
   await buildingsKv(env).delete(buildingKey(id));
-  await rebuildBuildingsSummary(env, summaryStorage);
+  await rebuildBuildingsSummary(env);
   auditBuildingMutation('delete', id, request);
 
   return json({ deleted: id }, 200, request, env);
@@ -336,7 +386,6 @@ async function deleteBuilding(
 async function importBuildings(
   request: Request,
   env: Env,
-  summaryStorage: DurableObjectStorage,
 ): Promise<Response> {
   const inputs = await readImportInputs(request, env);
 
@@ -370,13 +419,238 @@ async function importBuildings(
   }
 
   await Promise.all(buildings.map((building) => writeBuilding(env, building)));
-  await rebuildBuildingsSummary(env, summaryStorage);
+  await rebuildBuildingsSummary(env);
 
   for (const building of buildings) {
     auditBuildingMutation('import', building.id, request);
   }
 
   return json({ imported: buildings.length, buildings }, 201, request, env);
+}
+
+async function createSubmission(
+  request: Request,
+  env: Env,
+  storage: DurableObjectStorage,
+): Promise<Response> {
+  const submitterUuid = request.headers.get('X-Player-Uuid') ?? '';
+  const submitterName = request.headers.get('X-Player-Name') ?? '';
+  const submitterRole = request.headers.get('X-Player-Role') ?? '';
+
+  if (!UUID_RE.test(submitterUuid) || !submitterName || !submitterRole) {
+    return error('unauthenticated', 401, request, env);
+  }
+
+  const pending = await listPlayerSubmissions(storage, submitterUuid, 'pending');
+  if (pending.length >= MAX_PENDING_SUBMISSIONS_PER_PLAYER) {
+    return json(
+      { error: 'pending_limit_reached', limit: MAX_PENDING_SUBMISSIONS_PER_PLAYER },
+      429,
+      request,
+      env,
+    );
+  }
+
+  const body = await readBody(request, env);
+  if (!body.ok) {
+    return body.response;
+  }
+  if (!body.data || typeof body.data !== 'object' || Array.isArray(body.data)) {
+    return error('body must be a JSON object', 400, request, env);
+  }
+
+  const data = body.data as Record<string, unknown>;
+  const validation = validateBuildingInput(data.payload);
+  if (!validation.ok) {
+    return error(validation.message, 422, request, env);
+  }
+
+  const images = validateSubmissionImages(data.images, validation.value.images);
+  if (!images.ok) {
+    return error(images.message, 422, request, env);
+  }
+
+  const submitterBuilder = validation.value.builders.find((builder) => builder.uuid === submitterUuid.toLowerCase());
+  if (!submitterBuilder) {
+    validation.value.builders.unshift({
+      uuid: submitterUuid.toLowerCase(),
+      name: submitterName,
+      weight: 100,
+    });
+  }
+
+  if (!validation.value.images.every((url) => IMGBB_IMAGE_RE.test(url))) {
+    return error('images must be uploaded through the image uploader', 422, request, env);
+  }
+
+  const now = new Date().toISOString();
+  const submission: BuildingSubmission = {
+    id: await createSubmissionId(storage),
+    status: 'pending',
+    submitterUuid: submitterUuid.toLowerCase(),
+    submitterName,
+    submitterRole,
+    payload: validation.value,
+    images: images.value,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await Promise.all([
+    storage.put(submissionKey(submission.id), submission),
+    storage.put(playerSubmissionKey(submission.submitterUuid, submission.id), submission.id),
+  ]);
+  return json({ submission }, 201, request, env);
+}
+
+async function listMineSubmissions(
+  request: Request,
+  env: Env,
+  storage: DurableObjectStorage,
+): Promise<Response> {
+  const playerUuid = request.headers.get('X-Player-Uuid') ?? '';
+  if (!UUID_RE.test(playerUuid)) {
+    return error('unauthenticated', 401, request, env);
+  }
+
+  return json({ submissions: await listPlayerSubmissions(storage, playerUuid.toLowerCase()) }, 200, request, env);
+}
+
+async function listSubmissions(
+  request: Request,
+  env: Env,
+  storage: DurableObjectStorage,
+): Promise<Response> {
+  const list = await storage.list<BuildingSubmission>({ prefix: SUBMISSION_KEY_PREFIX });
+  const submissions = [...list.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return json({ submissions }, 200, request, env);
+}
+
+async function approveSubmission(
+  id: string,
+  request: Request,
+  env: Env,
+  storage: DurableObjectStorage,
+): Promise<Response> {
+  const submission = await storage.get<BuildingSubmission>(submissionKey(id));
+  if (!submission) {
+    return error('submission not found', 404, request, env);
+  }
+  if (submission.status !== 'pending') {
+    return error('submission is not pending', 409, request, env);
+  }
+
+  const body = await readJsonBodyObject(request);
+  let payload = submission.payload;
+  let images = submission.images;
+  if (body.payload !== undefined || body.images !== undefined) {
+    const validation = validateBuildingInput(body.payload ?? submission.payload);
+    if (!validation.ok) {
+      return error(validation.message, 422, request, env);
+    }
+    const imageValidation = validateSubmissionImages(body.images ?? submission.images, validation.value.images);
+    if (!imageValidation.ok) {
+      return error(imageValidation.message, 422, request, env);
+    }
+    if (!validation.value.images.every((url) => IMGBB_IMAGE_RE.test(url))) {
+      return error('images must be uploaded through the image uploader', 422, request, env);
+    }
+    payload = validation.value;
+    images = imageValidation.value;
+  }
+
+  const duplicateId = await findDuplicateBuildingId(env, payload);
+  if (duplicateId) {
+    return error(`duplicate building: ${duplicateId}`, 409, request, env);
+  }
+
+  const now = new Date().toISOString();
+  const building: Building = {
+    id: await createBuildingId(env),
+    ...payload,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  submission.status = 'approved';
+  submission.reviewer = adminActorLabel(request);
+  submission.reviewNote = optionalReviewNote(body.reviewNote);
+  submission.payload = payload;
+  submission.images = images;
+  submission.buildingId = building.id;
+  submission.updatedAt = now;
+
+  await writeBuilding(env, building);
+  await storage.put(submissionKey(id), submission);
+  await rebuildBuildingsSummary(env);
+  auditBuildingMutation('approve-submission', building.id, request);
+  return json({ submission, building }, 200, request, env);
+}
+
+async function updateSubmission(
+  id: string,
+  request: Request,
+  env: Env,
+  storage: DurableObjectStorage,
+): Promise<Response> {
+  const submission = await storage.get<BuildingSubmission>(submissionKey(id));
+  if (!submission) {
+    return error('submission not found', 404, request, env);
+  }
+  if (submission.status !== 'pending') {
+    return error('submission is not pending', 409, request, env);
+  }
+
+  const body = await readJsonBodyObject(request);
+  const validation = validateBuildingInput(body.payload);
+  if (!validation.ok) {
+    return error(validation.message, 422, request, env);
+  }
+
+  const images = validateSubmissionImages(body.images, validation.value.images);
+  if (!images.ok) {
+    return error(images.message, 422, request, env);
+  }
+
+  if (!validation.value.images.every((url) => IMGBB_IMAGE_RE.test(url))) {
+    return error('images must be uploaded through the image uploader', 422, request, env);
+  }
+
+  submission.payload = validation.value;
+  submission.images = images.value;
+  submission.reviewer = adminActorLabel(request);
+  submission.reviewNote = optionalReviewNote(body.reviewNote);
+  submission.updatedAt = new Date().toISOString();
+  await storage.put(submissionKey(id), submission);
+  return json({ submission }, 200, request, env);
+}
+
+async function rejectSubmission(
+  id: string,
+  request: Request,
+  env: Env,
+  storage: DurableObjectStorage,
+): Promise<Response> {
+  const submission = await storage.get<BuildingSubmission>(submissionKey(id));
+  if (!submission) {
+    return error('submission not found', 404, request, env);
+  }
+  if (submission.status !== 'pending') {
+    return error('submission is not pending', 409, request, env);
+  }
+
+  const body = await readJsonBodyObject(request);
+  const note = optionalReviewNote(body.reviewNote);
+  if (!note) {
+    return error('reviewNote is required', 422, request, env);
+  }
+
+  submission.status = 'rejected';
+  submission.reviewer = adminActorLabel(request);
+  submission.reviewNote = note;
+  submission.updatedAt = new Date().toISOString();
+  await storage.put(submissionKey(id), submission);
+  return json({ submission }, 200, request, env);
 }
 
 async function readBody(
@@ -409,6 +683,90 @@ async function readBody(
   } catch {
     return { ok: false, response: error('invalid JSON body', 400, request, env) };
   }
+}
+
+async function readJsonBodyObject(request: Request): Promise<Record<string, unknown>> {
+  const contentType = request.headers.get('content-type') ?? '';
+  if (!contentType.toLowerCase().includes('application/json')) {
+    return {};
+  }
+  const body = await request.json().catch(() => ({}));
+  return body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+}
+
+function validateSubmissionImages(
+  raw: unknown,
+  urls: string[],
+): { ok: true; value: BuildingSubmissionImage[] } | { ok: false; message: string } {
+  if (!Array.isArray(raw)) {
+    return { ok: false, message: 'images metadata must be an array' };
+  }
+  if (raw.length !== urls.length) {
+    return { ok: false, message: 'images metadata does not match payload images' };
+  }
+
+  const images: BuildingSubmissionImage[] = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const item = raw[index];
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { ok: false, message: `images[${index}] metadata must be an object` };
+    }
+    const value = item as Record<string, unknown>;
+    if (value.url !== urls[index] || typeof value.url !== 'string' || !IMGBB_IMAGE_RE.test(value.url)) {
+      return { ok: false, message: `images[${index}].url must be an uploaded image URL` };
+    }
+    if (!Number.isFinite(value.width) || !Number.isFinite(value.height) || !Number.isFinite(value.size)) {
+      return { ok: false, message: `images[${index}] dimensions and size are required` };
+    }
+    if (typeof value.mime !== 'string' || value.mime !== 'image/webp') {
+      return { ok: false, message: `images[${index}].mime must be image/webp` };
+    }
+    images.push({
+      url: value.url,
+      width: value.width as number,
+      height: value.height as number,
+      size: value.size as number,
+      mime: value.mime,
+    });
+  }
+  return { ok: true, value: images };
+}
+
+async function listPlayerSubmissions(
+  storage: DurableObjectStorage,
+  playerUuid: string,
+  status?: BuildingSubmission['status'],
+): Promise<BuildingSubmission[]> {
+  const index = await storage.list<string>({ prefix: playerSubmissionPrefix(playerUuid.toLowerCase()) });
+  const submissions = await Promise.all(
+    [...index.values()].map((id) => storage.get<BuildingSubmission>(submissionKey(id))),
+  );
+  return submissions
+    .filter((submission): submission is BuildingSubmission => !!submission)
+    .filter((submission) => !status || submission.status === status)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+async function createSubmissionId(storage: DurableObjectStorage): Promise<string> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`.slice(0, 16);
+    if (!(await storage.get(submissionKey(id)))) {
+      return id;
+    }
+  }
+  throw new Error('Could not allocate submission id');
+}
+
+function optionalReviewNote(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const note = value.trim();
+  return note ? note.slice(0, MAX_SUBMISSION_REVIEW_NOTE_LEN) : undefined;
+}
+
+function adminActorLabel(request: Request): string {
+  return request.headers.get('X-Admin-Email') ?? request.headers.get('X-Admin-Subject') ?? 'admin';
 }
 
 export function validateBuildingInput(data: unknown): ValidationResult {
@@ -737,7 +1095,7 @@ async function readBuildingsSummary(env: Env): Promise<Building[]> {
     return cached;
   }
 
-  const snapshot = await readSummaryFromWriter(env);
+  const snapshot = await readSummaryFromKv(env);
 
   if (snapshot) {
     await writeSummaryCache(snapshot);
@@ -746,61 +1104,47 @@ async function readBuildingsSummary(env: Env): Promise<Building[]> {
 
   const buildings = await readAllBuildings(env);
   buildings.sort(compareBuildingsForSummary);
+  await writeSummaryKv(env, buildings);
   await writeSummaryCache(buildings);
   return buildings;
 }
 
-async function rebuildBuildingsSummary(
-  env: Env,
-  summaryStorage: DurableObjectStorage,
-): Promise<Building[]> {
+async function rebuildBuildingsSummary(env: Env): Promise<Building[]> {
   const buildings = await readAllBuildings(env);
   buildings.sort(compareBuildingsForSummary);
-  await writeSummaryStorage(summaryStorage, buildings);
+  await writeSummaryKv(env, buildings);
+  summaryMemoryCache = createMemoryRecord(buildings);
   return buildings;
 }
 
-async function readSummaryFromWriter(env: Env): Promise<Building[] | null> {
-  const id = env.BUILDINGS_WRITER.idFromName('global');
-  const writer = env.BUILDINGS_WRITER.get(id);
+async function readSummaryKvOrRebuild(env: Env): Promise<Building[]> {
+  const stored = await readSummaryFromKv(env);
 
-  try {
-    const response = await writer.fetch(
-      new Request(`https://internal.mikdata${INTERNAL_SUMMARY_PATH}`),
-    );
-
-    if (!response.ok) {
-      console.warn('Building summary snapshot read failed', response.status);
-      return null;
-    }
-
-    const data = (await response.json()) as unknown;
-    return normalizeSummary(data);
-  } catch (error) {
-    console.warn('Building summary snapshot read failed', error);
-    return null;
+  if (stored) {
+    return stored;
   }
+
+  return rebuildBuildingsSummary(env);
 }
 
-async function readSummaryStorageOrRebuild(
-  env: Env,
-  summaryStorage: DurableObjectStorage,
-): Promise<Building[]> {
-  const stored = await summaryStorage.get<unknown>(SUMMARY_STORAGE_KEY);
-  const normalizedStored = normalizeSummary(stored);
+async function readSummaryFromKv(env: Env): Promise<Building[] | null> {
+  const raw = await buildingsKv(env).get(SUMMARY_KV_KEY);
 
-  if (normalizedStored) {
-    return normalizedStored;
+  if (raw) {
+    try {
+      return normalizeSummary(JSON.parse(raw) as unknown);
+    } catch (error) {
+      console.warn('Building summary snapshot is corrupt', error);
+    }
   }
 
   const legacy = await readLegacySummary(env);
-
   if (legacy) {
-    await writeSummaryStorage(summaryStorage, legacy);
+    await writeSummaryKv(env, legacy);
     return legacy;
   }
 
-  return rebuildBuildingsSummary(env, summaryStorage);
+  return null;
 }
 
 async function readLegacySummary(env: Env): Promise<Building[] | null> {
@@ -818,11 +1162,8 @@ async function readLegacySummary(env: Env): Promise<Building[] | null> {
   }
 }
 
-async function writeSummaryStorage(
-  summaryStorage: DurableObjectStorage,
-  buildings: Building[],
-): Promise<void> {
-  await summaryStorage.put(SUMMARY_STORAGE_KEY, buildings);
+async function writeSummaryKv(env: Env, buildings: Building[]): Promise<void> {
+  await buildingsKv(env).put(SUMMARY_KV_KEY, JSON.stringify(buildings));
 }
 
 function normalizeSummary(value: unknown): Building[] | null {
@@ -971,6 +1312,18 @@ function buildingsKv(env: Env): KVNamespace {
 
 function buildingKey(id: string): string {
   return `${BUILDING_KEY_PREFIX}${id}`;
+}
+
+function submissionKey(id: string): string {
+  return `${SUBMISSION_KEY_PREFIX}${id}`;
+}
+
+function playerSubmissionPrefix(playerUuid: string): string {
+  return `${SUBMISSION_PLAYER_INDEX_PREFIX}${playerUuid}:`;
+}
+
+function playerSubmissionKey(playerUuid: string, submissionId: string): string {
+  return `${playerSubmissionPrefix(playerUuid)}${submissionId}`;
 }
 
 function writeBuilding(env: Env, building: Building): Promise<void> {
@@ -1180,6 +1533,27 @@ async function forwardWriteToDurableObject(
   return response;
 }
 
+async function forwardPlayerSubmissionToDurableObject(
+  routePath: string,
+  request: Request,
+  env: Env,
+  headers: Headers,
+): Promise<Response> {
+  const id = env.BUILDINGS_WRITER.idFromName('global');
+  const writer = env.BUILDINGS_WRITER.get(id);
+  const url = new URL(request.url);
+  url.pathname = routePath;
+
+  return writer.fetch(
+    new Request(url, {
+      method: request.method,
+      headers,
+      body: request.body,
+      redirect: 'manual',
+    }),
+  );
+}
+
 function isMutatingMethod(method: string): boolean {
   return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
 }
@@ -1200,7 +1574,7 @@ async function syncBuildingCachesAfterMutation(
     await cacheMutationResponseBuildings(response);
   }
 
-  const summary = await readSummaryFromWriter(env);
+  const summary = await readSummaryFromKv(env);
 
   if (summary) {
     await writeSummaryCache(summary);
@@ -1337,7 +1711,7 @@ export class BuildingsWriter {
 
     if (url.pathname === INTERNAL_SUMMARY_PATH) {
       if (request.method === 'GET') {
-        const buildings = await readSummaryStorageOrRebuild(this.env, this.state.storage);
+        const buildings = await readSummaryKvOrRebuild(this.env);
         return json(buildings, 200, request, this.env);
       }
 
@@ -1345,8 +1719,13 @@ export class BuildingsWriter {
     }
 
     if (url.pathname === '/buildings') {
+      if (request.method === 'GET') {
+        const buildings = await readSummaryKvOrRebuild(this.env);
+        return json(buildings, 200, request, this.env);
+      }
+
       if (request.method === 'POST') {
-        return createBuilding(request, this.env, this.state.storage);
+        return createBuilding(request, this.env);
       }
 
       return methodNotAllowed(request, this.env);
@@ -1354,10 +1733,48 @@ export class BuildingsWriter {
 
     if (url.pathname === '/buildings/import') {
       if (request.method === 'POST') {
-        return importBuildings(request, this.env, this.state.storage);
+        return importBuildings(request, this.env);
       }
 
       return methodNotAllowed(request, this.env);
+    }
+
+    if (url.pathname === '/building-submissions') {
+      if (request.method === 'GET') {
+        return listSubmissions(request, this.env, this.state.storage);
+      }
+      if (request.method === 'POST') {
+        return createSubmission(request, this.env, this.state.storage);
+      }
+
+      return methodNotAllowed(request, this.env);
+    }
+
+    if (url.pathname === '/building-submissions/mine') {
+      if (request.method === 'POST') {
+        return listMineSubmissions(request, this.env, this.state.storage);
+      }
+
+      return methodNotAllowed(request, this.env);
+    }
+
+    const submissionEdit = url.pathname.match(/^\/building-submissions\/([a-z0-9]{8,24})$/i);
+    if (submissionEdit) {
+      if (request.method === 'PUT') {
+        return updateSubmission(submissionEdit[1], request, this.env, this.state.storage);
+      }
+
+      return methodNotAllowed(request, this.env);
+    }
+
+    const submissionAction = url.pathname.match(/^\/building-submissions\/([a-z0-9]{8,24})\/(approve|reject)$/i);
+    if (submissionAction) {
+      if (request.method !== 'PUT') {
+        return methodNotAllowed(request, this.env);
+      }
+      return submissionAction[2] === 'approve'
+        ? approveSubmission(submissionAction[1], request, this.env, this.state.storage)
+        : rejectSubmission(submissionAction[1], request, this.env, this.state.storage);
     }
 
     const match = url.pathname.match(/^\/buildings\/([a-z0-9]{8,24})$/i);
@@ -1369,15 +1786,15 @@ export class BuildingsWriter {
     const id = match[1];
 
     if (request.method === 'PUT') {
-      return replaceBuilding(id, request, this.env, this.state.storage);
+      return replaceBuilding(id, request, this.env);
     }
 
     if (request.method === 'PATCH') {
-      return patchBuilding(id, request, this.env, this.state.storage);
+      return patchBuilding(id, request, this.env);
     }
 
     if (request.method === 'DELETE') {
-      return deleteBuilding(id, request, this.env, this.state.storage);
+      return deleteBuilding(id, request, this.env);
     }
 
     return methodNotAllowed(request, this.env);

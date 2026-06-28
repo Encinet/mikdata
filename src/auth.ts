@@ -9,6 +9,10 @@ import {
   type WebAuthnCredential,
 } from '@simplewebauthn/server';
 import type { Env } from './env';
+import {
+  createPlayerBuildingSubmission,
+  listPlayerBuildingSubmissions,
+} from './buildings';
 import { authJson } from './http';
 
 const AUTH_STORE_NAME = 'global';
@@ -20,6 +24,7 @@ const SESSION_TOUCH_INTERVAL_SECONDS = 60 * 10;
 const CHALLENGE_TTL_SECONDS = 5 * 60;
 const CHALLENGE_CLEANUP_INTERVAL_SECONDS = 5 * 60;
 const WEB_LOGIN_CODE_RE = /^[0-9]{6,10}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALLOWED_ROLES = new Set(['member', 'helper', 'manager']);
 const RP_ID = 'mcmik.top';
 const RP_NAME = 'Mik Casual';
@@ -43,6 +48,14 @@ interface PluginChallengeResponse {
     role?: string;
   };
   confirmedAt?: string;
+}
+
+interface PluginMemberResolveResponse {
+  member?: {
+    uuid?: string;
+    name?: string;
+    role?: string;
+  };
 }
 
 interface SessionRecord {
@@ -222,6 +235,35 @@ export async function handleAuthRoute(
     return authJson(response.body, response.status);
   }
 
+  if (routePath === '/me/members/resolve' && request.method === 'POST') {
+    const payload = await readJsonObject(request);
+    const response = await callStore(store, {
+      action: 'resolveMember',
+      sessionId: payload.sessionId,
+      name: payload.name,
+    });
+    return authJson(response.body, response.status);
+  }
+
+  if (routePath === '/me/building-submissions' && request.method === 'POST') {
+    const payload = await readJsonObject(request);
+    const response = await callStore(store, {
+      action: 'createBuildingSubmission',
+      sessionId: payload.sessionId,
+      payload,
+    });
+    return authJson(response.body, response.status);
+  }
+
+  if (routePath === '/me/building-submissions/mine' && request.method === 'POST') {
+    const payload = await readJsonObject(request);
+    const response = await callStore(store, {
+      action: 'listBuildingSubmissions',
+      sessionId: payload.sessionId,
+    });
+    return authJson(response.body, response.status);
+  }
+
   return authJson({ error: 'not_found' }, 404);
 }
 
@@ -279,6 +321,12 @@ export class AuthStore implements DurableObject {
         return this.accountSummary(asString(body.sessionId));
       case 'accountSecurity':
         return this.accountSecurity(asString(body.sessionId));
+      case 'resolveMember':
+        return this.resolveMember(asString(body.sessionId), asString(body.name));
+      case 'createBuildingSubmission':
+        return this.createBuildingSubmission(asString(body.sessionId), body.payload);
+      case 'listBuildingSubmissions':
+        return this.listBuildingSubmissions(asString(body.sessionId));
       default:
         return { status: 404, body: { error: 'not_found' } };
     }
@@ -601,6 +649,75 @@ export class AuthStore implements DurableObject {
     };
   }
 
+  private async resolveMember(
+    sessionId: string,
+    name: string,
+  ): Promise<{ status: number; body: unknown }> {
+    const session = await this.readValidSession(sessionId);
+    if (!session) return { status: 401, body: { error: 'unauthenticated' } };
+    const requester = await this.readAccount(session.playerUuid);
+    if (!requester) return { status: 403, body: { error: 'member_required' } };
+
+    const normalizedName = normalizePlayerName(name);
+    if (!normalizedName) {
+      return { status: 422, body: { error: 'invalid_name' } };
+    }
+
+    const accountMember = await this.readAccountByName(normalizedName);
+    const member = accountMember ?? (await this.fetchPluginMember(normalizedName));
+    if (!member) {
+      return { status: 404, body: { error: 'member_not_found' } };
+    }
+
+    return {
+      status: 200,
+      body: {
+        member: {
+          uuid: member.playerUuid,
+          name: member.currentName,
+          role: member.role,
+        },
+      },
+    };
+  }
+
+  private async createBuildingSubmission(
+    sessionId: string,
+    payload: unknown,
+  ): Promise<{ status: number; body: unknown }> {
+    const session = await this.readValidSession(sessionId);
+    if (!session) return { status: 401, body: { error: 'unauthenticated' } };
+    const account = await this.readAccount(session.playerUuid);
+    if (!account) return { status: 403, body: { error: 'member_required' } };
+
+    return responseToStoreResult(
+      await createPlayerBuildingSubmission(
+        new Request('https://auth-store.local/building-submissions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload ?? {}),
+        }),
+        this.env,
+        account,
+      ),
+    );
+  }
+
+  private async listBuildingSubmissions(sessionId: string): Promise<{ status: number; body: unknown }> {
+    const session = await this.readValidSession(sessionId);
+    if (!session) return { status: 401, body: { error: 'unauthenticated' } };
+    const account = await this.readAccount(session.playerUuid);
+    if (!account) return { status: 403, body: { error: 'member_required' } };
+
+    return responseToStoreResult(
+      await listPlayerBuildingSubmissions(
+        new Request('https://auth-store.local/building-submissions/mine', { method: 'POST' }),
+        this.env,
+        account,
+      ),
+    );
+  }
+
   private async upsertAccount(
     playerUuid: string,
     currentName: string,
@@ -611,7 +728,14 @@ export class AuthStore implements DurableObject {
     const account: AccountRecord = existing
       ? { ...existing, currentName, role, updatedAt: now }
       : { playerUuid, currentName, role, updatedAt: now };
-    await this.storage.put(accountKey(playerUuid), account);
+    const writes: Promise<unknown>[] = [
+      this.storage.put(accountKey(playerUuid), account),
+      this.storage.put(accountNameKey(currentName), account.playerUuid),
+    ];
+    if (existing && normalizePlayerName(existing.currentName) !== normalizePlayerName(currentName)) {
+      writes.push(this.storage.delete(accountNameKey(existing.currentName)));
+    }
+    await Promise.all(writes);
     return account;
   }
 
@@ -654,10 +778,37 @@ export class AuthStore implements DurableObject {
     const account = (await this.storage.get<AccountRecord>(accountKey(playerUuid))) ?? null;
     if (!account) return null;
     if (!isEligibleRole(account.role)) {
-      await this.storage.delete(accountKey(playerUuid));
+      await Promise.all([
+        this.storage.delete(accountKey(playerUuid)),
+        this.storage.delete(accountNameKey(account.currentName)),
+      ]);
       return null;
     }
     return account;
+  }
+
+  private async readAccountByName(name: string): Promise<AccountRecord | null> {
+    const normalizedName = normalizePlayerName(name);
+    if (!normalizedName) return null;
+
+    const indexedUuid = await this.storage.get<string>(accountNameKey(normalizedName));
+    if (indexedUuid) {
+      const indexedAccount = await this.readAccount(indexedUuid);
+      if (indexedAccount && normalizePlayerName(indexedAccount.currentName) === normalizedName) {
+        return indexedAccount;
+      }
+      await this.storage.delete(accountNameKey(normalizedName));
+    }
+
+    const accounts = await this.storage.list<AccountRecord>({ prefix: 'account:' });
+    for (const account of accounts.values()) {
+      if (normalizePlayerName(account.currentName) !== normalizedName || !isEligibleRole(account.role)) {
+        continue;
+      }
+      await this.storage.put(accountNameKey(normalizedName), account.playerUuid);
+      return account;
+    }
+    return null;
   }
 
   private async accountSummaryBody(account: AccountRecord): Promise<PlayerAccountSummary> {
@@ -709,6 +860,28 @@ export class AuthStore implements DurableObject {
       return (await response.json()) as PluginChallengeResponse;
     } catch {
       return { status: 'unavailable' };
+    }
+  }
+
+  private async fetchPluginMember(name: string): Promise<AccountRecord | null> {
+    const path = `/api/members/resolve?name=${encodeURIComponent(name)}`;
+    try {
+      const response = await this.env.VPC_SERVICE.fetch(new URL(path, this.env.MINECRAFT_SERVER_URL), {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) return null;
+      const payload = (await response.json()) as PluginMemberResolveResponse;
+      const uuid = asString(payload.member?.uuid).toLowerCase();
+      const currentName = asString(payload.member?.name);
+      const role = normalizeRole(payload.member?.role);
+      if (!UUID_RE.test(uuid) || !currentName || !role) {
+        return null;
+      }
+      return this.upsertAccount(uuid, currentName, role);
+    } catch {
+      return null;
     }
   }
 
@@ -805,6 +978,11 @@ async function callStore(
   return (await response.json()) as { status: number; body: Record<string, unknown> };
 }
 
+async function responseToStoreResult(response: Response): Promise<{ status: number; body: unknown }> {
+  const body = await response.json().catch(() => ({}));
+  return { status: response.status, body };
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -833,6 +1011,11 @@ function rateLimitKey(action: string, clientKey: string): string {
 
 function sanitizeRateLimitPart(value: string): string {
   return value.trim().slice(0, 128).replace(/[^a-zA-Z0-9:._-]/g, '_') || 'unknown';
+}
+
+function normalizePlayerName(value: string): string {
+  const name = value.trim();
+  return /^[a-zA-Z0-9_]{3,16}$/.test(name) ? name.toLowerCase() : '';
 }
 
 function setLoginCookie(body: Record<string, unknown>): HeadersInit {
@@ -1000,6 +1183,10 @@ function optionalString(value: unknown): string | undefined {
 
 function accountKey(playerUuid: string): string {
   return `account:${playerUuid}`;
+}
+
+function accountNameKey(name: string): string {
+  return `account-name:${normalizePlayerName(name)}`;
 }
 
 function challengeKey(challengeId: string): string {

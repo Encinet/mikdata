@@ -37,7 +37,7 @@ test('building validation rejects http image URLs', () => {
   expect(result.ok).toBe(false);
 });
 
-test('public building reads survive unavailable KV when Durable Object summary exists', async () => {
+test('public building reads use KV summary without Durable Object summary storage', async () => {
   const building: Building = {
     id: 'abc12345',
     ...validBuilding,
@@ -66,9 +66,12 @@ test('public building reads survive unavailable KV when Durable Object summary e
 });
 
 function createEnvWithSummary(buildings: Building[]): Env {
-  const unavailableKv = {
-    get: () => {
-      throw new Error('KV unavailable');
+  const kv = {
+    get: (key: string) => {
+      if (key === 'building-summary:v1') {
+        return Promise.resolve(JSON.stringify(buildings));
+      }
+      return Promise.resolve(null);
     },
     put: () => {
       throw new Error('KV unavailable');
@@ -81,21 +84,9 @@ function createEnvWithSummary(buildings: Building[]): Env {
     },
   } as unknown as KVNamespace;
 
-  const writer = {
-    fetch: () =>
-      Promise.resolve(
-        new Response(JSON.stringify(buildings), {
-          headers: { 'Content-Type': 'application/json' },
-        }),
-      ),
-  } as unknown as DurableObjectStub;
-
   return {
-    BUILDINGS_KV: unavailableKv,
-    BUILDINGS_WRITER: {
-      idFromName: () => ({}) as DurableObjectId,
-      get: () => writer,
-    } as unknown as DurableObjectNamespace,
+    BUILDINGS_KV: kv,
+    BUILDINGS_WRITER: {} as DurableObjectNamespace,
     AUTH_STORE: {} as DurableObjectNamespace,
     VPC_SERVICE: {} as Fetcher,
     MINECRAFT_SERVER_URL: 'https://upstream.example',
