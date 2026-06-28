@@ -22,9 +22,21 @@
 	},
 	"migrations": [
 		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"BuildingsWriter"
+			]
+		},
+		{
 			"tag": "v2",
 			"new_sqlite_classes": [
 				"AuthStore"
+			]
+		},
+		{
+			"tag": "v3",
+			"deleted_classes": [
+				"BuildingsWriter"
 			]
 		}
 	],
