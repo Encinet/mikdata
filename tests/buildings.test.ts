@@ -111,6 +111,50 @@ test('submission status transitions maintain pending and status indexes', async 
   expect(await env.BUILDINGS_KV.get(`building-submission-status:rejected:${payload.submission.id}`)).toBe(payload.submission.id);
 });
 
+test('approved submissions are added to managed public buildings', async () => {
+  const env = createMemoryEnv();
+  const created = await createPlayerBuildingSubmission(createSubmissionRequest(), env, {
+    playerUuid: '00000000-0000-0000-0000-000000000000',
+    currentName: 'Player',
+    role: 'member',
+  });
+  const payload = (await created.json()) as { submission: { id: string } };
+
+  const approved = await handleAdminBuildingsRoute(
+    `/building-submissions/${payload.submission.id}/approve`,
+    new Request(`https://data.mcmik.top/admin/api/building-submissions/${payload.submission.id}/approve`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }),
+    env,
+    { email: 'admin@example.com' },
+  );
+
+  expect(approved?.status).toBe(200);
+  const approvedBody = (await approved?.json()) as { building: Building; submission: { buildingId: string; status: string } };
+  expect(approvedBody.submission.status).toBe('approved');
+  expect(approvedBody.submission.buildingId).toBe(approvedBody.building.id);
+  expect(await env.BUILDINGS_KV.get(`building:${approvedBody.building.id}`)).not.toBe(null);
+
+  const adminList = await handleAdminBuildingsRoute(
+    '/buildings',
+    new Request('https://data.mcmik.top/admin/api/buildings'),
+    env,
+    { email: 'admin@example.com' },
+  );
+  expect(adminList?.status).toBe(200);
+  expect(await adminList?.json()).toEqual([approvedBody.building]);
+
+  const publicList = await handlePublicBuildingsRoute(
+    '/buildings',
+    new Request('https://data.mcmik.top/api/buildings'),
+    env,
+  );
+  expect(publicList?.status).toBe(200);
+  expect(await publicList?.json()).toEqual([approvedBody.building]);
+});
+
 function createEnvWithSummary(buildings: Building[]): Env {
   const kv = {
     get: (key: string) => {

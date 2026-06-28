@@ -123,7 +123,8 @@ export async function handleAdminBuildingsRoute(
   if (
     routePath !== '/buildings' &&
     routePath !== '/buildings/import' &&
-    routePath !== '/building-submissions'
+    routePath !== '/building-submissions' &&
+    routePath !== '/building-submissions/repair-approved'
   ) {
     const match = routePath.match(/^\/buildings\/([a-z0-9]{8,24})$/i);
     const submissionEditMatch = routePath.match(/^\/building-submissions\/([a-z0-9]{8,24})$/i);
@@ -192,6 +193,13 @@ async function handleSubmissionRoute(routePath: string, request: Request, env: E
   if (routePath === '/building-submissions/mine') {
     if (request.method === 'POST') {
       return listMineSubmissions(request, env);
+    }
+    return methodNotAllowed(request, env);
+  }
+
+  if (routePath === '/building-submissions/repair-approved') {
+    if (request.method === 'POST') {
+      return repairApprovedSubmissions(request, env);
     }
     return methodNotAllowed(request, env);
   }
@@ -708,8 +716,127 @@ async function approveSubmission(
   await writeBuilding(env, building);
   await writeApprovedSubmission(env, submission);
   await rebuildBuildingsSummary(env);
+  await writeBuildingCache(building);
   auditBuildingMutation('approve-submission', building.id, request);
   return json({ submission, building }, 200, request, env);
+}
+
+async function repairApprovedSubmissions(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  await ensureSubmissionIndexes(env);
+
+  const keys = await listKvKeys(env, submissionStatusPrefix('approved'));
+  const existingBuildings = await readAllBuildings(env);
+  const buildingsById = new Map(existingBuildings.map((building) => [building.id, building]));
+  const changedBuildings: Building[] = [];
+  const results: {
+    submissionId: string;
+    action: 'created' | 'restored' | 'linked' | 'skipped' | 'removed-index' | 'failed';
+    buildingId?: string;
+    reason?: string;
+  }[] = [];
+
+  let created = 0;
+  let restored = 0;
+  let linked = 0;
+  let skipped = 0;
+  let removedIndexes = 0;
+  let failed = 0;
+
+  for (const key of keys) {
+    const submissionId = key.slice(submissionStatusPrefix('approved').length);
+    const submission = await readSubmission(env, submissionId);
+
+    if (!submission) {
+      await buildingsKv(env).delete(key);
+      removedIndexes += 1;
+      results.push({ submissionId, action: 'removed-index', reason: 'submission not found' });
+      continue;
+    }
+
+    if (submission.status !== 'approved') {
+      await buildingsKv(env).delete(key);
+      removedIndexes += 1;
+      results.push({ submissionId, action: 'removed-index', reason: `status is ${submission.status}` });
+      continue;
+    }
+
+    const validation = validateBuildingInput(submission.payload);
+    if (!validation.ok) {
+      failed += 1;
+      results.push({ submissionId, action: 'failed', reason: validation.message });
+      continue;
+    }
+
+    const payload = validation.value;
+    const existingId =
+      typeof submission.buildingId === 'string' && isValidBuildingId(submission.buildingId)
+        ? submission.buildingId
+        : null;
+
+    if (existingId && buildingsById.has(existingId)) {
+      skipped += 1;
+      results.push({ submissionId, action: 'skipped', buildingId: existingId });
+      continue;
+    }
+
+    const duplicateId = findDuplicateBuildingIdInList(existingBuildings, payload);
+    if (duplicateId && duplicateId !== existingId) {
+      submission.payload = payload;
+      submission.buildingId = duplicateId;
+      await writeApprovedSubmission(env, submission);
+      linked += 1;
+      results.push({ submissionId, action: 'linked', buildingId: duplicateId });
+      continue;
+    }
+
+    const now = submission.updatedAt || submission.createdAt || new Date().toISOString();
+    const building: Building = {
+      id: existingId ?? (await createBuildingId(env)),
+      ...payload,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    submission.payload = payload;
+    submission.buildingId = building.id;
+    await Promise.all([writeBuilding(env, building), writeApprovedSubmission(env, submission)]);
+
+    existingBuildings.push(building);
+    buildingsById.set(building.id, building);
+    changedBuildings.push(building);
+
+    if (existingId) {
+      restored += 1;
+      results.push({ submissionId, action: 'restored', buildingId: building.id });
+    } else {
+      created += 1;
+      results.push({ submissionId, action: 'created', buildingId: building.id });
+    }
+  }
+
+  if (changedBuildings.length > 0 || linked > 0 || removedIndexes > 0) {
+    await rebuildBuildingsSummary(env);
+    await Promise.all(changedBuildings.map(writeBuildingCache));
+  }
+
+  return json(
+    {
+      scanned: keys.length,
+      created,
+      restored,
+      linked,
+      skipped,
+      removedIndexes,
+      failed,
+      results,
+    },
+    200,
+    request,
+    env,
+  );
 }
 
 async function updateSubmission(
@@ -1264,8 +1391,7 @@ async function rebuildBuildingsSummary(env: Env): Promise<Building[]> {
   const buildings = await readAllBuildings(env);
   buildings.sort(compareBuildingsForSummary);
   await writeSummaryKv(env, buildings);
-  summaryMemoryCache.set(SUMMARY_CACHE_KEY, buildings);
-  buildingListMemoryCache.clear();
+  await writeSummaryCache(buildings);
   return buildings;
 }
 
@@ -1382,10 +1508,12 @@ function isBuildingSubmission(value: unknown): value is BuildingSubmission {
 }
 
 async function findDuplicateBuildingId(env: Env, input: Input): Promise<string | null> {
-  const buildings = await readAllBuildings(env);
+  return findDuplicateBuildingIdInList(await readAllBuildings(env), input);
+}
 
+function findDuplicateBuildingIdInList(buildings: (Input | Building)[], input: Input): string | null {
   for (const building of buildings) {
-    if (isDuplicateBuilding(building, input)) {
+    if ('id' in building && isDuplicateBuilding(building, input)) {
       return building.id;
     }
   }
@@ -1902,6 +2030,7 @@ function isSubmissionRoute(routePath: string): boolean {
   return (
     routePath === '/building-submissions' ||
     routePath === '/building-submissions/mine' ||
+    routePath === '/building-submissions/repair-approved' ||
     /^\/building-submissions\/[a-z0-9]{8,24}(?:\/(?:approve|reject))?$/i.test(routePath)
   );
 }
