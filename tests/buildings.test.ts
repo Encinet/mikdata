@@ -86,7 +86,6 @@ function createEnvWithSummary(buildings: Building[]): Env {
 
   return {
     BUILDINGS_KV: kv,
-    BUILDINGS_WRITER: {} as DurableObjectNamespace,
     AUTH_STORE: {} as DurableObjectNamespace,
     VPC_SERVICE: {} as Fetcher,
     MINECRAFT_SERVER_URL: 'https://upstream.example',

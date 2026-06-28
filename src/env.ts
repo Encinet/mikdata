@@ -1,6 +1,5 @@
 export interface Env {
   BUILDINGS_KV: KVNamespace;
-  BUILDINGS_WRITER: DurableObjectNamespace;
   AUTH_STORE: DurableObjectNamespace;
   VPC_SERVICE: Fetcher;
   MINECRAFT_SERVER_URL: string;

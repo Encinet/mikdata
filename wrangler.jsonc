@@ -15,22 +15,12 @@
 	"durable_objects": {
 		"bindings": [
 			{
-				"name": "BUILDINGS_WRITER",
-				"class_name": "BuildingsWriter"
-			},
-			{
 				"name": "AUTH_STORE",
 				"class_name": "AuthStore"
 			}
 		]
 	},
 	"migrations": [
-		{
-			"tag": "v1",
-			"new_sqlite_classes": [
-				"BuildingsWriter"
-			]
-		},
 		{
 			"tag": "v2",
 			"new_sqlite_classes": [

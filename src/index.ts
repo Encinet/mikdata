@@ -3,7 +3,6 @@ import { requireCloudflareAccess } from './access';
 import { adminPage } from './admin';
 import { AuthStore, handleAuthRoute } from './auth';
 import {
-  BuildingsWriter,
   handleAdminBuildingsRoute,
   handlePublicBuildingsRoute,
 } from './buildings';
@@ -14,7 +13,7 @@ import { matchProxyRoute, refreshProxyRoutes, serveProxyRoute } from './proxy';
 const ADMIN_API_BASE_PATH = '/admin/api';
 const PUBLIC_BASE_PATH = '/api';
 
-export { AuthStore, BuildingsWriter };
+export { AuthStore };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

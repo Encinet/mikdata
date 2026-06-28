@@ -214,7 +214,6 @@ function createStorage(): DurableObjectStorage {
 function createEnv(overrides: Partial<Env> = {}): Env {
   return {
     BUILDINGS_KV: {} as KVNamespace,
-    BUILDINGS_WRITER: {} as DurableObjectNamespace,
     AUTH_STORE: {} as DurableObjectNamespace,
     VPC_SERVICE: {} as Fetcher,
     MINECRAFT_SERVER_URL: 'https://minecraft.internal',
