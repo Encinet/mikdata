@@ -176,6 +176,66 @@ test('minecraft challenge status polling is rate limited per client key', async 
   expect(limited.body.error).toBe('rate_limited');
 });
 
+test('worker rate limits auth requests before invoking the durable object', async () => {
+  const createKeys: string[] = [];
+  const clientKeys: string[] = [];
+  const storeKeys: string[] = [];
+  const response = await worker.fetch(
+    new Request('https://data.mcmik.top/auth/challenges', {
+      method: 'POST',
+      headers: {
+        'X-Mik-Client-Key': 'ip:203.0.113.12',
+        'X-Mikweb-Auth': 'test-secret',
+      },
+    }),
+    createEnv({
+      AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(true, createKeys),
+      AUTH_CLIENT_RATE_LIMITER: createRateLimit(true, clientKeys),
+      AUTH_STORE_RATE_LIMITER: createRateLimit(false, storeKeys),
+      AUTH_STORE: {
+        idFromName: () => {
+          throw new Error('auth store should not be called');
+        },
+      } as unknown as DurableObjectNamespace,
+    }),
+    createExecutionContext(),
+  );
+
+  expect(response.status).toBe(429);
+  expect(response.headers.get('Retry-After')).toBe('60');
+  expect(await response.json()).toEqual({ error: 'rate_limited', retryAfterSeconds: 60 });
+  expect(createKeys).toEqual(['ip:203.0.113.12']);
+  expect(clientKeys).toEqual(['ip:203.0.113.12']);
+  expect(storeKeys).toEqual(['auth-store:v1']);
+});
+
+test('worker fails closed when an auth rate limiter is unavailable', async () => {
+  const response = await worker.fetch(
+    new Request('https://data.mcmik.top/auth/challenges', {
+      method: 'POST',
+      headers: {
+        'X-Mik-Client-Key': 'ip:203.0.113.13',
+        'X-Mikweb-Auth': 'test-secret',
+      },
+    }),
+    createEnv({
+      AUTH_CHALLENGE_CREATE_RATE_LIMITER: {
+        limit: () => Promise.reject(new Error('rate limiter unavailable')),
+      } as RateLimit,
+      AUTH_STORE: {
+        idFromName: () => {
+          throw new Error('auth store should not be called');
+        },
+      } as unknown as DurableObjectNamespace,
+    }),
+    createExecutionContext(),
+  );
+
+  expect(response.status).toBe(503);
+  expect(response.headers.get('Retry-After')).toBe('10');
+  expect(await response.json()).toEqual({ error: 'rate_limiter_unavailable' });
+});
+
 test('auth preflight does not return wildcard cors headers', async () => {
   const response = await worker.fetch(
     new Request('https://data.mcmik.top/auth/me', { method: 'OPTIONS' }),
@@ -585,6 +645,11 @@ function createEnv(overrides: Partial<Env> = {}): Env {
   return {
     BUILDINGS_KV: {} as KVNamespace,
     AUTH_STORE: {} as DurableObjectNamespace,
+    AUTH_STORE_RATE_LIMITER: createRateLimit(),
+    AUTH_CLIENT_RATE_LIMITER: createRateLimit(),
+    AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(),
+    AUTH_SENSITIVE_RATE_LIMITER: createRateLimit(),
+    PUBLIC_API_RATE_LIMITER: createRateLimit(),
     VPC_SERVICE: {} as Fetcher,
     MINECRAFT_SERVER_URL: 'https://minecraft.internal',
     MINECRAFT_SERVER_ADDRESS: 'mc.example',
@@ -593,6 +658,15 @@ function createEnv(overrides: Partial<Env> = {}): Env {
     CLOUDFLARE_ACCESS_AUD: 'aud',
     MIKWEB_AUTH_CLIENT_SECRET: 'test-secret',
     ...overrides,
+  };
+}
+
+function createRateLimit(success = true, keys?: string[]): RateLimit {
+  return {
+    limit: ({ key }) => {
+      keys?.push(key);
+      return Promise.resolve({ success });
+    },
   };
 }
 

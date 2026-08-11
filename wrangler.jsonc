@@ -4,9 +4,60 @@
 	"main": "src/index.ts",
 	"compatibility_date": "2026-06-26",
 	"workers_dev": false,
+	"routes": [
+		{
+			"pattern": "data.mcmik.top",
+			"custom_domain": true
+		}
+	],
+	"placement": {
+		"mode": "smart"
+	},
 	"observability": {
 		"enabled": true
 	},
+	"ratelimits": [
+		{
+			"name": "AUTH_STORE_RATE_LIMITER",
+			"namespace_id": "81126001",
+			"simple": {
+				"limit": 60,
+				"period": 60
+			}
+		},
+		{
+			"name": "AUTH_CLIENT_RATE_LIMITER",
+			"namespace_id": "81126002",
+			"simple": {
+				"limit": 60,
+				"period": 60
+			}
+		},
+		{
+			"name": "AUTH_CHALLENGE_CREATE_RATE_LIMITER",
+			"namespace_id": "81126003",
+			"simple": {
+				"limit": 8,
+				"period": 60
+			}
+		},
+		{
+			"name": "AUTH_SENSITIVE_RATE_LIMITER",
+			"namespace_id": "81126004",
+			"simple": {
+				"limit": 20,
+				"period": 60
+			}
+		},
+		{
+			"name": "PUBLIC_API_RATE_LIMITER",
+			"namespace_id": "81126005",
+			"simple": {
+				"limit": 120,
+				"period": 60
+			}
+		}
+	],
 	"triggers": {
 		"crons": [
 			"*/5 * * * *"

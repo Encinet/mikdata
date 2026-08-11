@@ -29,6 +29,8 @@ const ACCOUNT_CACHE_TTL_MS = 60 * 1000;
 const PASSKEY_CACHE_TTL_MS = 60 * 1000;
 const PLAYER_RESOLVE_CACHE_TTL_MS = 60 * 1000;
 const MAX_AUTH_BODY_BYTES = 64 * 1024;
+const AUTH_RATE_LIMIT_WINDOW_SECONDS = 60;
+const AUTH_RATE_LIMIT_RETRY_SECONDS = 10;
 const WEB_LOGIN_CODE_RE = /^[0-9]{6,10}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALLOWED_ROLES = new Set(['member', 'helper', 'manager']);
@@ -127,6 +129,11 @@ interface RateLimitRecord {
   resetAt: number;
 }
 
+interface AuthRateLimitCheck {
+  limiter: RateLimit;
+  key: string;
+}
+
 export async function handleAuthRoute(
   routePath: string,
   request: Request,
@@ -140,8 +147,10 @@ export async function handleAuthRoute(
     return authJson({ error: 'forbidden' }, 403);
   }
 
-  const store = authStore(env);
   const clientKey = clientRateLimitKey(request);
+  const rateLimited = await enforceAuthRateLimits(routePath, request.method, clientKey, env);
+  if (rateLimited) return rateLimited;
+  const store = authStore(env);
 
   if (routePath === '/auth/challenges' && request.method === 'POST') {
     const response = await callStore(store, { action: 'createMinecraftChallenge', clientKey });
@@ -295,10 +304,70 @@ export async function handleAuthRoute(
   return authJson({ error: 'not_found' }, 404);
 }
 
+async function enforceAuthRateLimits(
+  routePath: string,
+  method: string,
+  clientKey: string,
+  env: Env,
+): Promise<Response | null> {
+  const checks: AuthRateLimitCheck[] = [];
+  const action = authSensitiveAction(routePath, method);
+
+  if (routePath === '/auth/challenges' && method === 'POST') {
+    checks.push({ limiter: env.AUTH_CHALLENGE_CREATE_RATE_LIMITER, key: clientKey });
+  } else if (action) {
+    checks.push({ limiter: env.AUTH_SENSITIVE_RATE_LIMITER, key: `${action}:${clientKey}` });
+  }
+
+  checks.push(
+    { limiter: env.AUTH_CLIENT_RATE_LIMITER, key: clientKey },
+    { limiter: env.AUTH_STORE_RATE_LIMITER, key: 'auth-store:v1' },
+  );
+
+  try {
+    for (const check of checks) {
+      const { success } = await check.limiter.limit({ key: check.key });
+      if (!success) {
+        return authJson(
+          { error: 'rate_limited', retryAfterSeconds: AUTH_RATE_LIMIT_WINDOW_SECONDS },
+          429,
+          { 'Retry-After': String(AUTH_RATE_LIMIT_WINDOW_SECONDS) },
+        );
+      }
+    }
+  } catch (error) {
+    console.error('Auth rate limit check failed', { routePath, method, error });
+    return authJson(
+      { error: 'rate_limiter_unavailable' },
+      503,
+      { 'Retry-After': String(AUTH_RATE_LIMIT_RETRY_SECONDS) },
+    );
+  }
+
+  return null;
+}
+
+function authSensitiveAction(routePath: string, method: string): string | null {
+  if (method !== 'POST') return null;
+  if (/^\/auth\/challenges\/[^/]+\/complete$/.test(routePath)) {
+    return 'minecraft-challenge:complete';
+  }
+  if (routePath === '/auth/passkeys/options/login') {
+    return 'passkey-authentication:create';
+  }
+  if (routePath === '/auth/passkeys/login') {
+    return 'passkey-authentication:login';
+  }
+  return null;
+}
+
 export class AuthStore implements DurableObject {
   private readonly storage: DurableObjectStorage;
   private readonly env: Env;
-  private readonly rateLimits = new Map<string, RateLimitRecord>();
+  private readonly rateLimits = new TtlMemoryCache<RateLimitRecord>({
+    defaultTtlMs: AUTH_RATE_LIMIT_WINDOW_SECONDS * 1000,
+    maxEntries: 2048,
+  });
   private readonly sessionCache = new TtlMemoryCache<SessionRecord>({
     defaultTtlMs: SESSION_TOUCH_INTERVAL_SECONDS * 1000,
     maxEntries: 2048,
@@ -1153,18 +1222,15 @@ export class AuthStore implements DurableObject {
     windowSeconds: number,
   ): { status: number; body: Record<string, unknown> } | null {
     const now = Date.now();
-    if (this.rateLimits.size > 2048) {
-      for (const [entryKey, record] of this.rateLimits.entries()) {
-        if (record.resetAt <= now) {
-          this.rateLimits.delete(entryKey);
-        }
-      }
-    }
+    const existing = this.rateLimits.get(key, now);
 
-    const existing = this.rateLimits.get(key);
-
-    if (!existing || existing.resetAt <= now) {
-      this.rateLimits.set(key, { count: 1, resetAt: now + windowSeconds * 1000 });
+    if (!existing) {
+      this.rateLimits.set(
+        key,
+        { count: 1, resetAt: now + windowSeconds * 1000 },
+        windowSeconds * 1000,
+        now,
+      );
       return null;
     }
 
@@ -1297,8 +1363,21 @@ async function readLimitedRequestText(request: Request): Promise<string> {
 
 function isMikwebClientRequest(request: Request, env: Env): boolean {
   const expected = env.MIKWEB_AUTH_CLIENT_SECRET?.trim();
-  if (!expected) return false;
-  return request.headers.get('X-Mikweb-Auth') === expected;
+  const actual = request.headers.get('X-Mikweb-Auth');
+  if (!expected || !actual) return false;
+  const encoder = new TextEncoder();
+  const expectedBytes = encoder.encode(expected);
+  const actualBytes = encoder.encode(actual);
+  if (expectedBytes.byteLength !== actualBytes.byteLength) return false;
+  if (typeof crypto.subtle.timingSafeEqual === 'function') {
+    return crypto.subtle.timingSafeEqual(expectedBytes, actualBytes);
+  }
+
+  let difference = 0;
+  for (let index = 0; index < expectedBytes.byteLength; index += 1) {
+    difference |= expectedBytes[index] ^ actualBytes[index];
+  }
+  return difference === 0;
 }
 
 function clientRateLimitKey(request: Request): string {

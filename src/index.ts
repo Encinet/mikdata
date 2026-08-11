@@ -12,6 +12,8 @@ import { matchProxyRoute, refreshProxyRoutes, serveProxyRoute } from './proxy';
 
 const ADMIN_API_BASE_PATH = '/admin/api';
 const PUBLIC_BASE_PATH = '/api';
+const PUBLIC_RATE_LIMIT_WINDOW_SECONDS = 60;
+const RATE_LIMIT_RETRY_SECONDS = 10;
 
 export { AuthStore };
 
@@ -85,6 +87,11 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
     return json({ error: 'Not found' }, 404, request, env);
   }
 
+  if (request.method === 'GET') {
+    const rateLimited = await enforcePublicRateLimit(request, env);
+    if (rateLimited) return rateLimited;
+  }
+
   const routePath = url.pathname.slice(PUBLIC_BASE_PATH.length);
   const buildingsResponse = await handlePublicBuildingsRoute(routePath, request, env);
 
@@ -103,6 +110,38 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
   }
 
   return serveProxyRoute(route, request, env, ctx);
+}
+
+async function enforcePublicRateLimit(request: Request, env: Env): Promise<Response | null> {
+  try {
+    const { success } = await env.PUBLIC_API_RATE_LIMITER.limit({ key: publicClientKey(request) });
+    if (success) return null;
+    return json(
+      { error: 'rate_limited', retryAfterSeconds: PUBLIC_RATE_LIMIT_WINDOW_SECONDS },
+      429,
+      request,
+      env,
+      {
+        'Cache-Control': 'no-store',
+        'Retry-After': String(PUBLIC_RATE_LIMIT_WINDOW_SECONDS),
+      },
+    );
+  } catch (error) {
+    console.error('Public API rate limit check failed', {
+      path: new URL(request.url).pathname,
+      error,
+    });
+    return json({ error: 'rate_limiter_unavailable' }, 503, request, env, {
+      'Cache-Control': 'no-store',
+      'Retry-After': String(RATE_LIMIT_RETRY_SECONDS),
+    });
+  }
+}
+
+function publicClientKey(request: Request): string {
+  const address = request.headers.get('CF-Connecting-IP')?.trim().slice(0, 64) ?? '';
+  const normalized = address.replace(/[^a-fA-F0-9:.-]/g, '_') || 'unknown';
+  return `ip:${normalized}`;
 }
 
 function isAuthPath(pathname: string): boolean {

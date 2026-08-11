@@ -694,6 +694,11 @@ function createEnvWithSummary(buildings: Building[]): Env {
   const env = {
     BUILDINGS_KV: kv,
     AUTH_STORE: {} as DurableObjectNamespace,
+    AUTH_STORE_RATE_LIMITER: createRateLimit(),
+    AUTH_CLIENT_RATE_LIMITER: createRateLimit(),
+    AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(),
+    AUTH_SENSITIVE_RATE_LIMITER: createRateLimit(),
+    PUBLIC_API_RATE_LIMITER: createRateLimit(),
     VPC_SERVICE: {} as Fetcher,
     MINECRAFT_SERVER_URL: 'https://upstream.example',
     MINECRAFT_SERVER_ADDRESS: 'mc.example',
@@ -725,6 +730,11 @@ function createNoListEnvWithSummary(buildings: Building[]): Env & { BUILDINGS_KV
   const env = {
     BUILDINGS_KV: kv,
     AUTH_STORE: {} as DurableObjectNamespace,
+    AUTH_STORE_RATE_LIMITER: createRateLimit(),
+    AUTH_CLIENT_RATE_LIMITER: createRateLimit(),
+    AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(),
+    AUTH_SENSITIVE_RATE_LIMITER: createRateLimit(),
+    PUBLIC_API_RATE_LIMITER: createRateLimit(),
     VPC_SERVICE: {} as Fetcher,
     MINECRAFT_SERVER_URL: 'https://upstream.example',
     MINECRAFT_SERVER_ADDRESS: 'mc.example',
@@ -796,6 +806,11 @@ function createMemoryEnv(): Env & { BUILDINGS_KV: KVNamespace; KV_GETS: string[]
     BUILDINGS_KV: kv,
     KV_GETS: getKeys,
     AUTH_STORE: {} as DurableObjectNamespace,
+    AUTH_STORE_RATE_LIMITER: createRateLimit(),
+    AUTH_CLIENT_RATE_LIMITER: createRateLimit(),
+    AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(),
+    AUTH_SENSITIVE_RATE_LIMITER: createRateLimit(),
+    PUBLIC_API_RATE_LIMITER: createRateLimit(),
     VPC_SERVICE: {} as Fetcher,
     MINECRAFT_SERVER_URL: 'https://upstream.example',
     MINECRAFT_SERVER_ADDRESS: 'mc.example',
@@ -805,6 +820,12 @@ function createMemoryEnv(): Env & { BUILDINGS_KV: KVNamespace; KV_GETS: string[]
   };
   env.AUTH_STORE = createCoordinatorNamespace(env);
   return env;
+}
+
+function createRateLimit(): RateLimit {
+  return {
+    limit: () => Promise.resolve({ success: true }),
+  };
 }
 
 function createCoordinatorNamespace(env: Env): DurableObjectNamespace {
