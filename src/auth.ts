@@ -889,7 +889,7 @@ export class AuthStore implements DurableObject {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     const account = await this.readAccount(session.playerUuid);
-    if (!account) return { status: 403, body: { error: 'member_required' } };
+    if (!account || account.role === 'default') return { status: 403, body: { error: 'member_required' } };
 
     return this.queuePlayerSubmission(
       account.playerUuid,
@@ -911,7 +911,7 @@ export class AuthStore implements DurableObject {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     const account = await this.readAccount(session.playerUuid);
-    if (!account) return { status: 403, body: { error: 'member_required' } };
+    if (!account || account.role === 'default') return { status: 403, body: { error: 'member_required' } };
 
     return responseToStoreResult(
       await listPlayerBuildingSubmissions(

@@ -92,6 +92,11 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
     if (rateLimited) return rateLimited;
   }
 
+  if (url.pathname === '/api/community/notices'
+      || url.pathname.startsWith('/api/community/notices/')) {
+    return serveCommunityBoard(request, env);
+  }
+
   const routePath = url.pathname.slice(PUBLIC_BASE_PATH.length);
   const buildingsResponse = await handlePublicBuildingsRoute(routePath, request, env);
 
@@ -110,6 +115,31 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
   }
 
   return serveProxyRoute(route, request, env, ctx);
+}
+
+/** MikData only forwards public board records; the game server owns all board data. */
+async function serveCommunityBoard(request: Request, env: Env): Promise<Response> {
+  const pathname = new URL(request.url).pathname;
+  const headers = { 'Cache-Control': 'no-store' };
+  if (request.method !== 'GET')
+    return json({ error: 'method_not_allowed' }, 405, request, env, headers);
+  const prefix = '/api/community/notices/';
+  if (pathname.startsWith(prefix)
+      && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pathname.slice(prefix.length)))
+    return json({ error: 'not_found' }, 404, request, env, headers);
+  try {
+    const response = await env.VPC_SERVICE.fetch(new URL(pathname, env.MINECRAFT_SERVER_URL), {
+      method: 'GET', headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(5000),
+    });
+    if (response.status !== 200 && response.status !== 404)
+      return json({ error: 'upstream_unavailable' }, 502, request, env, headers);
+    if (!(response.headers.get('Content-Type') ?? '').toLowerCase().includes('application/json'))
+      return json({ error: 'upstream_unavailable' }, 502, request, env, headers);
+    return json(await response.json(), response.status, request, env, headers);
+  } catch (error) {
+    console.error('Community board upstream failed', error);
+    return json({ error: 'upstream_unavailable' }, 502, request, env, headers);
+  }
 }
 
 async function enforcePublicRateLimit(request: Request, env: Env): Promise<Response | null> {

@@ -27,6 +27,51 @@ test('public proxy routes survive unavailable KV', async () => {
   }
 });
 
+test('community board reads are forwarded without storing recipient identities', async () => {
+  const env = createEnvWithUnavailableKv();
+  env.MIKWEB_AUTH_CLIENT_SECRET = 'test-secret';
+  env.AUTH_STORE = {
+    idFromName: () => 'store-id',
+    get: () => ({ fetch: () => { throw new Error('removed board write reached the store'); } }),
+  } as unknown as DurableObjectNamespace;
+  const paths: string[] = [];
+  const id = '00000000-0000-0000-0000-000000000099';
+  env.VPC_SERVICE = {
+    fetch: (input: RequestInfo | URL) => {
+      const pathname = new URL(input.toString()).pathname;
+      paths.push(pathname);
+      return Promise.resolve(Response.json(pathname.endsWith(id)
+        ? { notice: { id, notifiedPlayers: ['Builder'] } }
+        : { notices: [{ id, notifiedPlayers: ['Builder'] }] }));
+    },
+  } as Fetcher;
+  const ctx = createExecutionContext();
+  const list = await worker.fetch(new Request('https://data.mcmik.top/api/community/notices'), env, ctx);
+  const detail = await worker.fetch(new Request(`https://data.mcmik.top/api/community/notices/${id}`), env, ctx);
+  expect(list.status).toBe(200);
+  expect(detail.status).toBe(200);
+  expect(list.headers.get('Cache-Control')).toBe('no-store');
+  expect(await detail.json()).toEqual({ notice: { id, notifiedPlayers: ['Builder'] } });
+  expect(paths).toEqual(['/api/community/notices', `/api/community/notices/${id}`]);
+
+  const invalid = await worker.fetch(new Request('https://data.mcmik.top/api/community/notices/invalid'), env, ctx);
+  const write = await worker.fetch(new Request('https://data.mcmik.top/api/community/notices',
+    { method: 'POST', body: '{}' }), env, ctx);
+  const formerGameWrite = await worker.fetch(new Request('https://data.mcmik.top/api/community/game',
+    { method: 'POST', body: '{}' }), env, ctx);
+  expect(invalid.status).toBe(404);
+  expect(write.status).toBe(405);
+  expect(formerGameWrite.status).toBe(405);
+  for (const route of ['/me/community/notices', '/me/community/objections',
+    `/me/community/objections/${id}/withdraw`]) {
+    const response = await worker.fetch(new Request(`https://data.mcmik.top${route}`, {
+      method: 'POST', headers: { 'X-Mikweb-Auth': 'test-secret' }, body: '{}',
+    }), env, ctx);
+    expect(response.status).toBe(404);
+  }
+  expect(paths).toHaveLength(2);
+});
+
 test('public API rate limiting rejects before upstream work', async () => {
   const keys: string[] = [];
   const env = createEnvWithUnavailableKv();

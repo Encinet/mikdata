@@ -15,6 +15,8 @@ Public API:
 - `GET /api/buildings/:id`
 - `GET /api/bans`
 - `GET /api/announcements`
+- `GET /api/community/notices`
+- `GET /api/community/notices/:id`
 - `GET /health`
 
 Admin UI and write API:
@@ -117,6 +119,8 @@ bunx wrangler secret put WEBAUTHN_ORIGIN
 ```
 
 For local development, copy `.dev.vars.example` to `.dev.vars` and fill values. `.dev.vars` is ignored by git.
+
+Community board records and recipient UUIDs are stored by the Minecraft plugin. MikData forwards only the public read endpoints through `VPC_SERVICE`; it does not store board records or accept board writes.
 
 ## Setup
 

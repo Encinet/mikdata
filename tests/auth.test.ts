@@ -33,6 +33,29 @@ test('minecraft challenge completion rejects non-member plugin confirmations', a
   expect(completed.body).toEqual({ error: 'member_required' });
 });
 
+test('newcomer game access does not open a website account', async () => {
+  const store = createAuthStore({
+    VPC_SERVICE: {
+      fetch: () => Promise.resolve(Response.json({
+        status: 'confirmed',
+        player: {
+          uuid: '00000000-0000-0000-0000-000000000002',
+          name: 'NewPlayer',
+          role: 'default',
+        },
+      })),
+    } as Fetcher,
+  });
+  const created = await callStore(store, { action: 'createMinecraftChallenge' });
+  const completed = await callStore(store, {
+    action: 'completeMinecraftChallenge',
+    challengeId: created.body.challengeId,
+    browserNonce: created.body.browserNonce,
+  });
+  expect(completed.status).toBe(403);
+  expect(completed.body).toEqual({ error: 'member_required' });
+});
+
 test('passkey registration options require an authenticated session', async () => {
   const store = createAuthStore();
 
