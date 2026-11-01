@@ -440,7 +440,6 @@ const ADMIN_HTML = /* html */ `<!doctype html>
           <h2>玩家建筑申请</h2>
         </div>
         <div class="review-actions">
-          <button class="btn quiet sm" id="repair-approved-btn" type="button">修复已批准</button>
           <button class="btn quiet sm" id="submissions-refresh-btn" type="button">刷新申请</button>
         </div>
       </div>
@@ -463,6 +462,7 @@ const ADMIN_HTML = /* html */ `<!doctype html>
         <div class="field full"><label for="desc-zh">描述 zh-CN</label><textarea id="desc-zh" maxlength="2000" required></textarea></div>
         <div class="field full"><label for="desc-en">描述 en</label><textarea id="desc-en" maxlength="2000" required></textarea></div>
         <div class="section">坐标</div>
+        <div class="field"><label for="coord-world">世界</label><input id="coord-world" value="world" maxlength="128" required></div>
         <div class="field"><label for="coord-x">X</label><input id="coord-x" type="number" value="0" required></div>
         <div class="field"><label for="coord-y">Y</label><input id="coord-y" type="number" value="64" required></div>
         <div class="field"><label for="coord-z">Z</label><input id="coord-z" type="number" value="0" required></div>
@@ -529,7 +529,6 @@ applyTheme();
 $('theme-btn').addEventListener('click', cycleTheme);
 $('refresh-btn').addEventListener('click', () => loadAll());
 $('submissions-refresh-btn').addEventListener('click', loadSubmissions);
-$('repair-approved-btn').addEventListener('click', repairApprovedSubmissions);
 $('import-btn').addEventListener('click', openImport);
 $('create-btn').addEventListener('click', openCreate);
 $('search').addEventListener('input', render);
@@ -648,27 +647,6 @@ async function loadSubmissions(manageBusy = true) {
   }
 }
 
-async function repairApprovedSubmissions() {
-  setBusy(true);
-  try {
-    const res = await fetch('/admin/api/building-submissions/repair-approved', {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({}),
-    });
-    const data = await readJson(res);
-    if (!res.ok) throw new Error(data.error || res.statusText);
-
-    const changed = (data.created || 0) + (data.restored || 0) + (data.linked || 0);
-    toast('已扫描 ' + data.scanned + ' 条，修复 ' + changed + ' 条', true);
-    await loadAll(false);
-  } catch (error) {
-    toast(error.message || '修复失败', false);
-  } finally {
-    setBusy(false);
-  }
-}
-
 function updateStats() {
   $('s-total').textContent = state.buildings.length;
   $('s-original').textContent = countType('original');
@@ -704,7 +682,7 @@ function render() {
     return '<tr>' +
       '<td><span class="mono">' + esc(building.id) + '</span></td>' +
       '<td><div class="title">' + esc(building.name && building.name['zh-CN']) + '</div><div class="meta">' + esc(building.name && building.name.en) + '</div>' + (tags ? '<div class="meta">' + esc(tags) + '</div>' : '') + '</td>' +
-      '<td><span class="mono">(' + num(building.coordinates && building.coordinates.x) + ', ' + num(building.coordinates && building.coordinates.y) + ', ' + num(building.coordinates && building.coordinates.z) + ')</span></td>' +
+      '<td><span class="mono">' + esc(building.coordinates && building.coordinates.world) + ' · (' + num(building.coordinates && building.coordinates.x) + ', ' + num(building.coordinates && building.coordinates.y) + ', ' + num(building.coordinates && building.coordinates.z) + ')</span></td>' +
       '<td><span class="badge ' + esc(building.buildType) + '">' + esc(typeLabel[building.buildType] || building.buildType) + '</span></td>' +
       '<td>' + esc(builders) + '</td>' +
       '<td><span class="mono">' + esc(building.buildDate) + '</span></td>' +
@@ -738,7 +716,7 @@ function renderSubmissions() {
     return '<article class="review-item">' +
       '<div><div class="title">' + esc(title) + '</div>' +
       '<div class="meta">提交者：' + esc(submission.submitterName) + ' · ' + esc(formatTime(submission.createdAt)) + '</div>' +
-      '<div class="meta">坐标：(' + num(coords.x) + ', ' + num(coords.y) + ', ' + num(coords.z) + ') · 建造者：' + esc(builders || '-') + '</div>' +
+      '<div class="meta">坐标：' + esc(coords.world) + ' · (' + num(coords.x) + ', ' + num(coords.y) + ', ' + num(coords.z) + ') · 建造者：' + esc(builders || '-') + '</div>' +
       note +
       expires +
       '<div class="review-item__meta"><span class="badge status-' + esc(submission.status) + '">' + esc(statusLabel(submission.status)) + '</span><span class="badge ' + esc(payload.buildType || '') + '">' + esc(typeLabel[payload.buildType] || payload.buildType || '-') + '</span></div></div>' +
@@ -840,6 +818,7 @@ function fillForm(building) {
   $('name-en').value = building.name && building.name.en || '';
   $('desc-zh').value = building.description && building.description['zh-CN'] || '';
   $('desc-en').value = building.description && building.description.en || '';
+  $('coord-world').value = building.coordinates?.world ?? 'world';
   $('coord-x').value = building.coordinates?.x ?? 0;
   $('coord-y').value = building.coordinates?.y ?? 64;
   $('coord-z').value = building.coordinates?.z ?? 0;
@@ -871,7 +850,7 @@ async function saveBuilding(event) {
     });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
-    toast(isEdit ? '已更新' : '已创建', true);
+    toast(isEdit ? '已更新，公开页面稍后同步' : '已创建，公开页面稍后同步', true);
     closeModal();
     await loadBuildings(false);
   } catch (error) {
@@ -922,7 +901,7 @@ async function approveSubmission() {
     });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
-    toast('已批准并收入建筑', true);
+    toast('已批准并收入建筑，公开页面稍后同步', true);
     closeModal();
     await loadAll(false);
   } catch (error) {
@@ -968,7 +947,7 @@ async function deleteBuilding(id) {
     });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
-    toast('已删除', true);
+    toast('已删除，公开页面稍后同步', true);
     await loadBuildings(false);
   } catch (error) {
     toast(error.message || '删除失败', false);
@@ -1036,7 +1015,7 @@ async function importBuildings(event) {
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
 
-    toast('已导入 ' + data.imported + ' 条', true);
+    toast('已导入 ' + data.imported + ' 条，公开页面稍后同步', true);
     closeImport();
     await loadBuildings(false);
   } catch (error) {
@@ -1071,7 +1050,7 @@ function toPayload() {
   return {
     name: { 'zh-CN': $('name-zh').value.trim(), en: $('name-en').value.trim() },
     description: { 'zh-CN': $('desc-zh').value.trim(), en: $('desc-en').value.trim() },
-    coordinates: { x: Number($('coord-x').value), y: Number($('coord-y').value), z: Number($('coord-z').value) },
+    coordinates: { world: $('coord-world').value.trim(), x: Number($('coord-x').value), y: Number($('coord-y').value), z: Number($('coord-z').value) },
     builders: parseBuilders($('builders').value),
     buildType: $('build-type').value,
     images: splitLines($('images').value),
@@ -1153,7 +1132,6 @@ function setBusy(busy) {
   $('import-save-btn').disabled = busy;
   $('refresh-btn').disabled = busy;
   $('submissions-refresh-btn').disabled = busy;
-  $('repair-approved-btn').disabled = busy;
   updateAuthState();
 }
 

@@ -1,10 +1,6 @@
 # Mik Data
 
-Cloudflare Worker data API for MikWeb.
-
-The Worker is published as `https://data.mcmik.top/api`. It forwards a small allowlisted API surface to the Minecraft data service and caches public JSON responses with the Worker Cache API. Buildings and building submissions are persisted in Worker KV. Public building reads use short-lived in-memory summary cache, Worker Cache API entries for lists/details, and a KV summary snapshot.
-
-Public API details are documented in `openapi.yaml`.
+Cloudflare Worker for public Minecraft data, building administration and MikWeb authentication. Public API: `https://data.mcmik.top/api`; schema: [openapi.yaml](./openapi.yaml).
 
 ## Routes
 
@@ -28,59 +24,41 @@ Admin UI and write API:
 - `DELETE /admin/api/buildings/:id`
 - `POST /admin/api/buildings/import`
 - `GET /admin/api/building-submissions`
-- `POST /admin/api/building-submissions/repair-approved`
 - `PUT /admin/api/building-submissions/:id`
 - `PUT /admin/api/building-submissions/:id/approve`
 - `PUT /admin/api/building-submissions/:id/reject`
 
-Authenticated MikWeb account API:
+Private MikWeb endpoints use `/auth/*` and `/me/*` and require `MIKWEB_AUTH_CLIENT_SECRET`.
 
-- `POST /api/account/building-submissions`
-- `POST /api/account/building-submissions/mine`
-- `POST /api/account/players/resolve`
+## Security and storage
 
-## Security Model
+- Public routes accept `GET` and `OPTIONS`, allow any browser origin, and use an explicit route allowlist.
+- `/admin*` requires a Cloudflare Access JWT with the configured issuer and audience. Configure an Access application for `data.mcmik.top/admin*`; admin writes reject cross-site requests.
+- Account operations derive identity from the server session. Auth and admin JSON request bodies are limited to 64 KiB.
+- `AUTH_STORE` stores credentials, sessions, buildings, submissions and upload receipts in SQLite. Building writes and approvals use transactions.
+- Public building reads use a KV snapshot and caches. Snapshot publication is coalesced to at most one attempt every five minutes; public updates also depend on KV propagation and cache expiry.
+- Building coordinates contain `world`, `x`, `y` and `z`. The first building operation automatically imports existing KV records into SQL, using `world` for missing world names. The isolated migration commits once, preserves source KV records and never reimports a deleted building. A missing public snapshot is rebuilt from SQL.
+- Building submissions require a member account and ImgBB WebP uploads. Each account may have 10 pending submissions; completed reviews remain visible for 14 days. Expiry does not delete hosted images.
+- Unknown auth routes are rejected before accessing storage. Rate limiter failures return `503`; limiter bindings do not enforce a global billing quota.
 
-- No arbitrary proxying. Every public route is allowlisted in `src/index.ts`.
-- Public API routes only accept `GET` and `OPTIONS`.
-- Buildings read routes are public `GET` routes.
-- Public API routes allow browser requests from any origin.
-- Admin routes live under `/admin*` and require Cloudflare Access. The Worker validates the Access JWT issuer and AUD before serving any `/admin*` response.
-- Buildings write routes reject cross-site browser requests and do not expose CORS preflight headers.
-- `/admin/api` is not listed in `openapi.yaml`. Treat it as an operational interface, not as a public API contract.
-- `workers_dev` is disabled so the Worker is intended to be reached through the configured custom domain only.
-- Upstream responses must be successful JSON before being persisted.
-- Buildings and building submissions are stored in `BUILDINGS_KV`; there is no active building Durable Object binding.
-- Auth and admin JSON request bodies are read with a 64KB streaming limit before parsing.
-- Public building reads use layered cache: bounded in-isolate memory, Worker Cache API JSON entries for list/detail responses, and the authoritative `building-summary:v1` KV snapshot. Filtered building-list cache keys include a hash of the current summary ids and `updatedAt` values, so readers that observe a newer summary stop hitting older filtered list entries.
-- Building records entering summary or cache must match the current building schema; malformed old records are ignored instead of being cached.
-- Admin building reads and building mutation checks read the KV summary snapshot directly so management views and duplicate checks are not served from stale public caches.
-- Admin building mutations are serialized through the global `AuthStore` Durable Object before touching KV. Buildings and submissions remain stored only in `BUILDINGS_KV`; the Durable Object is only a write coordinator so concurrent admins do not overwrite `building-summary:v1` with stale read-modify-write results.
-- After a coordinated admin mutation succeeds, the front Worker refreshes its local building summary cache from KV so the isolate that handled the write does not keep serving a stale public summary.
-- Normal building create, update, delete, import, and submission approval paths update `building-summary:v1` incrementally from the KV summary snapshot. Full `building:*` scans are reserved for missing-summary fallback and explicit repair operations.
-- Runtime hot paths use bounded TTL memory caches to reduce KV, Durable Object storage, and plugin request volume. These caches are deliberately small and expire quickly so they protect free-tier limits without becoming durable state.
-- Auth requests are rate limited before entering `AuthStore`. Challenge creation allows 8 requests/minute per client key, sensitive completion and passkey login actions allow 20 requests/minute per action and client key, and all auth traffic is limited to 60 requests/minute per client key.
-- `AUTH_STORE_RATE_LIMITER` uses a shared key and allows 60 auth-store requests/minute per Cloudflare location. This is approximately 86,400 accepted requests/day/location, leaving headroom below the Durable Objects Free plan's 100,000 requests/day limit. The binding is permissive and location-scoped, so this is a budget guard rather than a global accounting guarantee.
-- Rate limiter failures fail closed with `503` before invoking the Durable Object. The in-object limiter remains as a second layer and uses a bounded 2,048-entry TTL cache.
-- Public `GET /api/*` requests share a limit of 120 requests/minute per `CF-Connecting-IP` value before any building KV or Minecraft upstream work. `/health`, CORS preflight, admin, and auth routes do not consume this public-read limit.
-- Building mutations write audit logs with action, building id, and Cloudflare Access identity. Payloads are not logged.
-- Building image URLs must be relative paths or `https://` URLs.
-- Player building submissions must come from authenticated MikWeb member accounts and use ImgBB WebP image URLs generated by MikWeb.
-- Submission listing uses secondary KV indexes: `building-submission-player-pending:{uuid}:*` for per-player pending limits and `building-submission-status:{status}:*` for admin submission lists. Pending limits count the pending index first and only read submission documents when the player is already at the limit. Submission creation is queued per player inside `AuthStore` so concurrent browser requests cannot pass the pending limit together. Do not remove these indexes without rebuilding them from submission documents.
-- `POST /admin/api/building-submissions/repair-approved` is an admin maintenance action. It scans old approved submissions, restores missing `building:{id}` records when needed, links duplicate existing buildings, deletes repaired approved submission records and stale approved indexes, then rebuilds `building-summary:v1` and the public summary cache. Use it after a bad deploy or cache/index incident where approved submissions do not appear in the standard building list.
-- Rejected player building submissions are visible for 14 days. `mikdata` writes `rejectedAt` and `expiresAt` when rejecting, then stores the submission document, player index key, and status index key with KV `expirationTtl`.
-- Expired rejection cleanup normally relies on KV TTL. List reads still lazily delete stale rejected records and orphaned player index keys as a fallback. It does not delete already-uploaded ImgBB files because ImgBB delete URLs are not persisted in `mikdata`.
+Rate limits per 60 seconds:
 
-Configure a Cloudflare Access self-hosted application for `data.mcmik.top/admin*`. The Worker checks `Cf-Access-Jwt-Assertion`, so `X-Admin-Token` is not used.
+| Requests | Limit | Key |
+|----------|-------|-----|
+| Public data | 120 | Client IP |
+| Minecraft challenge creation | 8 | Client key |
+| Challenge completion and Passkey login | 20 | Action and client key |
+| All auth requests | 60 | Client key |
 
-To find the Access settings:
+## Login and chat
 
-- `CLOUDFLARE_ACCESS_ISSUER`: Zero Trust team domain, for example `https://your-team.cloudflareaccess.com`.
-- `CLOUDFLARE_ACCESS_AUD`: Access application AUD tag from the application page.
+Login supports Minecraft codes and discoverable Passkeys. The plugin verifies current membership; sessions expire after 30 days idle or 90 days absolute. Passkeys and sessions are managed at `https://mcmik.top/account/security`. Adding or revoking Passkeys and revoking other sessions require authentication within the last five minutes.
+
+`POST /me/chat/authorize` authorizes the browser's WebSocket connection through the private VPC service. Chat messages travel directly to the plugin through Cloudflare Tunnel; history stays in the browser. Tunnel configuration is documented in the mik plugin's `docs/web-chat.md`.
 
 ## Runtime Configuration
 
-Do not put upstream addresses or secrets in `wrangler.jsonc`. Store all runtime configuration as Cloudflare secrets:
+Set runtime configuration with Wrangler secrets:
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
@@ -93,29 +71,14 @@ Do not put upstream addresses or secrets in `wrangler.jsonc`. Store all runtime 
 | `WEBAUTHN_RP_ID` | No | Passkey RP ID, defaults to `mcmik.top`. It must match the MikWeb hostname or a registrable parent domain |
 | `WEBAUTHN_ORIGIN` | No | Allowed Passkey origins, defaults to `https://mcmik.top`. Use comma-separated values for multiple origins |
 
-Minecraft upstream requests use the `VPC_SERVICE` binding configured in `wrangler.jsonc`; `MINECRAFT_SERVER_URL` should be reachable through that VPC service.
-Buildings and building submissions require the `BUILDINGS_KV` binding. The only active Durable Object binding is `AUTH_STORE`.
-
-The five `ratelimits` namespace IDs in `wrangler.jsonc` must remain unique within the Cloudflare account. Rate limiting bindings require Wrangler 4.36.0 or newer. Requests rejected by these bindings have already invoked the Worker and therefore still count toward the Workers Free plan request quota; they primarily protect Durable Object, KV, and upstream usage. To protect the Worker quota itself, configure the Free plan's single zone-level rate limiting rule on MikWeb's public `/api/auth/*` and `/api/account/*` BFF paths so abusive requests are blocked before application code. Do not key a rule on the source IP of MikData's private BFF-facing auth paths because legitimate traffic shares the BFF's egress addresses.
-
-Current platform references:
-
-- [Workers pricing and Free plan limits](https://developers.cloudflare.com/workers/platform/pricing/)
-- [Durable Objects pricing and Free plan limits](https://developers.cloudflare.com/durable-objects/platform/pricing/)
-- [Workers Rate Limiting binding semantics](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
-- [WAF rate limiting availability by plan](https://developers.cloudflare.com/waf/rate-limiting-rules/)
+Set `MINECRAFT_SERVER_URL` to an address reachable through the `VPC_SERVICE` binding. Keep the four rate-limit namespace IDs in `wrangler.jsonc` distinct.
 
 Passkey registration and login must happen on an origin compatible with `WEBAUTHN_RP_ID`. Production should use `WEBAUTHN_RP_ID=mcmik.top` and `WEBAUTHN_ORIGIN=https://mcmik.top`. For local MikWeb development, run MikData locally too and set `WEBAUTHN_RP_ID=localhost` with `WEBAUTHN_ORIGIN=http://localhost:3000`.
 
+For each required variable, run:
+
 ```sh
-bunx wrangler secret put MINECRAFT_SERVER_URL
-bunx wrangler secret put MINECRAFT_SERVER_ADDRESS
-bunx wrangler secret put MINECRAFT_SERVER_PORT
-bunx wrangler secret put CLOUDFLARE_ACCESS_ISSUER
-bunx wrangler secret put CLOUDFLARE_ACCESS_AUD
-bunx wrangler secret put MIKWEB_AUTH_CLIENT_SECRET
-bunx wrangler secret put WEBAUTHN_RP_ID
-bunx wrangler secret put WEBAUTHN_ORIGIN
+bunx wrangler secret put VARIABLE_NAME
 ```
 
 For local development, copy `.dev.vars.example` to `.dev.vars` and fill values. `.dev.vars` is ignored by git.
@@ -138,7 +101,7 @@ bunx wrangler kv namespace create BUILDINGS_KV
 
 Put the generated `id` values into `wrangler.jsonc`.
 
-`wrangler.jsonc` still keeps the historical `BuildingsWriter` migration and a later `deleted_classes` migration so Cloudflare can delete the old class. Do not add a `BUILDINGS_WRITER` binding back unless the storage design changes again.
+Preserve the Durable Object migration history in `wrangler.jsonc` when deploying.
 
 Run locally:
 
@@ -154,8 +117,4 @@ bun run deploy
 
 ## Refresh Behavior
 
-Cloudflare Cron refreshes stable routes every five minutes:
-
-- players
-- bans
-- announcements
+Cloudflare Cron refreshes players, bans and announcements every five minutes.

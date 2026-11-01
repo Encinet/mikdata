@@ -1,10 +1,11 @@
+import { BuildingStore } from './building-store';
+import { migrateBuildingCatalog } from './building-migration';
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
   verifyAuthenticationResponse,
   verifyRegistrationResponse,
   type AuthenticationResponseJSON,
-  type AuthenticatorTransportFuture,
   type RegistrationResponseJSON,
   type WebAuthnCredential,
 } from '@simplewebauthn/server';
@@ -25,6 +26,8 @@ const SESSION_ABSOLUTE_SECONDS = 60 * 60 * 24 * 90;
 const SESSION_TOUCH_INTERVAL_SECONDS = 60 * 10;
 const CHALLENGE_TTL_SECONDS = 5 * 60;
 const CHALLENGE_CLEANUP_INTERVAL_SECONDS = 5 * 60;
+const RECENT_AUTH_SECONDS = 5 * 60;
+const MAX_PASSKEYS_PER_ACCOUNT = 16;
 const ACCOUNT_CACHE_TTL_MS = 60 * 1000;
 const PASSKEY_CACHE_TTL_MS = 60 * 1000;
 const PLAYER_RESOLVE_CACHE_TTL_MS = 60 * 1000;
@@ -33,10 +36,11 @@ const AUTH_RATE_LIMIT_WINDOW_SECONDS = 60;
 const AUTH_RATE_LIMIT_RETRY_SECONDS = 10;
 const WEB_LOGIN_CODE_RE = /^[0-9]{6,10}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ALLOWED_ROLES = new Set(['member', 'helper', 'manager']);
+const ALLOWED_ROLES = new Set(['member', 'moderator', 'custodian']);
 const DEFAULT_WEBAUTHN_RP_ID = 'mcmik.top';
 const DEFAULT_WEBAUTHN_ORIGIN = 'https://mcmik.top';
 const RP_NAME = 'Mik Casual';
+class BuildingCatalogUnavailableError extends Error {}
 
 type AuthRouteResult = Response | null;
 
@@ -73,7 +77,7 @@ interface SessionRecord {
   idleExpiresAt: string;
   absoluteExpiresAt: string;
   authMethod: 'minecraft-challenge' | 'passkey';
-  revokedAt?: string;
+  authenticatedAt: string;
 }
 
 interface AccountRecord {
@@ -82,6 +86,7 @@ interface AccountRecord {
   updatedAt: string;
   role: string;
   disabledAt?: string;
+  credentialsChangedAt?: number;
 }
 
 interface PasskeyRecord {
@@ -89,7 +94,7 @@ interface PasskeyRecord {
   playerUuid: string;
   publicKey: string;
   counter: number;
-  transports?: AuthenticatorTransportFuture[];
+  transports?: WebAuthnCredential['transports'];
   createdAt: string;
   lastUsedAt?: string;
   displayName?: string;
@@ -112,12 +117,73 @@ type ChallengeRecord =
     }
   | {
       type: 'passkey-registration' | 'passkey-authentication';
-      challengeId: string;
       playerUuid?: string;
+      sessionHash?: string;
+      browserNonceHash?: string;
       challenge: string;
       createdAt: string;
       expiresAt: string;
     };
+
+type MinecraftChallenge = Extract<ChallengeRecord, { type: 'minecraft-login' }>;
+type StoreResult = { status: number; body: Record<string, unknown> };
+
+function activeSession(session: SessionRecord | undefined | null): session is SessionRecord {
+  if (!session || typeof session.authenticatedAt !== 'string') return false;
+  const authenticatedAt = Date.parse(session.authenticatedAt);
+  return (
+    Number.isFinite(authenticatedAt) &&
+    authenticatedAt <= Date.now() + 5000 &&
+    !isExpired(session.idleExpiresAt) &&
+    !isExpired(session.absoluteExpiresAt)
+  );
+}
+
+function eligibleAccount(account: AccountRecord | undefined | null): account is AccountRecord {
+  return !!account && !account.disabledAt && isEligibleRole(account.role);
+}
+
+function recentlyAuthenticated(session: SessionRecord): boolean {
+  const time = Date.parse(session.authenticatedAt);
+  return (
+    Number.isFinite(time) &&
+    time <= Date.now() + 5000 &&
+    Date.now() - time < RECENT_AUTH_SECONDS * 1000
+  );
+}
+
+function reauthenticationRequired(): StoreResult {
+  return { status: 403, body: { error: 'reauthentication_required' } };
+}
+
+function validBrowserNonce(value: string): boolean {
+  return /^[A-Za-z0-9_-]{32}$/.test(value);
+}
+
+function validConfirmationTime(record: MinecraftChallenge, value?: string): boolean {
+  const time = Date.parse(value ?? '');
+  return (
+    Number.isFinite(time) &&
+    time >= Date.parse(record.createdAt) - 5000 &&
+    time <= Date.now() + 5000 &&
+    time < Date.parse(record.expiresAt)
+  );
+}
+
+function minecraftChallengeError(
+  record: MinecraftChallenge | undefined | null,
+  nonceHash: string,
+  nonce: string,
+): StoreResult | null {
+  if (!record) return { status: 404, body: { error: 'not_found' } };
+  if (!nonce || record.browserNonceHash !== nonceHash)
+    return { status: 403, body: { error: 'invalid_browser_nonce' } };
+  if (isExpired(record.expiresAt)) return { status: 410, body: { error: 'expired' } };
+  if (record.status === 'consumed') return { status: 409, body: { error: 'challenge_consumed' } };
+  return null;
+}
+
+class PluginUnavailableError extends Error {}
 
 interface StoreRequest {
   action: string;
@@ -134,6 +200,31 @@ interface AuthRateLimitCheck {
   key: string;
 }
 
+function isAllowedAuthRoute(path: string, method: string): boolean {
+  if (method === 'GET') return /^\/auth\/challenges\/[A-Za-z0-9_-]{24}$/.test(path);
+  if (method === 'DELETE') return /^\/auth\/passkeys\/[A-Za-z0-9_-]{1,2048}$/.test(path);
+  if (method !== 'POST') return false;
+  return (
+    new Set([
+      '/auth/challenges',
+      '/auth/me',
+      '/auth/logout',
+      '/auth/passkeys/options/register',
+      '/auth/passkeys/register',
+      '/auth/passkeys/options/login',
+      '/auth/passkeys/login',
+      '/me/security',
+      '/me/sessions/revoke',
+      '/me/players/resolve',
+      '/me/chat/authorize',
+      '/me/building-submissions',
+      '/me/building-submissions/mine',
+      '/me/images/reserve',
+      '/me/images/complete',
+    ]).has(path) || /^\/auth\/challenges\/[A-Za-z0-9_-]{24}\/complete$/.test(path)
+  );
+}
+
 export async function handleAuthRoute(
   routePath: string,
   request: Request,
@@ -146,6 +237,9 @@ export async function handleAuthRoute(
   if (!isMikwebClientRequest(request, env)) {
     return authJson({ error: 'forbidden' }, 403);
   }
+  if (!isAllowedAuthRoute(routePath, request.method)) {
+    return authJson({ error: 'not_found' }, 404);
+  }
 
   const clientKey = clientRateLimitKey(request);
   const rateLimited = await enforceAuthRateLimits(routePath, request.method, clientKey, env);
@@ -153,8 +247,18 @@ export async function handleAuthRoute(
   const store = authStore(env);
 
   if (routePath === '/auth/challenges' && request.method === 'POST') {
-    const response = await callStore(store, { action: 'createMinecraftChallenge', clientKey });
-    return authJson(stripInternalAuthFields(response.body), response.status, setLoginCookie(response.body));
+    const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
+    const response = await callStore(store, {
+      action: 'createMinecraftChallenge',
+      clientKey,
+      browserNonce: payload.data.browserNonce,
+    });
+    return authJson(
+      stripInternalAuthFields(response.body),
+      response.status,
+      setLoginCookie(response.body),
+    );
   }
 
   const challengeStatus = routePath.match(/^\/auth\/challenges\/([^/]+)$/);
@@ -162,6 +266,7 @@ export async function handleAuthRoute(
     const response = await callStore(store, {
       action: 'getMinecraftChallenge',
       challengeId: challengeStatus[1],
+      browserNonce: request.headers.get('X-Mik-Browser-Nonce'),
       clientKey,
     });
     return authJson(response.body, response.status);
@@ -177,21 +282,46 @@ export async function handleAuthRoute(
       browserNonce: payload.data.browserNonce,
       clientKey,
     });
-    return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
+    return authJson(
+      stripInternalAuthFields(response.body),
+      response.status,
+      sessionHeaders(response.body),
+    );
   }
 
   if (routePath === '/auth/me' && request.method === 'POST') {
     const payload = await readJsonObject(request);
     if (!payload.ok) return payload.response;
     const response = await callStore(store, { action: 'me', sessionId: payload.data.sessionId });
-    return authJson(response.body, response.status);
+    return authJson(
+      stripInternalAuthFields(response.body),
+      response.status,
+      sessionHeaders(response.body),
+    );
+  }
+
+  if (routePath === '/me/chat/authorize' && request.method === 'POST') {
+    const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
+    const response = await callStore(store, {
+      action: 'authorizeWebChat', sessionId: payload.data.sessionId,
+      connectionId: payload.data.connectionId,
+    });
+    return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
   }
 
   if (routePath === '/auth/logout' && request.method === 'POST') {
     const payload = await readJsonObject(request);
     if (!payload.ok) return payload.response;
-    const response = await callStore(store, { action: 'logout', sessionId: payload.data.sessionId });
-    return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
+    const response = await callStore(store, {
+      action: 'logout',
+      sessionId: payload.data.sessionId,
+    });
+    return authJson(
+      stripInternalAuthFields(response.body),
+      response.status,
+      sessionHeaders(response.body),
+    );
   }
 
   if (routePath === '/auth/passkeys/options/register' && request.method === 'POST') {
@@ -213,12 +343,26 @@ export async function handleAuthRoute(
       credential: payload.data.credential,
       displayName: payload.data.displayName,
     });
-    return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
+    return authJson(
+      stripInternalAuthFields(response.body),
+      response.status,
+      sessionHeaders(response.body),
+    );
   }
 
   if (routePath === '/auth/passkeys/options/login' && request.method === 'POST') {
-    const response = await callStore(store, { action: 'passkeyAuthenticationOptions', clientKey });
-    return authJson(response.body, response.status);
+    const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
+    const response = await callStore(store, {
+      action: 'passkeyAuthenticationOptions',
+      clientKey,
+      browserNonce: payload.data.browserNonce,
+    });
+    return authJson(
+      stripInternalAuthFields(response.body),
+      response.status,
+      setLoginCookie(response.body),
+    );
   }
 
   if (routePath === '/auth/passkeys/login' && request.method === 'POST') {
@@ -227,9 +371,14 @@ export async function handleAuthRoute(
     const response = await callStore(store, {
       action: 'passkeyLogin',
       credential: payload.data.credential,
+      browserNonce: payload.data.browserNonce,
       clientKey,
     });
-    return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
+    return authJson(
+      stripInternalAuthFields(response.body),
+      response.status,
+      sessionHeaders(response.body),
+    );
   }
 
   const removePasskey = routePath.match(/^\/auth\/passkeys\/([^/]+)$/);
@@ -244,17 +393,13 @@ export async function handleAuthRoute(
     return authJson(response.body, response.status);
   }
 
-  if (routePath === '/me/summary' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, { action: 'accountSummary', sessionId: payload.data.sessionId });
-    return authJson(response.body, response.status);
-  }
-
   if (routePath === '/me/security' && request.method === 'POST') {
     const payload = await readJsonObject(request);
     if (!payload.ok) return payload.response;
-    const response = await callStore(store, { action: 'accountSecurity', sessionId: payload.data.sessionId });
+    const response = await callStore(store, {
+      action: 'accountSecurity',
+      sessionId: payload.data.sessionId,
+    });
     return authJson(response.body, response.status);
   }
 
@@ -265,8 +410,13 @@ export async function handleAuthRoute(
       action: 'revokeAccountSession',
       sessionId: payload.data.sessionId,
       targetSessionId: payload.data.targetSessionId,
+      all: payload.data.all === true,
     });
-    return authJson(stripInternalAuthFields(response.body), response.status, sessionHeaders(response.body));
+    return authJson(
+      stripInternalAuthFields(response.body),
+      response.status,
+      sessionHeaders(response.body),
+    );
   }
 
   if (routePath === '/me/players/resolve' && request.method === 'POST') {
@@ -278,6 +428,27 @@ export async function handleAuthRoute(
       name: payload.data.name,
     });
     return authJson(response.body, response.status);
+  }
+
+  if (
+    (routePath === '/me/images/reserve' || routePath === '/me/images/complete') &&
+    request.method === 'POST'
+  ) {
+    const payload = await readJsonObject(request);
+    if (!payload.ok) return payload.response;
+    const response = await callStore(store, {
+      action: routePath.endsWith('/reserve') ? 'reserveImageUpload' : 'completeImageUpload',
+      sessionId: payload.data.sessionId,
+      uploadId: payload.data.uploadId,
+      image: payload.data.image,
+    });
+    return authJson(
+      response.body,
+      response.status,
+      typeof (response.body as { retryAfter?: unknown }).retryAfter === 'number'
+        ? { 'Retry-After': String((response.body as { retryAfter: number }).retryAfter) }
+        : {},
+    );
   }
 
   if (routePath === '/me/building-submissions' && request.method === 'POST') {
@@ -319,10 +490,7 @@ async function enforceAuthRateLimits(
     checks.push({ limiter: env.AUTH_SENSITIVE_RATE_LIMITER, key: `${action}:${clientKey}` });
   }
 
-  checks.push(
-    { limiter: env.AUTH_CLIENT_RATE_LIMITER, key: clientKey },
-    { limiter: env.AUTH_STORE_RATE_LIMITER, key: 'auth-store:v1' },
-  );
+  checks.push({ limiter: env.AUTH_CLIENT_RATE_LIMITER, key: clientKey });
 
   try {
     for (const check of checks) {
@@ -337,11 +505,9 @@ async function enforceAuthRateLimits(
     }
   } catch (error) {
     console.error('Auth rate limit check failed', { routePath, method, error });
-    return authJson(
-      { error: 'rate_limiter_unavailable' },
-      503,
-      { 'Retry-After': String(AUTH_RATE_LIMIT_RETRY_SECONDS) },
-    );
+    return authJson({ error: 'rate_limiter_unavailable' }, 503, {
+      'Retry-After': String(AUTH_RATE_LIMIT_RETRY_SECONDS),
+    });
   }
 
   return null;
@@ -384,14 +550,17 @@ export class AuthStore implements DurableObject {
     defaultTtlMs: PLAYER_RESOLVE_CACHE_TTL_MS,
     maxEntries: 1024,
   });
-  private adminMutationQueue: Promise<unknown> = Promise.resolve();
-  private readonly submissionQueues = new Map<string, Promise<unknown>>();
+  private readonly accountReads = new Map<string, Promise<AccountRecord | null>>();
   private lastChallengeCleanupAt = 0;
   private initialized: Promise<void> | null = null;
+  private catalogReady: Promise<void> | null = null;
+  private catalogRetryAt = 0;
+  private readonly buildings: BuildingStore;
 
   constructor(state: DurableObjectState, env: Env) {
     this.storage = state.storage;
     this.env = env;
+    this.buildings = new BuildingStore(this.storage);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -405,7 +574,10 @@ export class AuthStore implements DurableObject {
       return json({
         status: error instanceof RequestBodyTooLargeError ? 413 : 400,
         body: {
-          error: error instanceof RequestBodyTooLargeError ? 'request_body_too_large' : 'invalid_json_body',
+          error:
+            error instanceof RequestBodyTooLargeError
+              ? 'request_body_too_large'
+              : 'invalid_json_body',
         },
       });
     }
@@ -413,6 +585,12 @@ export class AuthStore implements DurableObject {
     try {
       return json(await this.dispatch(body));
     } catch (error) {
+      if (error instanceof BuildingCatalogUnavailableError) {
+        return json({ status: 503, body: { error: 'building_data_unavailable' } });
+      }
+      if (error instanceof PluginUnavailableError) {
+        return json({ status: 503, body: { error: 'plugin_unavailable' } });
+      }
       console.error('AuthStore error', error);
       return json({ status: 500, body: { error: 'internal_error' } });
     }
@@ -421,9 +599,13 @@ export class AuthStore implements DurableObject {
   private async dispatch(body: StoreRequest): Promise<{ status: number; body: unknown }> {
     switch (body.action) {
       case 'createMinecraftChallenge':
-        return this.createMinecraftChallenge(asString(body.clientKey));
+        return this.createMinecraftChallenge(asString(body.clientKey), asString(body.browserNonce));
       case 'getMinecraftChallenge':
-        return this.getMinecraftChallenge(asString(body.challengeId), asString(body.clientKey));
+        return this.getMinecraftChallenge(
+          asString(body.challengeId),
+          asString(body.clientKey),
+          asString(body.browserNonce),
+        );
       case 'completeMinecraftChallenge':
         return this.completeMinecraftChallenge(
           asString(body.challengeId),
@@ -437,41 +619,70 @@ export class AuthStore implements DurableObject {
       case 'passkeyRegistrationOptions':
         return this.passkeyRegistrationOptions(asString(body.sessionId));
       case 'passkeyRegister':
-        return this.passkeyRegister(asString(body.sessionId), body.credential, optionalString(body.displayName));
+        return this.passkeyRegister(
+          asString(body.sessionId),
+          body.credential,
+          optionalString(body.displayName),
+        );
       case 'passkeyAuthenticationOptions':
-        return this.passkeyAuthenticationOptions(asString(body.clientKey));
+        return this.passkeyAuthenticationOptions(
+          asString(body.clientKey),
+          asString(body.browserNonce),
+        );
       case 'passkeyLogin':
-        return this.passkeyLogin(body.credential, asString(body.clientKey));
+        return this.passkeyLogin(
+          body.credential,
+          asString(body.clientKey),
+          asString(body.browserNonce),
+        );
       case 'passkeyDelete':
         return this.passkeyDelete(asString(body.sessionId), asString(body.credentialId));
-      case 'accountSummary':
-        return this.accountSummary(asString(body.sessionId));
       case 'accountSecurity':
         return this.accountSecurity(asString(body.sessionId));
       case 'revokeAccountSession':
-        return this.revokeAccountSession(asString(body.sessionId), asString(body.targetSessionId));
+        return this.revokeAccountSession(
+          asString(body.sessionId),
+          asString(body.targetSessionId),
+          body.all === true,
+        );
+      case 'authorizeWebChat':
+        return this.authorizeWebChat(asString(body.sessionId), asString(body.connectionId));
       case 'resolvePlayer':
         return this.resolvePlayer(asString(body.sessionId), asString(body.name));
+      case 'reserveImageUpload':
+        return this.imageUpload(asString(body.sessionId));
+      case 'completeImageUpload':
+        return this.imageUpload(asString(body.sessionId), asString(body.uploadId), body.image);
       case 'createBuildingSubmission':
         return this.createBuildingSubmission(asString(body.sessionId), body.payload);
       case 'listBuildingSubmissions':
         return this.listBuildingSubmissions(asString(body.sessionId));
       case 'adminBuildingMutation':
+        await this.ensureBuildingCatalog();
         return this.adminBuildingMutation(body);
+      case 'publicBuildingSnapshot':
+        await this.ensureBuildingCatalog();
+        this.buildings.requestPublication();
+        await this.scheduleMaintenance();
+        return { status: 200, body: this.buildings.snapshot() };
       default:
         return { status: 404, body: { error: 'not_found' } };
     }
   }
 
-  private async adminBuildingMutation(body: StoreRequest): Promise<{ status: number; body: unknown }> {
-    const task = this.adminMutationQueue
-      .catch(() => undefined)
-      .then(() => this.runAdminBuildingMutation(body));
-    this.adminMutationQueue = task.catch(() => undefined);
-    return task;
+  private async adminBuildingMutation(
+    body: StoreRequest,
+  ): Promise<{ status: number; body: unknown }> {
+    return this.storage.transaction(async () => {
+      const result = await this.runAdminBuildingMutation(body);
+      if (result.status < 400) await this.scheduleMaintenance();
+      return result;
+    });
   }
 
-  private async runAdminBuildingMutation(body: StoreRequest): Promise<{ status: number; body: unknown }> {
+  private async runAdminBuildingMutation(
+    body: StoreRequest,
+  ): Promise<{ status: number; body: unknown }> {
     const routePath = asString(body.routePath);
     const method = asString(body.method) || 'GET';
     const url = asString(body.url) || `https://data.mcmik.top/admin/api${routePath}`;
@@ -492,183 +703,248 @@ export class AuthStore implements DurableObject {
       body: method === 'GET' || method === 'HEAD' ? undefined : asString(body.requestBody),
     });
     const actor = adminActorFromStoreBody(body.actor);
-    return responseToStoreResult(await handleAdminBuildingsRouteDirect(routePath, request, this.env, actor));
+    return responseToStoreResult(
+      await handleAdminBuildingsRouteDirect(
+        routePath,
+        request,
+        { ...this.env, buildingStore: this.buildings },
+        actor,
+      ),
+    );
   }
 
-  private async createMinecraftChallenge(clientKey: string): Promise<{ status: number; body: unknown }> {
-    const rateLimited = this.consumeRateLimit(rateLimitKey('minecraft-challenge:create', clientKey), 8, 60);
+  private async createMinecraftChallenge(
+    clientKey: string,
+    previousNonce: string,
+  ): Promise<StoreResult> {
+    const rateLimited = this.consumeRateLimit(
+      rateLimitKey('minecraft-challenge:create', clientKey),
+      8,
+      60,
+    );
     if (rateLimited) return rateLimited;
     await this.cleanupExpiredChallenges();
-
-    const challengeId = randomToken(18);
-    const displayCode = await this.createUniqueDisplayCode();
-    const browserNonce = randomToken(24);
-    const now = new Date();
-    const record: ChallengeRecord = {
-      type: 'minecraft-login',
-      challengeId,
-      displayCode,
-      browserNonceHash: await sha256(browserNonce),
-      createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + CHALLENGE_TTL_SECONDS * 1000).toISOString(),
-      status: 'pending',
-    };
-
-    await this.storage.put(challengeKey(challengeId), record);
-    await this.storage.put(codeKey(displayCode), challengeId);
-
-    return {
-      status: 200,
-      body: {
+    const browserNonce = validBrowserNonce(previousNonce) ? previousNonce : randomToken(24);
+    const browserNonceHash = await sha256(browserNonce);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const challengeId = randomToken(18);
+      const displayCode = createDisplayCode();
+      const record: MinecraftChallenge = {
+        type: 'minecraft-login',
         challengeId,
         displayCode,
-        browserNonce,
-        expiresAt: record.expiresAt,
-      },
-    };
-  }
-
-  private async createUniqueDisplayCode(): Promise<string> {
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      const displayCode = createDisplayCode();
-      const existingChallengeId = await this.storage.get<string>(codeKey(displayCode));
-      if (!existingChallengeId) {
-        return displayCode;
-      }
+        browserNonceHash,
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + CHALLENGE_TTL_SECONDS * 1000).toISOString(),
+        status: 'pending',
+      };
+      const created = await this.storage.transaction(async (txn) => {
+        if (await txn.get(codeKey(displayCode))) return false;
+        await txn.put({ [challengeKey(challengeId)]: record, [codeKey(displayCode)]: challengeId });
+        return true;
+      });
+      if (created)
+        return {
+          status: 200,
+          body: { challengeId, displayCode, browserNonce, expiresAt: record.expiresAt },
+        };
     }
-
-    throw new Error('Unable to allocate unique web login code');
+    return { status: 503, body: { error: 'challenge_unavailable' } };
   }
 
   private async getMinecraftChallenge(
     challengeId: string,
     clientKey: string,
-  ): Promise<{ status: number; body: unknown }> {
-    const rateLimited = this.consumeRateLimit(rateLimitKey('minecraft-challenge:status', clientKey), 120, 60);
+    browserNonce: string,
+  ): Promise<StoreResult> {
+    const rateLimited = this.consumeRateLimit(
+      rateLimitKey('minecraft-challenge:status', clientKey),
+      60,
+      60,
+    );
     if (rateLimited) return rateLimited;
-
-    const record = await this.readMinecraftChallenge(challengeId);
-    if (!record) return { status: 404, body: { status: 'not_found' } };
+    const nonceHash = await sha256(browserNonce);
+    let record = await this.readMinecraftChallenge(challengeId);
+    if (!record || !browserNonce || record.browserNonceHash !== nonceHash) {
+      return { status: 404, body: { status: 'not_found' } };
+    }
     if (isExpired(record.expiresAt)) {
       await this.deleteMinecraftChallenge(record);
       return { status: 200, body: { status: 'expired' } };
     }
-
     if (record.status === 'pending' && shouldCheckPlugin(record.lastPluginCheckAt)) {
-      const plugin = await this.fetchPluginChallenge(record.displayCode, false);
-      const role = normalizeRole(plugin.player?.role);
-      const player = normalizePluginPlayer(plugin.player);
-      if (plugin.status === 'confirmed' && player && role) {
-        record.status = 'confirmed';
-        record.confirmedPlayerUuid = player.uuid;
-        record.confirmedPlayerName = player.name;
-        record.confirmedRole = role;
-        record.confirmedAt = plugin.confirmedAt ?? new Date().toISOString();
+      // Reserve the poll before network I/O; concurrent polls cannot multiply plugin requests.
+      const claimed = await this.storage.transaction(async (txn) => {
+        const current = await txn.get<MinecraftChallenge>(challengeKey(challengeId));
+        if (
+          !current ||
+          current.status !== 'pending' ||
+          !shouldCheckPlugin(current.lastPluginCheckAt)
+        )
+          return false;
+        await txn.put(challengeKey(challengeId), {
+          ...current,
+          lastPluginCheckAt: new Date().toISOString(),
+        });
+        return true;
+      });
+      if (claimed) {
+        const plugin = await this.fetchPluginChallenge(record.displayCode);
+        if (plugin.status === 'unavailable')
+          return { status: 503, body: { error: 'plugin_unavailable' } };
+        const player = normalizePluginPlayer(plugin.player);
+        const role = normalizeRole(plugin.player?.role);
+        await this.storage.transaction(async (txn) => {
+          const current = await txn.get<MinecraftChallenge>(challengeKey(challengeId));
+          if (!current || current.status !== 'pending' || isExpired(current.expiresAt)) return;
+          if (
+            plugin.status === 'confirmed' &&
+            player &&
+            role &&
+            validConfirmationTime(current, plugin.confirmedAt)
+          ) {
+            await txn.put(challengeKey(challengeId), {
+              ...current,
+              status: 'confirmed',
+              confirmedPlayerUuid: player.uuid,
+              confirmedPlayerName: player.name,
+              confirmedRole: role,
+              confirmedAt: plugin.confirmedAt,
+            });
+          }
+        });
       }
-      record.lastPluginCheckAt = new Date().toISOString();
-      await this.storage.put(challengeKey(challengeId), record);
+      record = await this.readMinecraftChallenge(challengeId);
     }
-
-    return { status: 200, body: challengePublicBody(record) };
+    return { status: 200, body: record ? challengePublicBody(record) : { status: 'not_found' } };
   }
 
   private async completeMinecraftChallenge(
     challengeId: string,
     browserNonce: string,
     clientKey: string,
-  ): Promise<{ status: number; body: unknown }> {
-    const rateLimited = this.consumeRateLimit(rateLimitKey('minecraft-challenge:complete', clientKey), 20, 60);
-    if (rateLimited) return rateLimited;
-
-    const record = await this.readMinecraftChallenge(challengeId);
-    if (!record) return { status: 404, body: { error: 'not_found' } };
-    if (isExpired(record.expiresAt)) {
-      await this.deleteMinecraftChallenge(record);
-      return { status: 410, body: { error: 'expired' } };
-    }
-    if ((await sha256(browserNonce)) !== record.browserNonceHash) {
-      return { status: 403, body: { error: 'invalid_browser_nonce' } };
-    }
-
-    const plugin = await this.fetchPluginChallenge(record.displayCode, true);
-    if (plugin.status === 'unavailable') {
-      return { status: 503, body: { error: 'plugin_unavailable' } };
-    }
-    const role = normalizeRole(plugin.player?.role);
-    const player = normalizePluginPlayer(plugin.player);
-    if (plugin.status !== 'confirmed' || !player || !role) {
-      return { status: 403, body: { error: 'member_required' } };
-    }
-
-    const account = await this.upsertAccount(
-      player.uuid,
-      player.name,
-      role,
+  ): Promise<StoreResult> {
+    const rateLimited = this.consumeRateLimit(
+      rateLimitKey('minecraft-challenge:complete', clientKey),
+      20,
+      60,
     );
-    const session = await this.createSession(account.playerUuid, 'minecraft-challenge');
-    record.status = 'consumed';
-    await this.storage.put(challengeKey(challengeId), record);
-    await this.storage.delete(codeKey(record.displayCode));
+    if (rateLimited) return rateLimited;
+    const nonceHash = await sha256(browserNonce);
+    const record = await this.readMinecraftChallenge(challengeId);
+    const rejected = minecraftChallengeError(record, nonceHash, browserNonce);
+    if (rejected) return rejected;
+    if (!record) return { status: 404, body: { error: 'not_found' } };
 
-    return { status: 200, body: sessionBody(session.sessionId, account) };
+    // Approvals remain readable until expiry. Only this store consumes a login request.
+    const plugin = await this.fetchPluginChallenge(record.displayCode);
+    if (plugin.status === 'unavailable')
+      return { status: 503, body: { error: 'plugin_unavailable' } };
+    const player = normalizePluginPlayer(plugin.player);
+    const role = normalizeRole(plugin.player?.role);
+    if (plugin.status !== 'confirmed')
+      return { status: 409, body: { error: 'confirmation_required' } };
+    if (!player) return { status: 502, body: { error: 'plugin_invalid_response' } };
+    if (!role) return { status: 403, body: { error: 'member_required' } };
+    if (!validConfirmationTime(record, plugin.confirmedAt))
+      return { status: 409, body: { error: 'invalid_confirmation' } };
+    const session = await this.prepareSession(
+      player.uuid,
+      'minecraft-challenge',
+      plugin.confirmedAt,
+    );
+    const result = await this.storage.transaction(async (txn): Promise<StoreResult> => {
+      const current = await txn.get<MinecraftChallenge>(challengeKey(challengeId));
+      const invalid = minecraftChallengeError(current, nonceHash, browserNonce);
+      if (invalid) return invalid;
+      if (
+        !current ||
+        (current.confirmedPlayerUuid && current.confirmedPlayerUuid !== player.uuid)
+      ) {
+        return { status: 409, body: { error: 'confirmation_changed' } };
+      }
+      const existing = await txn.get<AccountRecord>(accountKey(player.uuid));
+      if (existing?.disabledAt) return { status: 403, body: { error: 'account_disabled' } };
+      const account: AccountRecord = {
+        ...existing,
+        playerUuid: player.uuid,
+        currentName: player.name,
+        role,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.pruneAccountSessions(txn, player.uuid);
+      await txn.put({
+        [accountKey(player.uuid)]: account,
+        [accountNameKey(player.name)]: player.uuid,
+        [challengeKey(challengeId)]: { ...current, status: 'consumed' },
+        [sessionKey(session.record.sidHash)]: session.record,
+        [accountSessionKey(player.uuid, session.record.sidHash)]: session.record.sidHash,
+      });
+      await txn.delete(codeKey(current.displayCode));
+      if (
+        existing &&
+        normalizePlayerName(existing.currentName) !== normalizePlayerName(player.name)
+      ) {
+        await txn.delete(accountNameKey(existing.currentName));
+      }
+      return { status: 200, body: sessionBody(session.sessionId, account) };
+    });
+    if (result.status === 200) this.accountCache.delete(player.uuid);
+    return result;
   }
 
   private async me(sessionId: string): Promise<{ status: number; body: unknown }> {
     const session = await this.readValidSession(sessionId);
-    if (!session) return { status: 200, body: { authenticated: false } };
+    if (!session) return { status: 200, body: { authenticated: false, clearSession: true } };
     const account = await this.readAccount(session.playerUuid);
-    if (!account) return { status: 200, body: { authenticated: false } };
-    return { status: 200, body: { authenticated: true, account: await this.accountSummaryBody(account) } };
+    if (!account) return { status: 200, body: { authenticated: false, clearSession: true } };
+    return {
+      status: 200,
+      body: { authenticated: true, account: await this.accountSummaryBody(account) },
+    };
   }
 
-  private async logout(sessionId: string): Promise<{ status: number; body: unknown }> {
+  private async logout(sessionId: string): Promise<StoreResult> {
     const sidHash = await sha256(sessionId);
-    const session = await this.readSessionByHash(sidHash);
-    if (session) {
-      session.revokedAt = new Date().toISOString();
-      await Promise.all([
-        this.storage.put(sessionKey(sidHash), session),
-        this.deleteSessionIndex(session),
-      ]);
-    }
+    await this.storage.transaction(async (txn) => {
+      const session = await txn.get<SessionRecord>(sessionKey(sidHash));
+      if (session)
+        await txn.delete([sessionKey(sidHash), accountSessionKey(session.playerUuid, sidHash)]);
+    });
     this.sessionCache.delete(sidHash);
+    if (sessionId) await this.notifyChatRevocation([sidHash]);
     return { status: 200, body: { ok: true, clearSession: true } };
   }
 
-  private async passkeyRegistrationOptions(sessionId: string): Promise<{ status: number; body: unknown }> {
+  private async passkeyRegistrationOptions(sessionId: string): Promise<StoreResult> {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
+    if (!recentlyAuthenticated(session)) return reauthenticationRequired();
     const account = await this.readAccount(session.playerUuid);
     if (!account) return { status: 403, body: { error: 'member_required' } };
     await this.cleanupExpiredChallenges();
     const passkeys = await this.listPasskeys(account.playerUuid);
-    const webAuthn = webAuthnConfig(this.env);
+    if (passkeys.length >= MAX_PASSKEYS_PER_ACCOUNT)
+      return { status: 409, body: { error: 'passkey_limit' } };
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
-      rpID: webAuthn.rpID,
+      rpID: webAuthnConfig(this.env).rpID,
       userName: account.currentName,
       userID: toArrayBufferBytes(new TextEncoder().encode(account.playerUuid)),
       userDisplayName: account.currentName,
       attestationType: 'none',
-      excludeCredentials: passkeys.map((passkey) => ({
-        id: passkey.credentialId,
-        transports: passkey.transports,
-      })),
-      authenticatorSelection: {
-        residentKey: 'required',
-        userVerification: 'required',
-      },
+      excludeCredentials: passkeys.map(({ credentialId: id, transports }) => ({ id, transports })),
+      authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
     });
-
-    await this.storage.put(webauthnChallengeKey(options.challenge), {
+    const challenge: ChallengeRecord = {
       type: 'passkey-registration',
-      challengeId: randomToken(12),
       playerUuid: account.playerUuid,
+      sessionHash: session.sidHash,
       challenge: options.challenge,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + CHALLENGE_TTL_SECONDS * 1000).toISOString(),
-    } satisfies ChallengeRecord);
-
+    };
+    await this.storage.put(webauthnChallengeKey(options.challenge), challenge);
     return { status: 200, body: { options } };
   }
 
@@ -676,130 +952,209 @@ export class AuthStore implements DurableObject {
     sessionId: string,
     credential: unknown,
     displayName?: string,
-  ): Promise<{ status: number; body: unknown }> {
+  ): Promise<StoreResult> {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
-    const challenge = await this.readWebauthnChallenge('passkey-registration', credentialChallengeId(credential));
-    if (!challenge?.playerUuid || challenge.playerUuid !== session.playerUuid) {
+    if (!recentlyAuthenticated(session)) return reauthenticationRequired();
+    const challenge = await this.readWebauthnChallenge(
+      'passkey-registration',
+      credentialChallengeId(credential),
+    );
+    if (
+      !challenge ||
+      challenge.playerUuid !== session.playerUuid ||
+      challenge.sessionHash !== session.sidHash
+    ) {
       return { status: 400, body: { error: 'invalid_challenge' } };
     }
-
-    const webAuthn = webAuthnConfig(this.env);
-    const verification = await verifyPasskeyRegistration(credential, challenge.challenge, webAuthn);
-
-    if (!verification.verified || !verification.registrationInfo) {
+    const verification = await verifyPasskeyRegistration(
+      credential,
+      challenge.challenge,
+      webAuthnConfig(this.env),
+    );
+    if (!verification.verified || !verification.registrationInfo)
       return { status: 400, body: { error: 'passkey_verification_failed' } };
-    }
-
     const account = await this.readAccount(session.playerUuid);
-    if (!account) {
-      await this.storage.delete(webauthnChallengeKey(challenge.challenge));
-      return { status: 403, body: { error: 'member_required' } };
-    }
-
-    const { credential: verifiedCredential } = verification.registrationInfo;
-    const existingPasskey = await this.storage.get<PasskeyRecord>(passkeyKey(verifiedCredential.id));
-    if (existingPasskey) {
-      await this.storage.delete(webauthnChallengeKey(challenge.challenge));
-      return { status: 409, body: { error: 'passkey_already_registered' } };
-    }
-
+    if (!account) return { status: 403, body: { error: 'member_required' } };
+    const verifiedCredential = verification.registrationInfo.credential;
     const record: PasskeyRecord = {
       credentialId: verifiedCredential.id,
       playerUuid: session.playerUuid,
       publicKey: bufferToBase64url(verifiedCredential.publicKey),
       counter: verifiedCredential.counter,
-      transports: (credential as { response?: { transports?: AuthenticatorTransportFuture[] } })?.response?.transports,
+      transports: verifiedCredential.transports,
       createdAt: new Date().toISOString(),
-      displayName,
+      displayName: displayName?.trim().slice(0, 80),
     };
-    await Promise.all([
-      this.storage.put(passkeyKey(record.credentialId), record),
-      this.storage.put(accountPasskeyKey(record.playerUuid, record.credentialId), record.credentialId),
-      this.storage.delete(webauthnChallengeKey(challenge.challenge)),
-    ]);
-    session.revokedAt = new Date().toISOString();
-    await Promise.all([
-      this.storage.put(sessionKey(session.sidHash), session),
-      this.deleteSessionIndex(session),
-    ]);
-    this.sessionCache.delete(session.sidHash);
-    this.passkeyCache.delete(record.playerUuid);
-    const newSession = await this.createSession(session.playerUuid, 'passkey');
-    return {
-      status: 200,
-      body: sessionBody(newSession.sessionId, account),
-    };
+    const result = await this.storage.transaction(async (txn): Promise<StoreResult> => {
+      const currentSession = await txn.get<SessionRecord>(sessionKey(session.sidHash));
+      if (!activeSession(currentSession))
+        return { status: 401, body: { error: 'unauthenticated' } };
+      if (!recentlyAuthenticated(currentSession)) return reauthenticationRequired();
+      const currentAccount = await txn.get<AccountRecord>(accountKey(session.playerUuid));
+      if (!eligibleAccount(currentAccount))
+        return { status: 403, body: { error: 'member_required' } };
+      const current = await txn.get<ChallengeRecord>(webauthnChallengeKey(challenge.challenge));
+      if (
+        !current ||
+        current.type !== 'passkey-registration' ||
+        isExpired(current.expiresAt) ||
+        current.sessionHash !== session.sidHash ||
+        current.playerUuid !== session.playerUuid
+      ) {
+        return { status: 400, body: { error: 'invalid_challenge' } };
+      }
+      if (await txn.get(passkeyKey(record.credentialId)))
+        return { status: 409, body: { error: 'passkey_already_registered' } };
+      const keys = await txn.list({ prefix: accountPasskeyPrefix(record.playerUuid) });
+      if (keys.size >= MAX_PASSKEYS_PER_ACCOUNT)
+        return { status: 409, body: { error: 'passkey_limit' } };
+      await txn.put({
+        [passkeyKey(record.credentialId)]: record,
+        [accountPasskeyKey(record.playerUuid, record.credentialId)]: record.credentialId,
+      });
+      await txn.delete(webauthnChallengeKey(challenge.challenge));
+      return { status: 200, body: { ok: true } };
+    });
+    this.passkeyCache.delete(session.playerUuid);
+    // Registration is not a new authentication and must not refresh authentication time.
+    return result;
   }
 
-  private async passkeyAuthenticationOptions(clientKey: string): Promise<{ status: number; body: unknown }> {
-    const rateLimited = this.consumeRateLimit(rateLimitKey('passkey-authentication:create', clientKey), 20, 60);
+  private async passkeyAuthenticationOptions(
+    clientKey: string,
+    previousNonce: string,
+  ): Promise<StoreResult> {
+    const rateLimited = this.consumeRateLimit(
+      rateLimitKey('passkey-authentication:create', clientKey),
+      20,
+      60,
+    );
     if (rateLimited) return rateLimited;
     await this.cleanupExpiredChallenges();
-    const webAuthn = webAuthnConfig(this.env);
-
+    const browserNonce = validBrowserNonce(previousNonce) ? previousNonce : randomToken(24);
+    const browserNonceHash = await sha256(browserNonce);
     const options = await generateAuthenticationOptions({
-      rpID: webAuthn.rpID,
+      rpID: webAuthnConfig(this.env).rpID,
       userVerification: 'required',
     });
-
     await this.storage.put(webauthnChallengeKey(options.challenge), {
       type: 'passkey-authentication',
-      challengeId: randomToken(12),
+      browserNonceHash,
       challenge: options.challenge,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + CHALLENGE_TTL_SECONDS * 1000).toISOString(),
     } satisfies ChallengeRecord);
-
-    return { status: 200, body: { options } };
+    return { status: 200, body: { options, browserNonce } };
   }
 
   private async passkeyLogin(
     credential: unknown,
     clientKey: string,
-  ): Promise<{ status: number; body: unknown }> {
-    const rateLimited = this.consumeRateLimit(rateLimitKey('passkey-authentication:login', clientKey), 20, 60);
+    browserNonce: string,
+  ): Promise<StoreResult> {
+    const rateLimited = this.consumeRateLimit(
+      rateLimitKey('passkey-authentication:login', clientKey),
+      20,
+      60,
+    );
     if (rateLimited) return rateLimited;
-
+    if (
+      !credential ||
+      typeof credential !== 'object' ||
+      !('id' in credential) ||
+      typeof credential.id !== 'string'
+    ) {
+      return { status: 400, body: { error: 'passkey_verification_failed' } };
+    }
     const response = credential as AuthenticationResponseJSON;
+    const nonceHash = await sha256(browserNonce);
+    const challenge = await this.readWebauthnChallenge(
+      'passkey-authentication',
+      credentialChallengeId(credential),
+    );
+    if (!challenge || !browserNonce || challenge.browserNonceHash !== nonceHash)
+      return { status: 400, body: { error: 'invalid_challenge' } };
     const passkey = await this.storage.get<PasskeyRecord>(passkeyKey(response.id));
-    if (!passkey) return { status: 404, body: { error: 'passkey_not_found' } };
-    const challenge = await this.readWebauthnChallenge('passkey-authentication', credentialChallengeId(credential));
-    if (!challenge) return { status: 400, body: { error: 'invalid_challenge' } };
-    const webAuthn = webAuthnConfig(this.env);
-    const verification = await verifyPasskeyAuthentication(response, passkey, challenge.challenge, webAuthn);
-
-    if (!verification.verified) return { status: 400, body: { error: 'passkey_verification_failed' } };
+    if (!passkey) return { status: 400, body: { error: 'passkey_verification_failed' } };
+    if (
+      response.response?.userHandle !==
+      bufferToBase64url(new TextEncoder().encode(passkey.playerUuid))
+    ) {
+      return { status: 400, body: { error: 'passkey_verification_failed' } };
+    }
+    const verification = await verifyPasskeyAuthentication(
+      response,
+      passkey,
+      challenge.challenge,
+      webAuthnConfig(this.env),
+    );
+    if (!verification?.verified)
+      return { status: 400, body: { error: 'passkey_verification_failed' } };
     const account = await this.readAccount(passkey.playerUuid);
     if (!account) return { status: 403, body: { error: 'member_required' } };
-    passkey.counter = verification.authenticationInfo.newCounter;
-    passkey.lastUsedAt = new Date().toISOString();
-    await this.storage.put(passkeyKey(passkey.credentialId), passkey);
-    await this.storage.delete(webauthnChallengeKey(challenge.challenge));
+    const session = await this.prepareSession(account.playerUuid, 'passkey');
+    const result = await this.storage.transaction(async (txn): Promise<StoreResult> => {
+      const currentChallenge = await txn.get<ChallengeRecord>(
+        webauthnChallengeKey(challenge.challenge),
+      );
+      if (
+        !currentChallenge ||
+        currentChallenge.type !== 'passkey-authentication' ||
+        currentChallenge.browserNonceHash !== nonceHash ||
+        isExpired(currentChallenge.expiresAt)
+      ) {
+        return { status: 400, body: { error: 'invalid_challenge' } };
+      }
+      const currentKey = await txn.get<PasskeyRecord>(passkeyKey(passkey.credentialId));
+      const currentAccount = await txn.get<AccountRecord>(accountKey(account.playerUuid));
+      if (
+        !currentKey ||
+        currentKey.playerUuid !== passkey.playerUuid ||
+        currentKey.publicKey !== passkey.publicKey ||
+        currentKey.counter !== passkey.counter ||
+        !eligibleAccount(currentAccount)
+      ) {
+        return { status: 400, body: { error: 'passkey_verification_failed' } };
+      }
+      await this.pruneAccountSessions(txn, account.playerUuid);
+      await txn.put({
+        [passkeyKey(passkey.credentialId)]: {
+          ...currentKey,
+          counter: verification.authenticationInfo.newCounter,
+          lastUsedAt: new Date().toISOString(),
+        },
+        [sessionKey(session.record.sidHash)]: session.record,
+        [accountSessionKey(account.playerUuid, session.record.sidHash)]: session.record.sidHash,
+      });
+      await txn.delete(webauthnChallengeKey(challenge.challenge));
+      return { status: 200, body: sessionBody(session.sessionId, currentAccount) };
+    });
     this.passkeyCache.delete(passkey.playerUuid);
-    const session = await this.createSession(account.playerUuid, 'passkey');
-    return { status: 200, body: sessionBody(session.sessionId, account) };
+    return result;
   }
 
-  private async passkeyDelete(sessionId: string, credentialId: string): Promise<{ status: number; body: unknown }> {
+  private async passkeyDelete(sessionId: string, credentialId: string): Promise<StoreResult> {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
-    const passkey = await this.storage.get<PasskeyRecord>(passkeyKey(credentialId));
-    if (!passkey || passkey.playerUuid !== session.playerUuid) return { status: 404, body: { error: 'not_found' } };
-    await Promise.all([
-      this.storage.delete(passkeyKey(credentialId)),
-      this.storage.delete(accountPasskeyKey(session.playerUuid, credentialId)),
-    ]);
+    if (!recentlyAuthenticated(session)) return reauthenticationRequired();
+    if (!(await this.readAccount(session.playerUuid)))
+      return { status: 403, body: { error: 'member_required' } };
+    const result = await this.storage.transaction(async (txn): Promise<StoreResult> => {
+      const current = await txn.get<SessionRecord>(sessionKey(session.sidHash));
+      if (!activeSession(current)) return { status: 401, body: { error: 'unauthenticated' } };
+      if (!recentlyAuthenticated(current)) return reauthenticationRequired();
+      const passkey = await txn.get<PasskeyRecord>(passkeyKey(credentialId));
+      if (!passkey || passkey.playerUuid !== current.playerUuid)
+        return { status: 404, body: { error: 'not_found' } };
+      await txn.delete([
+        passkeyKey(credentialId),
+        accountPasskeyKey(current.playerUuid, credentialId),
+      ]);
+      return { status: 200, body: { ok: true } };
+    });
     this.passkeyCache.delete(session.playerUuid);
-    return { status: 200, body: { ok: true } };
-  }
-
-  private async accountSummary(sessionId: string): Promise<{ status: number; body: unknown }> {
-    const session = await this.readValidSession(sessionId);
-    if (!session) return { status: 401, body: { error: 'unauthenticated' } };
-    const account = await this.readAccount(session.playerUuid);
-    if (!account) return { status: 404, body: { error: 'not_found' } };
-    return { status: 200, body: { account: await this.accountSummaryBody(account) } };
+    return result;
   }
 
   private async accountSecurity(sessionId: string): Promise<{ status: number; body: unknown }> {
@@ -821,35 +1176,97 @@ export class AuthStore implements DurableObject {
   private async revokeAccountSession(
     sessionId: string,
     targetSessionId: string,
-  ): Promise<{ status: number; body: unknown }> {
-    const currentSession = await this.readValidSession(sessionId);
-    if (!currentSession) return { status: 401, body: { error: 'unauthenticated' } };
-    if (!targetSessionId) return { status: 422, body: { error: 'invalid_session' } };
-
-    const targetSession = await this.readSessionByHash(targetSessionId);
-    if (!targetSession || targetSession.playerUuid !== currentSession.playerUuid) {
-      return { status: 404, body: { error: 'not_found' } };
+    all: boolean,
+  ): Promise<StoreResult> {
+    const current = await this.readValidSession(sessionId);
+    if (!current) return { status: 401, body: { error: 'unauthenticated' } };
+    if ((all && targetSessionId) || (!all && !targetSessionId))
+      return { status: 422, body: { error: 'invalid_session' } };
+    const requiresRecentAuth = all || targetSessionId !== current.sidHash;
+    if (requiresRecentAuth && !recentlyAuthenticated(current)) return reauthenticationRequired();
+    let revokedSessionHashes: string[] = [];
+    const result = await this.storage.transaction(async (txn): Promise<StoreResult> => {
+      const actor = await txn.get<SessionRecord>(sessionKey(current.sidHash));
+      if (!activeSession(actor)) return { status: 401, body: { error: 'unauthenticated' } };
+      if (requiresRecentAuth && !recentlyAuthenticated(actor)) return reauthenticationRequired();
+      if (all) {
+        revokedSessionHashes = await this.deleteAccountSessions(txn, actor.playerUuid);
+        await txn.delete([
+          sessionKey(actor.sidHash),
+          accountSessionKey(actor.playerUuid, actor.sidHash),
+        ]);
+        return { status: 200, body: { ok: true, clearSession: true } };
+      }
+      const target = await txn.get<SessionRecord>(sessionKey(targetSessionId));
+      if (!target || target.playerUuid !== actor.playerUuid)
+        return { status: 404, body: { error: 'not_found' } };
+      await txn.delete([
+        sessionKey(target.sidHash),
+        accountSessionKey(target.playerUuid, target.sidHash),
+      ]);
+      return { status: 200, body: { ok: true, clearSession: target.sidHash === current.sidHash } };
+    });
+    if (result.status === 200) {
+      if (all) {
+        for (const sidHash of revokedSessionHashes) this.sessionCache.delete(sidHash);
+        this.sessionCache.delete(current.sidHash);
+      } else this.sessionCache.delete(targetSessionId);
+      await this.notifyChatRevocation(all ? [...new Set([...revokedSessionHashes, current.sidHash])] : [targetSessionId]);
     }
-    if (targetSession.revokedAt || isExpired(targetSession.idleExpiresAt) || isExpired(targetSession.absoluteExpiresAt)) {
-      await this.deleteSessionIndex(targetSession);
-      this.sessionCache.delete(targetSession.sidHash);
-      return { status: 404, body: { error: 'not_found' } };
+    return result;
+  }
+
+  private async authorizeWebChat(sessionId: string, connectionId: string): Promise<StoreResult> {
+    if (!/^[A-Za-z0-9_-]{32}$/.test(connectionId))
+      return { status: 422, body: { error: 'invalid_connection' } };
+    // A timer confirms authority without keeping an idle login alive or writing every renewal.
+    const session = await this.readValidSession(sessionId, false);
+    if (!session) return { status: 401, body: { error: 'unauthenticated', clearSession: true } };
+    const rateLimited = this.consumeRateLimit(rateLimitKey('web-chat:authorize', session.playerUuid), 20, 60);
+    if (rateLimited) return rateLimited;
+    const account = await this.readAccount(session.playerUuid);
+    if (!eligibleAccount(account)) return { status: 403, body: { error: 'member_required' } };
+    const valid = await this.storage.transaction(txn => this.sessionStillActive(txn, session));
+    if (!valid) return { status: 401, body: { error: 'unauthenticated', clearSession: true } };
+    const checkedAt = Date.now();
+    const expiresAt = Math.min(checkedAt + 60_000, Date.parse(session.idleExpiresAt), Date.parse(session.absoluteExpiresAt));
+    try {
+      const response = await this.env.VPC_SERVICE.fetch(new URL('/api/chat/authorize', this.env.MINECRAFT_SERVER_URL), {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ connectionId, playerUuid: session.playerUuid, playerName: account.currentName,
+          sessionRef: session.sidHash, authenticatedAt: Date.parse(session.authenticatedAt), checkedAt, expiresAt }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) {
+        const status = [403, 409, 429].includes(response.status) ? response.status : 503;
+        const failure = await response.json().catch(() => null) as { error?: unknown } | null;
+        const error = status === 429 ? (failure?.error === 'chat_capacity' ? 'chat_capacity' : 'connection_limit')
+          : status === 409 ? 'connection_unavailable' : 'chat_unavailable';
+        return { status, body: { error } };
+      }
+      const result = await response.json() as { lastActivityAt?: unknown };
+      // Only accepted messages attested by the plugin count as activity, never a browser claim.
+      if (typeof result.lastActivityAt === 'number' && Number.isSafeInteger(result.lastActivityAt)
+          && result.lastActivityAt > Date.parse(session.lastSeenAt) && result.lastActivityAt <= Date.now() + 5000)
+        await this.readValidSession(sessionId);
+      return { status: 200, body: { ok: true } };
+    } catch {
+      return { status: 503, body: { error: 'chat_unavailable' } };
     }
+  }
 
-    targetSession.revokedAt = new Date().toISOString();
-    await Promise.all([
-      this.storage.put(sessionKey(targetSession.sidHash), targetSession),
-      this.deleteSessionIndex(targetSession),
-    ]);
-    this.sessionCache.delete(targetSession.sidHash);
-
-    return {
-      status: 200,
-      body: {
-        ok: true,
-        clearSession: targetSession.sidHash === currentSession.sidHash,
-      },
-    };
+  private async notifyChatRevocation(sessionRefs: string[]): Promise<void> {
+    if (!sessionRefs.length) return;
+    try {
+      const response = await this.env.VPC_SERVICE.fetch(new URL('/api/chat/revoke', this.env.MINECRAFT_SERVER_URL), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionRefs }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!response.ok) throw new Error('chat_revocation_failed');
+    } catch {
+      // The stored session has already been revoked. Plugin authority expires within 60 seconds.
+      console.warn('Web chat revocation notification unavailable');
+    }
   }
 
   private async resolvePlayer(
@@ -889,100 +1306,229 @@ export class AuthStore implements DurableObject {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     const account = await this.readAccount(session.playerUuid);
-    if (!account || account.role === 'default') return { status: 403, body: { error: 'member_required' } };
+    if (!account) return { status: 403, body: { error: 'member_required' } };
 
-    return this.queuePlayerSubmission(
-      account.playerUuid,
-      async () => responseToStoreResult(
+    return this.storage.transaction(async (txn) => {
+      if (!(await this.sessionStillActive(txn, session)))
+        return { status: 401, body: { error: 'unauthenticated' } };
+      const result = await responseToStoreResult(
         await createPlayerBuildingSubmission(
           new Request('https://auth-store.local/building-submissions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload ?? {}),
           }),
-          this.env,
+          { ...this.env, buildingStore: this.buildings },
           account,
         ),
-      ),
-    );
+      );
+      if (result.status < 400) await this.scheduleMaintenance();
+      return result;
+    });
   }
 
-  private async listBuildingSubmissions(sessionId: string): Promise<{ status: number; body: unknown }> {
+  private async listBuildingSubmissions(
+    sessionId: string,
+  ): Promise<{ status: number; body: unknown }> {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     const account = await this.readAccount(session.playerUuid);
-    if (!account || account.role === 'default') return { status: 403, body: { error: 'member_required' } };
+    if (!account) return { status: 403, body: { error: 'member_required' } };
+    await this.ensureBuildingCatalog();
 
     return responseToStoreResult(
       await listPlayerBuildingSubmissions(
         new Request('https://auth-store.local/building-submissions/mine', { method: 'POST' }),
-        this.env,
+        { ...this.env, buildingStore: this.buildings },
         account,
       ),
     );
   }
 
-  private async upsertAccount(
-    playerUuid: string,
-    currentName: string,
-    role: string,
-  ): Promise<AccountRecord> {
-    const now = new Date().toISOString();
-    const existing = await this.readAccount(playerUuid);
-    const account: AccountRecord = existing
-      ? { ...existing, currentName, role, updatedAt: now }
-      : { playerUuid, currentName, role, updatedAt: now };
-    const writes: Promise<unknown>[] = [
-      this.storage.put(accountKey(playerUuid), account),
-      this.storage.put(accountNameKey(currentName), account.playerUuid),
-    ];
-    if (existing && normalizePlayerName(existing.currentName) !== normalizePlayerName(currentName)) {
-      writes.push(this.storage.delete(accountNameKey(existing.currentName)));
-    }
-    await Promise.all(writes);
-    this.accountCache.set(account.playerUuid, account);
-    return account;
+  private async imageUpload(
+    sessionId: string,
+    uploadId?: string,
+    rawImage?: unknown,
+  ): Promise<{ status: number; body: unknown }> {
+    const session = await this.readValidSession(sessionId);
+    if (!session) return { status: 401, body: { error: 'unauthenticated' } };
+    const account = await this.readAccount(session.playerUuid);
+    if (!eligibleAccount(account)) return { status: 403, body: { error: 'member_required' } };
+    return this.storage.transaction(async (txn) => {
+      if (!(await this.sessionStillActive(txn, session)))
+        return { status: 401, body: { error: 'unauthenticated' } };
+      if (uploadId !== undefined) {
+        if (!validUploadedImage(rawImage)) return { status: 422, body: { error: 'invalid_image' } };
+        const saved = this.buildings.completeUpload(account.playerUuid, uploadId, rawImage);
+        return saved
+          ? { status: 200, body: { image: rawImage } }
+          : { status: 409, body: { error: 'upload_expired' } };
+      }
+      if (this.buildings.pendingCount(account.playerUuid) >= 10)
+        return { status: 429, body: { error: 'pending_limit_reached' } };
+      const result = this.buildings.reserveUpload(account.playerUuid);
+      await this.scheduleMaintenance();
+      return {
+        status: result.error ? 429 : 200,
+        body: result.error ? result : { uploadId: result.id },
+      };
+    });
   }
 
-  private async createSession(
+  private async sessionStillActive(
+    txn: DurableObjectTransaction,
+    session: SessionRecord,
+  ): Promise<boolean> {
+    const current = await txn.get<SessionRecord>(sessionKey(session.sidHash));
+    const account = await txn.get<AccountRecord>(accountKey(session.playerUuid));
+    return (
+      activeSession(current) &&
+      eligibleAccount(account) &&
+      current.playerUuid === session.playerUuid &&
+      Date.parse(current.authenticatedAt) > (account.credentialsChangedAt ?? 0)
+    );
+  }
+
+  private async scheduleMaintenance(): Promise<void> {
+    const current = await this.storage.getAlarm();
+    const due = Math.min(this.buildings.publicationDue() ?? Infinity, Date.now() + 3600_000);
+    if (current === null || current > due) await this.storage.setAlarm(due);
+  }
+
+  async alarm(): Promise<void> {
+    await this.ensureInitialized();
+    // Install a recovery alarm before external I/O. Publication state remains durable on failure.
+    await this.storage.setAlarm(Date.now() + 3600_000);
+    try {
+      await this.ensureBuildingCatalog();
+      await this.buildings.publish(this.env.BUILDINGS_KV);
+    } catch (error) {
+      console.warn('Building catalog maintenance deferred', error);
+    }
+    const nextSweep = (await this.storage.get<number>('maintenance:next-sweep')) ?? 0;
+    if (nextSweep <= Date.now()) {
+      await this.storage.transaction(async (txn) => {
+        this.buildings.cleanup();
+        const cursor = await txn.get<string>('maintenance:session-cursor');
+        const rows = await txn.list<SessionRecord>({
+          prefix: 'session:',
+          startAfter: cursor,
+          limit: 128,
+        });
+        for (const [key, session] of rows) {
+          const { playerUuid, sidHash } = session;
+          if (!activeSession(session)) {
+            await txn.delete([key, accountSessionKey(playerUuid, sidHash)]);
+            this.sessionCache.delete(sidHash);
+          }
+        }
+        const last = [...rows.keys()].at(-1);
+        if (rows.size === 128 && last) await txn.put('maintenance:session-cursor', last);
+        else await txn.delete('maintenance:session-cursor');
+        await txn.put('maintenance:next-sweep', Date.now() + 3600_000);
+      });
+    }
+    await this.scheduleMaintenance();
+  }
+
+  private async pruneAccountSessions(
+    txn: DurableObjectTransaction,
+    playerUuid: string,
+  ): Promise<void> {
+    const index = await txn.list<string>({ prefix: accountSessionPrefix(playerUuid) });
+    const sessions: SessionRecord[] = [];
+    for (const [key, hash] of index) {
+      const session = await txn.get<SessionRecord>(sessionKey(hash));
+      if (!session || session.playerUuid !== playerUuid) {
+        await txn.delete(key);
+        continue;
+      }
+      if (!activeSession(session)) {
+        await txn.delete([key, sessionKey(hash)]);
+        this.sessionCache.delete(hash);
+      } else sessions.push(session);
+    }
+    sessions.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+    for (const session of sessions.slice(15)) {
+      await txn.delete([
+        sessionKey(session.sidHash),
+        accountSessionKey(playerUuid, session.sidHash),
+      ]);
+      this.sessionCache.delete(session.sidHash);
+    }
+    await this.scheduleMaintenance();
+  }
+
+  private async prepareSession(
     playerUuid: string,
     authMethod: SessionRecord['authMethod'],
+    authenticatedAt = new Date().toISOString(),
   ): Promise<{ sessionId: string; record: SessionRecord }> {
     const sessionId = randomToken(32);
     const now = Date.now();
-    const record: SessionRecord = {
-      sidHash: await sha256(sessionId),
-      playerUuid,
-      issuedAt: new Date(now).toISOString(),
-      lastSeenAt: new Date(now).toISOString(),
-      idleExpiresAt: new Date(now + SESSION_IDLE_SECONDS * 1000).toISOString(),
-      absoluteExpiresAt: new Date(now + SESSION_ABSOLUTE_SECONDS * 1000).toISOString(),
-      authMethod,
+    return {
+      sessionId,
+      record: {
+        sidHash: await sha256(sessionId),
+        playerUuid,
+        authMethod,
+        authenticatedAt,
+        issuedAt: new Date(now).toISOString(),
+        lastSeenAt: new Date(now).toISOString(),
+        idleExpiresAt: new Date(now + SESSION_IDLE_SECONDS * 1000).toISOString(),
+        absoluteExpiresAt: new Date(now + SESSION_ABSOLUTE_SECONDS * 1000).toISOString(),
+      },
     };
-    await Promise.all([
-      this.storage.put(sessionKey(record.sidHash), record),
-      this.storage.put(accountSessionKey(record.playerUuid, record.sidHash), record.sidHash),
-    ]);
-    this.sessionCache.set(record.sidHash, record, sessionCacheTtlMs(record));
-    return { sessionId, record };
   }
 
-  private async readValidSession(sessionId: string): Promise<SessionRecord | null> {
+  private async readValidSession(sessionId: string, touch = true): Promise<SessionRecord | null> {
     if (!sessionId) return null;
     const sidHash = await sha256(sessionId);
-    const session = await this.readSessionByHash(sidHash);
-    if (!session || session.revokedAt || isExpired(session.idleExpiresAt) || isExpired(session.absoluteExpiresAt)) {
+    let session = await this.readSessionByHash(sidHash);
+    if (!activeSession(session)) {
       this.sessionCache.delete(sidHash);
-      if (session) {
-        await this.deleteSessionIndex(session);
-      }
+      if (session)
+        await this.storage.transaction(async (txn) => {
+          const current = await txn.get<SessionRecord>(sessionKey(sidHash));
+          if (!activeSession(current))
+            await txn.delete([
+              sessionKey(sidHash),
+              accountSessionKey(session!.playerUuid, sidHash),
+            ]);
+        });
+      return null;
+    }
+    const account = await this.readAccount(session.playerUuid);
+    if (
+      !eligibleAccount(account) ||
+      Date.parse(session.authenticatedAt) <= (account.credentialsChangedAt ?? 0)
+    ) {
+      this.sessionCache.delete(sidHash);
       return null;
     }
     const now = Date.now();
-    if (now - new Date(session.lastSeenAt).getTime() >= SESSION_TOUCH_INTERVAL_SECONDS * 1000) {
-      session.lastSeenAt = new Date(now).toISOString();
-      session.idleExpiresAt = new Date(now + SESSION_IDLE_SECONDS * 1000).toISOString();
-      await this.storage.put(sessionKey(sidHash), session);
+    if (touch && now - Date.parse(session.lastSeenAt) >= SESSION_TOUCH_INTERVAL_SECONDS * 1000) {
+      session = await this.storage.transaction(async (txn) => {
+        const current = await txn.get<SessionRecord>(sessionKey(sidHash));
+        if (!activeSession(current)) return null;
+        const updated = {
+          ...current,
+          lastSeenAt: new Date(now).toISOString(),
+          idleExpiresAt: new Date(
+            Math.min(now + SESSION_IDLE_SECONDS * 1000, Date.parse(current.absoluteExpiresAt)),
+          ).toISOString(),
+        };
+        await txn.put(sessionKey(sidHash), updated);
+        return updated;
+      });
+    } else {
+      // A policy refresh or concurrent revocation may have invalidated this cache entry.
+      if (!this.sessionCache.get(sidHash))
+        session = (await this.storage.get<SessionRecord>(sessionKey(sidHash))) ?? null;
+    }
+    if (!activeSession(session)) {
+      this.sessionCache.delete(sidHash);
+      return null;
     }
     this.sessionCache.set(sidHash, session, sessionCacheTtlMs(session, now), now);
     return session;
@@ -999,7 +1545,10 @@ export class AuthStore implements DurableObject {
     return session;
   }
 
-  private async listAccountSessions(playerUuid: string, currentSidHash: string): Promise<Record<string, unknown>[]> {
+  private async listAccountSessions(
+    playerUuid: string,
+    currentSidHash: string,
+  ): Promise<Record<string, unknown>[]> {
     const index = await this.storage.list<string>({ prefix: accountSessionPrefix(playerUuid) });
     const sessionEntries = await Promise.all(
       [...index.entries()].map(async ([indexKey, sidHash]) => ({
@@ -1010,15 +1559,9 @@ export class AuthStore implements DurableObject {
     const activeSessions: SessionRecord[] = [];
     const cleanup: Promise<unknown>[] = [];
     for (const { indexKey, session } of sessionEntries) {
-      if (
-        !session ||
-        session.playerUuid !== playerUuid ||
-        session.revokedAt ||
-        isExpired(session.idleExpiresAt) ||
-        isExpired(session.absoluteExpiresAt)
-      ) {
-        if (session) {
-          cleanup.push(this.deleteSessionIndex(session));
+      if (!activeSession(session) || session.playerUuid !== playerUuid) {
+        if (session && session.playerUuid === playerUuid) {
+          cleanup.push(this.storage.delete([sessionKey(session.sidHash), indexKey]));
           this.sessionCache.delete(session.sidHash);
         } else {
           cleanup.push(this.storage.delete(indexKey));
@@ -1033,49 +1576,128 @@ export class AuthStore implements DurableObject {
 
     if (!activeSessions.some((session) => session.sidHash === currentSidHash)) {
       const currentSession = await this.readSessionByHash(currentSidHash);
-      if (currentSession && currentSession.playerUuid === playerUuid) {
+      if (activeSession(currentSession) && currentSession.playerUuid === playerUuid) {
         activeSessions.push(currentSession);
         await this.storage.put(accountSessionKey(playerUuid, currentSidHash), currentSidHash);
       }
     }
 
     return activeSessions
-      .sort((left, right) => new Date(right.lastSeenAt).getTime() - new Date(left.lastSeenAt).getTime())
+      .sort(
+        (left, right) => new Date(right.lastSeenAt).getTime() - new Date(left.lastSeenAt).getTime(),
+      )
       .map((session) => publicSession(session, session.sidHash === currentSidHash));
   }
 
-  private async deleteSessionIndex(session: SessionRecord): Promise<void> {
-    await this.storage.delete(accountSessionKey(session.playerUuid, session.sidHash));
+  private readAccount(playerUuid: string): Promise<AccountRecord | null> {
+    const cached = this.accountCache.get(playerUuid);
+    if (cached) return Promise.resolve(eligibleAccount(cached) ? cached : null);
+    let loading = this.accountReads.get(playerUuid);
+    if (!loading) {
+      loading = this.loadAccount(playerUuid).finally(() => this.accountReads.delete(playerUuid));
+      this.accountReads.set(playerUuid, loading);
+    }
+    return loading;
   }
 
-  private queuePlayerSubmission<T>(playerUuid: string, task: () => Promise<T>): Promise<T> {
-    const key = playerUuid.toLowerCase();
-    const previous = this.submissionQueues.get(key) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(task);
-    const settled = next.catch(() => undefined);
-    this.submissionQueues.set(key, settled);
-    settled.finally(() => {
-      if (this.submissionQueues.get(key) === settled) {
-        this.submissionQueues.delete(key);
-      }
-    });
-    return next;
-  }
-
-  private async readAccount(playerUuid: string): Promise<AccountRecord | null> {
-    let account = this.accountCache.get(playerUuid);
-    account ??= (await this.storage.get<AccountRecord>(accountKey(playerUuid))) ?? null;
+  private async loadAccount(playerUuid: string): Promise<AccountRecord | null> {
+    const account = await this.storage.get<AccountRecord>(accountKey(playerUuid));
     if (!account) return null;
-    if (!isEligibleRole(account.role)) {
-      await Promise.all([
-        this.storage.delete(accountKey(playerUuid)),
-        this.storage.delete(accountNameKey(account.currentName)),
-      ]);
-      this.accountCache.delete(playerUuid);
+    if (account.disabledAt) {
+      await this.storage.transaction((txn) => this.deleteAccountSessions(txn, playerUuid));
+      this.sessionCache.clear();
       return null;
     }
-    this.accountCache.set(playerUuid, account);
-    return account;
+    const policy = await this.fetchPluginAccountPolicy(playerUuid);
+    const role = policy.role;
+    if (!isEligibleRole(role)) {
+      await this.storage.transaction(async (txn) => {
+        const current = await txn.get<AccountRecord>(accountKey(playerUuid));
+        if (current)
+          await txn.put(accountKey(playerUuid), {
+            ...current,
+            role,
+            updatedAt: new Date().toISOString(),
+          });
+        await this.deleteAccountSessions(txn, playerUuid);
+      });
+      this.sessionCache.clear();
+      return null;
+    }
+    const updated = { ...account, role, credentialsChangedAt: policy.credentialsChangedAt };
+    if (account.role !== role || account.credentialsChangedAt !== policy.credentialsChangedAt) {
+      const committed = await this.storage.transaction(async (txn) => {
+        const current = await txn.get<AccountRecord>(accountKey(playerUuid));
+        if (!current || current.disabledAt) return false;
+        await txn.put(accountKey(playerUuid), {
+          ...current,
+          role,
+          credentialsChangedAt: policy.credentialsChangedAt,
+        });
+        if (policy.credentialsChangedAt > (current.credentialsChangedAt ?? 0)) {
+          await this.deleteAccountSessions(txn, playerUuid, policy.credentialsChangedAt);
+        }
+        return true;
+      });
+      this.sessionCache.clear();
+      if (!committed) return null;
+    }
+    this.accountCache.set(playerUuid, updated);
+    return updated;
+  }
+
+  private async fetchPluginAccountPolicy(
+    playerUuid: string,
+  ): Promise<{ role: string; credentialsChangedAt: number }> {
+    try {
+      const response = await this.env.VPC_SERVICE.fetch(
+        new URL(
+          `/api/auth/accounts/${encodeURIComponent(playerUuid)}`,
+          this.env.MINECRAFT_SERVER_URL,
+        ),
+        {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(5000),
+        },
+      );
+      if (!response.ok) throw new PluginUnavailableError();
+      const payload = (await response.json()) as {
+        player?: { uuid?: string; role?: string; credentialsChangedAt?: number };
+      };
+      if (
+        payload.player?.uuid?.toLowerCase() !== playerUuid ||
+        typeof payload.player.role !== 'string'
+      )
+        throw new PluginUnavailableError();
+      const changed = payload.player.credentialsChangedAt;
+      if (typeof changed !== 'number' || !Number.isSafeInteger(changed) || changed < 0)
+        throw new PluginUnavailableError();
+      return { role: payload.player.role.toLowerCase(), credentialsChangedAt: changed };
+    } catch {
+      throw new PluginUnavailableError();
+    }
+  }
+
+  private async deleteAccountSessions(
+    txn: DurableObjectTransaction,
+    playerUuid: string,
+    before?: number,
+  ): Promise<string[]> {
+    const entries = await txn.list<string>({ prefix: accountSessionPrefix(playerUuid) });
+    const deleted: string[] = [];
+    for (const [key, sidHash] of entries) {
+      const session = await txn.get<SessionRecord>(sessionKey(sidHash));
+      if (
+        before === undefined ||
+        !activeSession(session) ||
+        Date.parse(session.authenticatedAt) <= before
+      ) {
+        await txn.delete([key, sessionKey(sidHash)]);
+        deleted.push(sidHash);
+      }
+    }
+    return deleted;
   }
 
   private async accountSummaryBody(account: AccountRecord): Promise<PlayerAccountSummary> {
@@ -1096,14 +1718,20 @@ export class AuthStore implements DurableObject {
 
     const index = await this.storage.list<string>({ prefix: accountPasskeyPrefix(playerUuid) });
     const passkeys = await Promise.all(
-      [...index.values()].map((credentialId) => this.storage.get<PasskeyRecord>(passkeyKey(credentialId))),
+      [...index.values()].map((credentialId) =>
+        this.storage.get<PasskeyRecord>(passkeyKey(credentialId)),
+      ),
     );
-    const result = passkeys.filter((passkey): passkey is PasskeyRecord => !!passkey && passkey.playerUuid === playerUuid);
+    const result = passkeys.filter(
+      (passkey): passkey is PasskeyRecord => !!passkey && passkey.playerUuid === playerUuid,
+    );
     this.passkeyCache.set(playerUuid, result);
     return result;
   }
 
-  private async readMinecraftChallenge(challengeId: string): Promise<Extract<ChallengeRecord, { type: 'minecraft-login' }> | null> {
+  private async readMinecraftChallenge(
+    challengeId: string,
+  ): Promise<Extract<ChallengeRecord, { type: 'minecraft-login' }> | null> {
     const record = await this.storage.get<ChallengeRecord>(challengeKey(challengeId));
     return record?.type === 'minecraft-login' ? record : null;
   }
@@ -1111,7 +1739,10 @@ export class AuthStore implements DurableObject {
   private async readWebauthnChallenge(
     type: 'passkey-registration' | 'passkey-authentication',
     challenge?: string,
-  ): Promise<Extract<ChallengeRecord, { type: 'passkey-registration' | 'passkey-authentication' }> | null> {
+  ): Promise<Extract<
+    ChallengeRecord,
+    { type: 'passkey-registration' | 'passkey-authentication' }
+  > | null> {
     if (!challenge) return null;
     const record = await this.storage.get<ChallengeRecord>(webauthnChallengeKey(challenge));
     if (!record || record.type !== type) return null;
@@ -1122,14 +1753,17 @@ export class AuthStore implements DurableObject {
     return record;
   }
 
-  private async fetchPluginChallenge(code: string, consume: boolean): Promise<PluginChallengeResponse> {
-    const path = `/api/auth/challenges/${encodeURIComponent(code)}${consume ? '/consume' : ''}`;
+  private async fetchPluginChallenge(code: string): Promise<PluginChallengeResponse> {
+    const path = `/api/auth/challenges/${encodeURIComponent(code)}`;
     try {
-      const response = await this.env.VPC_SERVICE.fetch(new URL(path, this.env.MINECRAFT_SERVER_URL), {
-        method: consume ? 'POST' : 'GET',
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(5000),
-      });
+      const response = await this.env.VPC_SERVICE.fetch(
+        new URL(path, this.env.MINECRAFT_SERVER_URL),
+        {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(5000),
+        },
+      );
       if (!response.ok) return { status: 'not_found' };
       return (await response.json()) as PluginChallengeResponse;
     } catch {
@@ -1140,11 +1774,14 @@ export class AuthStore implements DurableObject {
   private async fetchPluginPlayer(name: string): Promise<{ uuid: string; name: string } | null> {
     const path = `/api/players/resolve?name=${encodeURIComponent(name)}`;
     try {
-      const response = await this.env.VPC_SERVICE.fetch(new URL(path, this.env.MINECRAFT_SERVER_URL), {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(5000),
-      });
+      const response = await this.env.VPC_SERVICE.fetch(
+        new URL(path, this.env.MINECRAFT_SERVER_URL),
+        {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(5000),
+        },
+      );
       if (!response.ok) return null;
       const payload = (await response.json()) as PluginPlayerResolveResponse;
       const uuid = asString(payload.player?.uuid).toLowerCase();
@@ -1176,8 +1813,22 @@ export class AuthStore implements DurableObject {
   }
 
   private ensureInitialized(): Promise<void> {
-    this.initialized ??= Promise.resolve();
+    this.initialized ??= Promise.resolve().then(() => this.buildings.initialize());
     return this.initialized;
+  }
+
+  private ensureBuildingCatalog(): Promise<void> {
+    if (this.catalogReady) return this.catalogReady;
+    if (this.catalogRetryAt > Date.now()) return Promise.reject(new BuildingCatalogUnavailableError());
+    this.catalogReady = migrateBuildingCatalog(this.storage, this.env.BUILDINGS_KV, this.buildings)
+      .then(() => this.scheduleMaintenance())
+      .catch((error: unknown) => {
+        this.catalogReady = null;
+        this.catalogRetryAt = Date.now() + 60_000;
+        console.error('Building catalog initialization deferred', error);
+        throw new BuildingCatalogUnavailableError();
+      });
+    return this.catalogReady;
   }
 
   private async cleanupExpiredChallenges(): Promise<void> {
@@ -1207,13 +1858,12 @@ export class AuthStore implements DurableObject {
     await Promise.all(deletes);
   }
 
-  private async deleteMinecraftChallenge(
-    record: Extract<ChallengeRecord, { type: 'minecraft-login' }>,
-  ): Promise<void> {
-    await Promise.all([
-      this.storage.delete(challengeKey(record.challengeId)),
-      this.storage.delete(codeKey(record.displayCode)),
-    ]);
+  private async deleteMinecraftChallenge(record: MinecraftChallenge): Promise<void> {
+    await this.storage.transaction(async (txn) => {
+      await txn.delete(challengeKey(record.challengeId));
+      if ((await txn.get(codeKey(record.displayCode))) === record.challengeId)
+        await txn.delete(codeKey(record.displayCode));
+    });
   }
 
   private consumeRateLimit(
@@ -1277,7 +1927,9 @@ async function callStore(
   return (await response.json()) as { status: number; body: Record<string, unknown> };
 }
 
-async function responseToStoreResult(response: Response): Promise<{ status: number; body: unknown }> {
+async function responseToStoreResult(
+  response: Response,
+): Promise<{ status: number; body: unknown }> {
   const body = await response.json().catch(() => ({}));
   return { status: response.status, body };
 }
@@ -1299,7 +1951,12 @@ async function readJsonObject(
     return {
       ok: false,
       response: authJson(
-        { error: error instanceof RequestBodyTooLargeError ? 'request_body_too_large' : 'invalid_request_body' },
+        {
+          error:
+            error instanceof RequestBodyTooLargeError
+              ? 'request_body_too_large'
+              : 'invalid_request_body',
+        },
         error instanceof RequestBodyTooLargeError ? 413 : 400,
       ),
     };
@@ -1362,8 +2019,13 @@ async function readLimitedRequestText(request: Request): Promise<string> {
 }
 
 function isMikwebClientRequest(request: Request, env: Env): boolean {
-  const expected = env.MIKWEB_AUTH_CLIENT_SECRET?.trim();
-  const actual = request.headers.get('X-Mikweb-Auth');
+  return safeSecretEqual(
+    env.MIKWEB_AUTH_CLIENT_SECRET?.trim(),
+    request.headers.get('X-Mikweb-Auth'),
+  );
+}
+
+function safeSecretEqual(expected: string | undefined, actual: string | null): boolean {
   if (!expected || !actual) return false;
   const encoder = new TextEncoder();
   const expectedBytes = encoder.encode(expected);
@@ -1389,7 +2051,12 @@ function rateLimitKey(action: string, clientKey: string): string {
 }
 
 function sanitizeRateLimitPart(value: string): string {
-  return value.trim().slice(0, 128).replace(/[^a-zA-Z0-9:._-]/g, '_') || 'unknown';
+  return (
+    value
+      .trim()
+      .slice(0, 128)
+      .replace(/[^a-zA-Z0-9:._-]/g, '_') || 'unknown'
+  );
 }
 
 function normalizePlayerName(value: string): string {
@@ -1411,14 +2078,20 @@ function sessionHeaders(body: Record<string, unknown>): HeadersInit {
   if (sessionId) {
     headers.append(
       'Set-Cookie',
-      `${SESSION_COOKIE_NAME}=${encodeURIComponent(sessionId)}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SESSION_IDLE_SECONDS}`,
+      `${SESSION_COOKIE_NAME}=${encodeURIComponent(sessionId)}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SESSION_ABSOLUTE_SECONDS}`,
     );
   }
   if (body.clearSession) {
-    headers.append('Set-Cookie', `${SESSION_COOKIE_NAME}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`);
+    headers.append(
+      'Set-Cookie',
+      `${SESSION_COOKIE_NAME}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+    );
   }
   if (body.clearLogin || sessionId) {
-    headers.append('Set-Cookie', `${LOGIN_COOKIE_NAME}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`);
+    headers.append(
+      'Set-Cookie',
+      `${LOGIN_COOKIE_NAME}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+    );
   }
   return headers;
 }
@@ -1448,7 +2121,9 @@ function stripInternalAuthFields(body: Record<string, unknown>): Record<string, 
   return safeBody;
 }
 
-function challengePublicBody(record: Extract<ChallengeRecord, { type: 'minecraft-login' }>): Record<string, unknown> {
+function challengePublicBody(
+  record: Extract<ChallengeRecord, { type: 'minecraft-login' }>,
+): Record<string, unknown> {
   if (record.status === 'confirmed') {
     return {
       status: 'confirmed',
@@ -1516,7 +2191,7 @@ async function verifyPasskeyAuthentication(
   passkey: PasskeyRecord,
   expectedChallenge: string,
   webAuthn: { rpID: string; origins: string[] },
-): ReturnType<typeof verifyAuthenticationResponse> {
+): Promise<Awaited<ReturnType<typeof verifyAuthenticationResponse>> | null> {
   try {
     return await verifyAuthenticationResponse({
       response,
@@ -1532,22 +2207,13 @@ async function verifyPasskeyAuthentication(
       } satisfies WebAuthnCredential,
     });
   } catch {
-    return {
-      verified: false,
-      authenticationInfo: {
-        credentialID: passkey.credentialId,
-        newCounter: passkey.counter,
-        userVerified: false,
-        credentialDeviceType: 'singleDevice',
-        credentialBackedUp: false,
-        origin: webAuthn.origins[0] ?? DEFAULT_WEBAUTHN_ORIGIN,
-        rpID: webAuthn.rpID,
-      },
-    };
+    return null;
   }
 }
 
-function normalizePluginPlayer(raw: PluginChallengeResponse['player']): { uuid: string; name: string } | null {
+function normalizePluginPlayer(
+  raw: PluginChallengeResponse['player'],
+): { uuid: string; name: string } | null {
   const uuid = asString(raw?.uuid).trim().toLowerCase();
   const name = asString(raw?.name).trim();
 
@@ -1559,7 +2225,7 @@ function normalizePluginPlayer(raw: PluginChallengeResponse['player']): { uuid: 
 }
 
 function normalizeRole(raw: unknown): string {
-  const role = asString(raw);
+  const role = asString(raw).trim().toLowerCase();
   return ALLOWED_ROLES.has(role) ? role : '';
 }
 
@@ -1568,11 +2234,12 @@ function isEligibleRole(raw: unknown): boolean {
 }
 
 function shouldCheckPlugin(value?: string): boolean {
-  return !value || Date.now() - new Date(value).getTime() >= 2000;
+  return !value || Date.now() - new Date(value).getTime() >= 5000;
 }
 
 function isExpired(value: string): boolean {
-  return new Date(value).getTime() <= Date.now();
+  const time = Date.parse(value);
+  return !Number.isFinite(time) || time <= Date.now();
 }
 
 function sessionCacheTtlMs(session: SessionRecord, now = Date.now()): number {
@@ -1608,7 +2275,10 @@ function bufferToBase64url(value: Uint8Array | ArrayBuffer): string {
 }
 
 function base64urlToBuffer(value: string): Uint8Array<ArrayBuffer> {
-  const base64 = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
+  const base64 = value
+    .replace(/-/g, '+')
+    .replace(/_/g, '/')
+    .padEnd(Math.ceil(value.length / 4) * 4, '=');
   const binary = atob(base64);
   const bytes = new Uint8Array(new ArrayBuffer(binary.length));
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
@@ -1685,4 +2355,23 @@ function accountPasskeyKey(playerUuid: string, credentialId: string): string {
 
 function webauthnChallengeKey(challenge: string): string {
   return `webauthn:${challenge}`;
+}
+
+function validUploadedImage(value: unknown): value is import('./types').BuildingSubmissionImage {
+  if (!value || typeof value !== 'object') return false;
+  const image = value as Record<string, unknown>;
+  return (
+    typeof image.url === 'string' &&
+    /^https:\/\/i\.ibb\.co\/[^/]+\/[^/?#]+\.webp$/i.test(image.url) &&
+    image.mime === 'image/webp' &&
+    Number.isInteger(image.width) &&
+    Number.isInteger(image.height) &&
+    Number.isInteger(image.size) &&
+    Number(image.width) >= 960 &&
+    Number(image.height) >= 540 &&
+    Number(image.width) <= 1920 &&
+    Number(image.height) <= 1920 &&
+    Number(image.size) > 0 &&
+    Number(image.size) <= 4 * 1024 * 1024
+  );
 }

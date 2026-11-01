@@ -1,7 +1,6 @@
 export interface Env {
   BUILDINGS_KV: KVNamespace;
   AUTH_STORE: DurableObjectNamespace;
-  AUTH_STORE_RATE_LIMITER: RateLimit;
   AUTH_CLIENT_RATE_LIMITER: RateLimit;
   AUTH_CHALLENGE_CREATE_RATE_LIMITER: RateLimit;
   AUTH_SENSITIVE_RATE_LIMITER: RateLimit;

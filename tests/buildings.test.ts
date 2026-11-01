@@ -1,888 +1,525 @@
 import { expect, test } from 'bun:test';
-import type { Env } from '../src/env';
+import { BuildingStore, PUBLIC_BUILDINGS_KEY, PUBLISH_INTERVAL_MS } from '../src/building-store';
+import { BUILDING_MIGRATION_KEY, migrateBuildingCatalog } from '../src/building-migration';
+import { AuthStore } from '../src/auth';
 import {
-  createPlayerBuildingSubmission,
   handleAdminBuildingsRoute,
-  handleAdminBuildingsRouteDirect,
   handlePublicBuildingsRoute,
   validateBuildingInput,
 } from '../src/buildings';
-import type { AdminActor, Building, BuildingSubmission } from '../src/types';
+import type { Building, BuildingSubmission, BuildingSubmissionImage } from '../src/types';
+import {
+  authCall,
+  OTHER_UUID,
+  PLAYER_UUID,
+  seedSession,
+  testAuthStore,
+} from './helpers/auth-store';
 
-const validBuilding = {
-  name: { 'zh-CN': '测试建筑', en: 'Test Building' },
+const input = (name = 'Building') => ({
+  name: { 'zh-CN': name, en: name },
   description: { 'zh-CN': '描述', en: 'Description' },
-  coordinates: { x: 0, y: 64, z: 0 },
-  builders: [{ name: 'Player', uuid: '00000000-0000-0000-0000-000000000000', weight: 1 }],
-  buildType: 'original',
-  images: ['/images/test.png'],
+  coordinates: { world: 'world', x: 0, y: 64, z: 0 },
+  builders: [{ name: 'Player', uuid: PLAYER_UUID, weight: 1 }],
+  buildType: 'original' as const,
+  images: ['https://i.ibb.co/example/building.webp'],
   buildDate: '2026-06-27',
+});
+const image: BuildingSubmissionImage = {
+  url: input().images[0],
+  width: 1280,
+  height: 720,
+  size: 120_000,
+  mime: 'image/webp',
 };
-
-test('building validation allows relative image paths', () => {
-  const result = validateBuildingInput(validBuilding);
-
-  expect(result.ok).toBe(true);
-});
-
-test('building validation allows https image URLs', () => {
-  const result = validateBuildingInput({
-    ...validBuilding,
-    images: ['https://assets.example.com/image.png'],
+function setup() {
+  const kv = new Map<string, string>();
+  let writes = 0;
+  let fail = false;
+  let listings = 0;
+  const batches: number[] = [];
+  const fixture = testAuthStore({
+    BUILDINGS_KV: {
+      get: async (key: string | string[]) => {
+        if (!Array.isArray(key)) return kv.get(key) ?? null;
+        batches.push(key.length);
+        if (key.length > 100) throw new Error('KV bulk read limit exceeded');
+        return new Map(key.map((name) => [name, kv.get(name) ?? null]));
+      },
+      put: async (key: string, value: string) => {
+        writes++;
+        if (fail) throw new Error('KV unavailable');
+        kv.set(key, value);
+      },
+      list: async ({
+        prefix = '',
+        cursor,
+        limit = 1000,
+      }: {
+        prefix?: string;
+        cursor?: string;
+        limit?: number;
+      }) => {
+        listings++;
+        const keys = [...kv.keys()].filter((key) => key.startsWith(prefix)).sort();
+        const start = Number(cursor ?? 0),
+          end = start + limit;
+        return {
+          keys: keys.slice(start, end).map((name) => ({ name })),
+          list_complete: end >= keys.length,
+          ...(end < keys.length ? { cursor: String(end) } : {}),
+        };
+      },
+    } as unknown as KVNamespace,
   });
-
-  expect(result.ok).toBe(true);
-});
-
-test('building validation rejects http image URLs', () => {
-  const result = validateBuildingInput({
-    ...validBuilding,
-    images: ['http://assets.example.com/image.png'],
+  fixture.env.AUTH_STORE = {
+    idFromName: () => 'global',
+    get: () => ({ fetch: (request: Request) => fixture.store.fetch(request) }),
+  } as unknown as DurableObjectNamespace;
+  return {
+    ...fixture,
+    kv,
+    writes: () => writes,
+    listings: () => listings,
+    batches,
+    setFail: (value: boolean) => {
+      fail = value;
+    },
+  };
+}
+function admin(
+  fixture: ReturnType<typeof setup>,
+  route = '/buildings',
+  method = 'GET',
+  body?: unknown,
+  expected?: string,
+) {
+  return authCall(fixture.store, {
+    action: 'adminBuildingMutation',
+    routePath: route,
+    method,
+    headers: {
+      ...(expected ? { 'X-Expected-Updated-At': expected } : {}),
+      'Content-Type': 'application/json',
+    },
+    actor: { email: 'admin@example.com' },
+    requestBody: body ? JSON.stringify(body) : '',
   });
+}
+async function permitImage(fixture: ReturnType<typeof setup>, token: string) {
+  const reserved = await authCall(fixture.store, {
+    action: 'reserveImageUpload',
+    sessionId: token,
+  });
+  expect(reserved.status).toBe(200);
+  expect(
+    (
+      await authCall(fixture.store, {
+        action: 'completeImageUpload',
+        sessionId: token,
+        uploadId: reserved.body.uploadId,
+        image,
+      })
+    ).status,
+  ).toBe(200);
+}
+async function submit(fixture: ReturnType<typeof setup>, token: string, name = 'Building') {
+  return authCall(fixture.store, {
+    action: 'createBuildingSubmission',
+    sessionId: token,
+    payload: { payload: input(name), images: [image] },
+  });
+}
 
-  expect(result.ok).toBe(false);
+test('validation rejects unknown fields, invalid dates and insecure image URLs', () => {
+  expect(validateBuildingInput(input()).ok).toBe(true);
+  expect(validateBuildingInput({ ...input(), images: ['/images/test.webp'] }).ok).toBe(true);
+  expect(
+    validateBuildingInput({
+      ...input(),
+      images: ['http://example.com/image.webp'],
+    }).ok,
+  ).toBe(false);
+  expect(validateBuildingInput({ ...input(), buildDate: '2026-02-30' }).ok).toBe(false);
+  expect(validateBuildingInput({ ...input(), secret: true }).ok).toBe(false);
+  for (const world of ['', ' ', 'bad\nworld', 'x'.repeat(129), undefined]) {
+    expect(
+      validateBuildingInput({
+        ...input(),
+        coordinates: { ...input().coordinates, world },
+      }).ok,
+    ).toBe(false);
+  }
+  expect(
+    validateBuildingInput({
+      ...input(),
+      coordinates: { ...input().coordinates, secret: true },
+    }).ok,
+  ).toBe(false);
 });
 
-test('public building reads use KV summary without Durable Object summary storage', async () => {
+function stored(name = 'Building', id = 'abc12345'): Building {
+  const now = '2026-06-27T00:00:00.000Z';
+  return { id, ...input(name), createdAt: now, updatedAt: now };
+}
+function withoutWorld(building: Building) {
+  const { world, ...coordinates } = building.coordinates;
+  return { ...building, coordinates };
+}
+
+test('missing public snapshot automatically migrates KV records and defaults the world without changing source data', async () => {
+  const f = setup(),
+    original = withoutWorld(stored());
+  f.kv.set('building:abc12345', JSON.stringify(original));
+  const response = await handlePublicBuildingsRoute(
+    '/buildings',
+    new Request('https://data.example/api/buildings'),
+    f.env,
+  );
+  expect(response?.status).toBe(200);
+  expect(await response?.json()).toEqual([stored()]);
+  expect(new BuildingStore(f.storage).buildings()).toEqual([stored()]);
+  expect(f.values.get(BUILDING_MIGRATION_KEY)).toBeDefined();
+  expect(f.kv.get('building:abc12345')).toBe(JSON.stringify(original));
+  expect(await f.storage.getAlarm()).toBeNumber();
+  f.db.exec('UPDATE building_publication SET next_attempt=0');
+  await f.store.alarm();
+  expect(JSON.parse(f.kv.get(PUBLIC_BUILDINGS_KEY)!).buildings).toEqual([stored()]);
+  expect(f.listings()).toBe(1);
+});
+
+test('migration preserves newer SQL data, upgrades pending SQL coordinates, and never resurrects a deletion after restart', async () => {
+  const f = setup(),
+    store = new BuildingStore(f.storage);
+  store.initialize();
+  f.kv.set('building:abc12345', JSON.stringify(withoutWorld(stored())));
+  const newer = {
+    ...stored('Updated'),
+    coordinates: { ...input().coordinates, world: 'world_nether' },
+  };
+  store.saveBuilding(newer);
+  const pending = {
+    id: 'sub12345',
+    status: 'pending',
+    submitterUuid: PLAYER_UUID,
+    submitterName: 'Player',
+    submitterRole: 'member',
+    createdAt: newer.createdAt,
+    updatedAt: newer.updatedAt,
+    payload: withoutWorld(stored()).coordinates,
+    images: [],
+  };
+  f.storage.sql.exec(
+    'INSERT INTO submissions(id,owner,status,created_at,document) VALUES(?,?,?,?,?)',
+    pending.id,
+    PLAYER_UUID,
+    'pending',
+    pending.createdAt,
+    JSON.stringify({
+      ...pending,
+      payload: { ...input(), coordinates: withoutWorld(stored()).coordinates },
+    }),
+  );
+  await migrateBuildingCatalog(f.storage, f.env.BUILDINGS_KV, store);
+  expect(store.building(newer.id)).toEqual(newer);
+  expect(store.submission(pending.id)?.payload.coordinates.world).toBe('world');
+  store.deleteBuilding(newer.id);
+  const restarted = new AuthStore({ storage: f.storage } as DurableObjectState, f.env);
+  const result = await authCall(restarted, {
+    action: 'publicBuildingSnapshot',
+  });
+  expect(result.status).toBe(200);
+  expect(result.body.buildings).toEqual([]);
+  expect(f.listings()).toBe(1);
+});
+
+test('migration reads all KV pages in batches of at most 100 records', async () => {
+  const f = setup(),
+    store = new BuildingStore(f.storage);
+  store.initialize();
+  for (let index = 0; index < 1001; index++) {
+    const id = `building${String(index).padStart(4, '0')}`;
+    f.kv.set(`building:${id}`, JSON.stringify(withoutWorld(stored('Building', id))));
+  }
+  await migrateBuildingCatalog(f.storage, f.env.BUILDINGS_KV, store);
+  expect(f.listings()).toBe(2);
+  expect(f.batches).toEqual([...Array(10).fill(100), 1]);
+  expect(store.buildings()).toHaveLength(1001);
+  expect(store.buildings().every((building) => building.coordinates.world === 'world')).toBe(true);
+});
+
+test('migration is atomic on storage failure and supports a summary-only catalog', async () => {
+  const f = setup(),
+    store = new BuildingStore(f.storage);
+  store.initialize();
+  f.kv.set('building-summary:v1', JSON.stringify([withoutWorld(stored())]));
+  f.failNextPut(BUILDING_MIGRATION_KEY);
+  await expect(migrateBuildingCatalog(f.storage, f.env.BUILDINGS_KV, store)).rejects.toThrow();
+  expect(store.buildings()).toEqual([]);
+  expect(f.values.has(BUILDING_MIGRATION_KEY)).toBe(false);
+  await migrateBuildingCatalog(f.storage, f.env.BUILDINGS_KV, store);
+  expect(store.buildings()).toEqual([stored()]);
+  expect(f.values.has(BUILDING_MIGRATION_KEY)).toBe(true);
+});
+
+test('corrupt records never produce a partial or silently empty catalog and initialization failures are throttled', async () => {
+  const f = setup();
+  f.kv.set('building:abc12345', JSON.stringify(withoutWorld(stored())));
+  f.kv.set('building:bad12345', '{broken');
+  const a = await authCall(f.store, { action: 'publicBuildingSnapshot' });
+  expect(a.status).toBe(503);
+  expect(new BuildingStore(f.storage).buildings()).toEqual([]);
+  expect(f.values.has(BUILDING_MIGRATION_KEY)).toBe(false);
+  expect((await authCall(f.store, { action: 'publicBuildingSnapshot' })).status).toBe(503);
+  expect(f.listings()).toBe(1);
+});
+
+test('world is part of duplicate detection', async () => {
+  const f = setup();
+  expect((await admin(f, '/buildings', 'POST', input())).status).toBe(201);
+  expect(
+    (
+      await admin(f, '/buildings', 'POST', {
+        ...input(),
+        coordinates: { ...input().coordinates, world: 'world_nether' },
+      })
+    ).status,
+  ).toBe(201);
+});
+
+test('business writes and private reads are independent of public KV availability', async () => {
+  const f = setup();
+  f.setFail(true);
+  const [a, b] = await Promise.all([
+    admin(f, '/buildings', 'POST', input('One')),
+    admin(f, '/buildings', 'POST', input('Two')),
+  ]);
+  expect([a.status, b.status]).toEqual([201, 201]);
+  expect((await admin(f)).body).toHaveLength(2);
+  expect(f.writes()).toBe(0);
+  expect(await f.storage.getAlarm()).toBeNumber();
+});
+
+test('public list and detail read one snapshot and never call the DO', async () => {
+  const f = setup();
+  const now = new Date().toISOString();
   const building: Building = {
     id: 'abc12345',
-    ...validBuilding,
-    createdAt: '2026-06-27T12:00:00.000Z',
-    updatedAt: '2026-06-27T12:00:00.000Z',
+    ...input(),
+    createdAt: now,
+    updatedAt: now,
   };
-  const env = createEnvWithSummary([building]);
-
+  f.kv.set(PUBLIC_BUILDINGS_KEY, JSON.stringify({ version: 1, buildings: [building] }));
+  f.env.AUTH_STORE = {
+    get: () => {
+      throw new Error('No public DO calls');
+    },
+  } as unknown as DurableObjectNamespace;
+  const list = await handlePublicBuildingsRoute(
+    '/buildings',
+    new Request('https://data.example/api/buildings'),
+    f.env,
+  );
+  expect(await list?.json()).toEqual([building]);
   const detail = await handlePublicBuildingsRoute(
     '/buildings/abc12345',
-    new Request('https://data.mcmik.top/api/buildings/abc12345'),
-    env,
+    new Request('https://data.example/api/buildings/abc12345'),
+    f.env,
   );
-
-  expect(detail?.status).toBe(200);
   expect(await detail?.json()).toEqual(building);
-
-  const list = await handlePublicBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/api/buildings'),
-    env,
-  );
-
-  expect(list?.status).toBe(200);
-  expect(await list?.json()).toEqual([building]);
+  expect(f.writes()).toBe(0);
 });
 
-test('public building summary drops records that do not match the current schema', async () => {
-  const env = createMemoryEnv();
-  await env.BUILDINGS_KV.put(
-    'building-summary:v1',
-    JSON.stringify([{
-      id: 'badbadbad',
-      name: { en: 'Missing Chinese Name' },
-      createdAt: '2026-06-27T12:00:00.000Z',
-      updatedAt: '2026-06-27T12:00:00.000Z',
-    }]),
-  );
-
-  const list = await handlePublicBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/api/buildings'),
-    env,
-  );
-
-  expect(list?.status).toBe(200);
-  expect(await list?.json()).toEqual([]);
+test('publication coalesces edits, respects the five minute write interval and retries durable pending state', async () => {
+  const f = setup();
+  await admin(f, '/buildings', 'POST', input('One'));
+  await admin(f, '/buildings', 'POST', input('Two'));
+  f.db.exec('UPDATE building_publication SET next_attempt=0');
+  f.setFail(true);
+  await f.store.alarm();
+  expect(f.kv.size).toBe(0);
+  expect((await admin(f)).body).toHaveLength(2);
+  const store = new BuildingStore(f.storage);
+  expect(store.publication().published_revision).toBe(0);
+  expect(store.publication().next_attempt).toBeGreaterThan(Date.now() + PUBLISH_INTERVAL_MS - 2000);
+  f.setFail(false);
+  f.db.exec('UPDATE building_publication SET next_attempt=0');
+  await f.store.alarm();
+  const published = JSON.parse(f.kv.get(PUBLIC_BUILDINGS_KEY)!);
+  expect(published.buildings).toHaveLength(2);
+  await admin(f, '/buildings', 'POST', input('Three'));
+  await f.store.alarm();
+  expect(f.writes()).toBe(2);
+  expect(store.publication().revision).toBeGreaterThan(store.publication().published_revision);
 });
 
-test('building creation updates summary without scanning all building keys', async () => {
-  const env = createNoListEnvWithSummary([]);
-  const body = {
-    ...validBuilding,
-    name: { 'zh-CN': '无需扫描建筑', en: 'No Scan Building' },
-  };
+test('approval failure rolls back both building creation and submission state', async () => {
+  const f = setup();
+  const session = await seedSession(f.values);
+  await permitImage(f, session.token);
+  const created = await submit(f, session.token);
+  const submission = created.body.submission as BuildingSubmission;
+  f.failNextSql('INSERT INTO submissions');
+  const failed = await admin(f, `/building-submissions/${submission.id}/approve`, 'PUT', {});
+  expect(failed.status).toBe(500);
+  expect((await admin(f)).body).toHaveLength(0);
+  expect(new BuildingStore(f.storage).submission(submission.id)?.status).toBe('pending');
+  const retry = await admin(f, `/building-submissions/${submission.id}/approve`, 'PUT', {});
+  expect(retry.status).toBe(200);
+  expect(new BuildingStore(f.storage).submission(submission.id)?.status).toBe('approved');
+  expect((await admin(f)).body).toHaveLength(1);
+  expect(f.writes()).toBe(0);
+});
 
+test('concurrent approval creates exactly one building and retains the review result', async () => {
+  const f = setup();
+  const { token } = await seedSession(f.values);
+  await permitImage(f, token);
+  const created = await submit(f, token);
+  const id = (created.body.submission as BuildingSubmission).id;
+  const results = await Promise.all([
+    admin(f, `/building-submissions/${id}/approve`, 'PUT', {}),
+    admin(f, `/building-submissions/${id}/approve`, 'PUT', {}),
+  ]);
+  expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+  expect((await admin(f)).body).toHaveLength(1);
+  const history = await authCall(f.store, {
+    action: 'listBuildingSubmissions',
+    sessionId: token,
+  });
+  expect((history.body.submissions as BuildingSubmission[])[0].status).toBe('approved');
+});
+
+test('the pending cap is atomic and browser image metadata is replaced by the owned receipt', async () => {
+  const f = setup();
+  const { token } = await seedSession(f.values);
+  await permitImage(f, token);
+  const results = await Promise.all(
+    Array.from({ length: 11 }, (_, i) => submit(f, token, `Building ${i}`)),
+  );
+  expect(results.filter((r) => r.status === 201)).toHaveLength(10);
+  expect(results.filter((r) => r.status === 429)).toHaveLength(1);
+  const saved = results.find((r) => r.status === 201)!.body.submission as BuildingSubmission;
+  expect(saved.images).toEqual([image]);
+});
+
+test('a different account cannot use an upload receipt and unrecorded URLs are rejected', async () => {
+  const f = setup();
+  const first = await seedSession(f.values);
+  const other = await seedSession(f.values, 0, OTHER_UUID);
+  await permitImage(f, first.token);
+  expect((await submit(f, other.token)).status).toBe(422);
+  const result = await authCall(f.store, {
+    action: 'createBuildingSubmission',
+    sessionId: first.token,
+    payload: { payload: input(), images: [{ ...image, width: 1, size: 1 }] },
+  });
+  expect((result.body.submission as BuildingSubmission).images).toEqual([image]);
+});
+
+test('adding the authenticated submitter cannot exceed the builder cap', async () => {
+  const f = setup();
+  const { token } = await seedSession(f.values);
+  await permitImage(f, token);
+  const builders = Array.from({ length: 50 }, (_, i) => ({
+    name: `Builder${i}`,
+    uuid: `00000000-0000-4000-8000-${String(i + 10).padStart(12, '0')}`,
+    weight: 1,
+  }));
+  const result = await authCall(f.store, {
+    action: 'createBuildingSubmission',
+    sessionId: token,
+    payload: { payload: { ...input(), builders }, images: [image] },
+  });
+  expect(result.status).toBe(422);
+});
+
+test('image quota survives concurrent requests and records expire in bounded cleanup', async () => {
+  const f = setup();
+  const { token } = await seedSession(f.values);
+  const reservations = await Promise.all(
+    Array.from({ length: 4 }, () =>
+      authCall(f.store, { action: 'reserveImageUpload', sessionId: token }),
+    ),
+  );
+  expect(reservations.map((r) => r.status).sort()).toEqual([200, 429, 429, 429]);
+  f.db.exec('UPDATE image_uploads SET created_at=0,expires_at=0');
+  new BuildingStore(f.storage).cleanup();
+  expect(f.db.query('SELECT count(*) AS count FROM image_uploads').get()).toEqual({ count: 0 });
+});
+
+test('optimistic concurrency rejects stale building updates inside the transaction', async () => {
+  const f = setup();
+  const created = await admin(f, '/buildings', 'POST', input());
+  const building = created.body as unknown as Building;
+  const results = await Promise.all([
+    admin(f, `/buildings/${building.id}`, 'PUT', input('One'), building.updatedAt),
+    admin(f, `/buildings/${building.id}`, 'PUT', input('Two'), building.updatedAt),
+  ]);
+  expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+});
+
+test('removed repair route and oversized admin requests never reach the coordinator', async () => {
+  const f = setup();
+  f.env.AUTH_STORE = {
+    get: () => {
+      throw new Error('Unexpected coordinator');
+    },
+  } as unknown as DurableObjectNamespace;
+  expect(
+    await handleAdminBuildingsRoute(
+      '/building-submissions/repair-approved',
+      new Request('https://data.example/admin/api/building-submissions/repair-approved', {
+        method: 'POST',
+      }),
+      f.env,
+      {},
+    ),
+  ).toBeNull();
   const response = await handleAdminBuildingsRoute(
     '/buildings',
-    new Request('https://data.mcmik.top/admin/api/buildings', {
+    new Request('https://data.example/admin/api/buildings', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: 'x'.repeat(65537),
+      headers: { Origin: 'https://data.example' },
     }),
-    env,
-    { email: 'admin@example.com' },
+    f.env,
+    {},
   );
-
-  expect(response?.status).toBe(201);
-  const building = (await response?.json()) as Building;
-  const summary = JSON.parse((await env.BUILDINGS_KV.get('building-summary:v1')) ?? '[]') as Building[];
-  expect(summary.some((item) => item.id === building.id)).toBe(true);
-});
-
-test('concurrent building creations preserve incremental summary updates', async () => {
-  const env = createNoListEnvWithSummary([]);
-
-  const [first, second] = await Promise.all([
-    handleAdminBuildingsRoute(
-      '/buildings',
-      new Request('https://data.mcmik.top/admin/api/buildings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...validBuilding,
-          name: { 'zh-CN': '并发建筑一', en: 'Concurrent Building One' },
-        }),
-      }),
-      env,
-      { email: 'admin@example.com' },
-    ),
-    handleAdminBuildingsRoute(
-      '/buildings',
-      new Request('https://data.mcmik.top/admin/api/buildings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...validBuilding,
-          name: { 'zh-CN': '并发建筑二', en: 'Concurrent Building Two' },
-        }),
-      }),
-      env,
-      { email: 'admin@example.com' },
-    ),
-  ]);
-
-  expect(first?.status).toBe(201);
-  expect(second?.status).toBe(201);
-  const summary = JSON.parse((await env.BUILDINGS_KV.get('building-summary:v1')) ?? '[]') as Building[];
-  expect(summary.map((building) => building.name.en).sort()).toEqual([
-    'Concurrent Building One',
-    'Concurrent Building Two',
-  ]);
-});
-
-test('building summary mutations use KV snapshot instead of stale memory cache', async () => {
-  const env = createNoListEnvWithSummary([]);
-  const initial = await handleAdminBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/admin/api/buildings'),
-    env,
-    { email: 'admin@example.com' },
-  );
-  expect(await initial?.json()).toEqual([]);
-
-  const existing: Building = {
-    id: 'existing1',
-    ...validBuilding,
-    name: { 'zh-CN': '已有建筑', en: 'Existing Building' },
-    createdAt: '2026-06-27T12:00:00.000Z',
-    updatedAt: '2026-06-27T12:00:00.000Z',
-  };
-  await env.BUILDINGS_KV.put('building-summary:v1', JSON.stringify([existing]));
-
-  const created = await handleAdminBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/admin/api/buildings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...validBuilding,
-        name: { 'zh-CN': '新增建筑', en: 'New Building' },
-      }),
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-
-  expect(created?.status).toBe(201);
-  const summary = JSON.parse((await env.BUILDINGS_KV.get('building-summary:v1')) ?? '[]') as Building[];
-  expect(summary.map((building) => building.name.en).sort()).toEqual([
-    'Existing Building',
-    'New Building',
-  ]);
-});
-
-test('building duplicate checks use KV snapshot instead of stale memory cache', async () => {
-  const env = createNoListEnvWithSummary([]);
-  const initial = await handleAdminBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/admin/api/buildings'),
-    env,
-    { email: 'admin@example.com' },
-  );
-  expect(await initial?.json()).toEqual([]);
-
-  const existing: Building = {
-    id: 'dupcheck1',
-    ...validBuilding,
-    createdAt: '2026-06-27T12:00:00.000Z',
-    updatedAt: '2026-06-27T12:00:00.000Z',
-  };
-  await env.BUILDINGS_KV.put('building-summary:v1', JSON.stringify([existing]));
-
-  const created = await handleAdminBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/admin/api/buildings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(validBuilding),
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-
-  expect(created?.status).toBe(409);
-  expect(await created?.json()).toEqual({ error: 'duplicate building: dupcheck1' });
-});
-
-test('admin building list uses KV snapshot instead of stale public cache', async () => {
-  const env = createNoListEnvWithSummary([]);
-  const initial = await handleAdminBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/admin/api/buildings'),
-    env,
-    { email: 'admin@example.com' },
-  );
-  expect(await initial?.json()).toEqual([]);
-
-  const building: Building = {
-    id: 'adminnew',
-    ...validBuilding,
-    name: { 'zh-CN': '管理端新建筑', en: 'Admin New Building' },
-    createdAt: '2026-06-27T12:00:00.000Z',
-    updatedAt: '2026-06-27T12:00:00.000Z',
-  };
-  await env.BUILDINGS_KV.put('building-summary:v1', JSON.stringify([building]));
-
-  const refreshed = await handleAdminBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/admin/api/buildings'),
-    env,
-    { email: 'admin@example.com' },
-  );
-
-  expect(await refreshed?.json()).toEqual([building]);
-});
-
-test('admin mutation coordinator refreshes front public summary cache after durable object writes', async () => {
-  const env = createMemoryEnv();
-  const initial = await handlePublicBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/api/buildings'),
-    env,
-  );
-  expect(await initial?.json()).toEqual([]);
-
-  const building: Building = {
-    id: 'frontsync',
-    ...validBuilding,
-    name: { 'zh-CN': '前台同步建筑', en: 'Front Sync Building' },
-    createdAt: '2026-06-27T12:00:00.000Z',
-    updatedAt: '2026-06-27T12:00:00.000Z',
-  };
-  env.AUTH_STORE = {
-    idFromName: () => ({}),
-    get: () => ({
-      fetch: async () => {
-        await env.BUILDINGS_KV.put(`building:${building.id}`, JSON.stringify(building));
-        await env.BUILDINGS_KV.put('building-summary:v1', JSON.stringify([building]));
-        return Response.json({ status: 201, body: building });
-      },
-    }),
-  } as unknown as DurableObjectNamespace;
-
-  const created = await handleAdminBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/admin/api/buildings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(validBuilding),
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-  expect(created?.status).toBe(201);
-
-  const refreshed = await handlePublicBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/api/buildings'),
-    env,
-  );
-  expect(await refreshed?.json()).toEqual([building]);
-});
-
-test('admin mutation coordinator clears front public detail cache after durable object deletes', async () => {
-  const env = createMemoryEnv();
-  const building: Building = {
-    id: 'deleteold',
-    ...validBuilding,
-    name: { 'zh-CN': '待删除建筑', en: 'Delete Old Building' },
-    createdAt: '2026-06-27T12:00:00.000Z',
-    updatedAt: '2026-06-27T12:00:00.000Z',
-  };
-  await env.BUILDINGS_KV.put(`building:${building.id}`, JSON.stringify(building));
-  await env.BUILDINGS_KV.put('building-summary:v1', JSON.stringify([building]));
-
-  const cached = await handlePublicBuildingsRoute(
-    `/buildings/${building.id}`,
-    new Request(`https://data.mcmik.top/api/buildings/${building.id}`),
-    env,
-  );
-  expect(await cached?.json()).toEqual(building);
-
-  env.AUTH_STORE = {
-    idFromName: () => ({}),
-    get: () => ({
-      fetch: async () => {
-        await env.BUILDINGS_KV.delete(`building:${building.id}`);
-        await env.BUILDINGS_KV.put('building-summary:v1', JSON.stringify([]));
-        return Response.json({ status: 200, body: { deleted: building.id } });
-      },
-    }),
-  } as unknown as DurableObjectNamespace;
-
-  const deleted = await handleAdminBuildingsRoute(
-    `/buildings/${building.id}`,
-    new Request(`https://data.mcmik.top/admin/api/buildings/${building.id}`, {
-      method: 'DELETE',
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-  expect(deleted?.status).toBe(200);
-
-  const detail = await handlePublicBuildingsRoute(
-    `/buildings/${building.id}`,
-    new Request(`https://data.mcmik.top/api/buildings/${building.id}`),
-    env,
-  );
-  expect(detail?.status).toBe(404);
-});
-
-test('stale admin building updates are rejected', async () => {
-  const building: Building = {
-    id: 'stale001',
-    ...validBuilding,
-    createdAt: '2026-06-27T12:00:00.000Z',
-    updatedAt: '2026-06-27T12:05:00.000Z',
-  };
-  const env = createNoListEnvWithSummary([building]);
-  await env.BUILDINGS_KV.put('building:stale001', JSON.stringify(building));
-
-  const updated = await handleAdminBuildingsRoute(
-    '/buildings/stale001',
-    new Request('https://data.mcmik.top/admin/api/buildings/stale001', {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Expected-Updated-At': '2026-06-27T12:00:00.000Z',
-      },
-      body: JSON.stringify({
-        ...validBuilding,
-        name: { 'zh-CN': '过期修改', en: 'Stale Update' },
-      }),
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-
-  expect(updated?.status).toBe(409);
-  expect(await updated?.json()).toEqual({ error: 'building has changed, refresh before saving' });
-});
-
-test('admin mutation coordinator rejects oversized bodies before durable object', async () => {
-  const env = createNoListEnvWithSummary([]);
-  env.AUTH_STORE = {
-    idFromName: () => ({}),
-    get: () => ({
-      fetch: () => {
-        throw new Error('coordinator should not be called');
-      },
-    }),
-  } as unknown as DurableObjectNamespace;
-
-  const response = await handleAdminBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/admin/api/buildings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value: 'x'.repeat(65 * 1024) }),
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-
   expect(response?.status).toBe(413);
-  expect(await response?.json()).toEqual({ error: 'request body too large' });
 });
 
-test('direct admin building handler rejects routes outside its boundary', async () => {
-  const env = createNoListEnvWithSummary([]);
-  const response = await handleAdminBuildingsRouteDirect(
-    '/not-buildings',
-    new Request('https://data.mcmik.top/admin/api/not-buildings'),
-    env,
-    { email: 'admin@example.com' },
-  );
-
-  expect(response.status).toBe(404);
-  expect(await response.json()).toEqual({ error: 'not found' });
-});
-
-test('player pending limits use the pending-only player index', async () => {
-  const env = createMemoryEnv();
-
-  const created = await createPlayerBuildingSubmission(createSubmissionRequest(), env, {
-    playerUuid: '00000000-0000-0000-0000-000000000000',
-    currentName: 'Player',
-    role: 'member',
-  });
-  const payload = (await created.json()) as { submission: { id: string } };
-
-  expect(created.status).toBe(201);
-  expect(await env.BUILDINGS_KV.get(`building-submission-player-pending:00000000-0000-0000-0000-000000000000:${payload.submission.id}`)).toBe(payload.submission.id);
-  expect(await env.BUILDINGS_KV.get(`building-submission-status:pending:${payload.submission.id}`)).toBe(payload.submission.id);
-});
-
-test('player submissions require imgbb webp image URLs', async () => {
-  const env = createMemoryEnv();
-  const created = await createPlayerBuildingSubmission(createSubmissionRequest({
-    imageUrl: 'https://i.ibb.co/example/test.png',
-  }), env, {
-    playerUuid: '00000000-0000-0000-0000-000000000000',
-    currentName: 'Player',
-    role: 'member',
-  });
-
-  expect(created.status).toBe(422);
-  expect(await created.json()).toEqual({ error: 'images[0].url must be an uploaded image URL' });
-});
-
-test('player submissions require positive image metadata dimensions', async () => {
-  const env = createMemoryEnv();
-  const created = await createPlayerBuildingSubmission(createSubmissionRequest({
-    width: 0,
-  }), env, {
-    playerUuid: '00000000-0000-0000-0000-000000000000',
-    currentName: 'Player',
-    role: 'member',
-  });
-
-  expect(created.status).toBe(422);
-  expect(await created.json()).toEqual({ error: 'images[0] dimensions and size are required' });
-});
-
-test('stale admin submission reviews are rejected', async () => {
-  const env = createMemoryEnv();
-  const created = await createPlayerBuildingSubmission(createSubmissionRequest(), env, {
-    playerUuid: '00000000-0000-0000-0000-000000000000',
-    currentName: 'Player',
-    role: 'member',
-  });
-  const payload = (await created.json()) as { submission: BuildingSubmission };
-
-  const updated = await handleAdminBuildingsRoute(
-    `/building-submissions/${payload.submission.id}`,
-    new Request(`https://data.mcmik.top/admin/api/building-submissions/${payload.submission.id}`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Expected-Updated-At': '2026-06-27T12:00:00.000Z',
-      },
-      body: JSON.stringify({
-        payload: {
-          ...validBuilding,
-          images: ['https://i.ibb.co/example/test.webp'],
-        },
-        images: payload.submission.images,
-      }),
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-
-  expect(updated?.status).toBe(409);
-  expect(await updated?.json()).toEqual({ error: 'submission has changed, refresh before saving' });
-});
-
-test('player pending limit count does not read pending submission documents below limit', async () => {
-  const env = createMemoryEnv();
-  const orphanId = 'oldpend1';
-  await env.BUILDINGS_KV.put('building-submission-indexes:v1', 'ready');
-  await env.BUILDINGS_KV.put(
-    `building-submission-player-pending:00000000-0000-0000-0000-000000000000:${orphanId}`,
-    orphanId,
-  );
-  env.KV_GETS.length = 0;
-
-  const created = await createPlayerBuildingSubmission(createSubmissionRequest(), env, {
-    playerUuid: '00000000-0000-0000-0000-000000000000',
-    currentName: 'Player',
-    role: 'member',
-  });
-
-  expect(created.status).toBe(201);
-  expect(env.KV_GETS).not.toContain(`building-submission:${orphanId}`);
-});
-
-test('submission status transitions maintain pending and status indexes', async () => {
-  const env = createMemoryEnv();
-  const created = await createPlayerBuildingSubmission(createSubmissionRequest(), env, {
-    playerUuid: '00000000-0000-0000-0000-000000000000',
-    currentName: 'Player',
-    role: 'member',
-  });
-  const payload = (await created.json()) as { submission: { id: string } };
-
-  const rejected = await handleAdminBuildingsRoute(
-    `/building-submissions/${payload.submission.id}/reject`,
-    new Request(`https://data.mcmik.top/admin/api/building-submissions/${payload.submission.id}/reject`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reviewNote: '资料不足' }),
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-
-  expect(rejected?.status).toBe(200);
-  expect(await env.BUILDINGS_KV.get(`building-submission-player-pending:00000000-0000-0000-0000-000000000000:${payload.submission.id}`)).toBe(null);
-  expect(await env.BUILDINGS_KV.get(`building-submission-status:pending:${payload.submission.id}`)).toBe(null);
-  expect(await env.BUILDINGS_KV.get(`building-submission-status:rejected:${payload.submission.id}`)).toBe(payload.submission.id);
-});
-
-test('approved submissions are added to managed public buildings', async () => {
-  const env = createMemoryEnv();
-  const created = await createPlayerBuildingSubmission(createSubmissionRequest(), env, {
-    playerUuid: '00000000-0000-0000-0000-000000000000',
-    currentName: 'Player',
-    role: 'member',
-  });
-  const payload = (await created.json()) as { submission: { id: string } };
-
-  const approved = await handleAdminBuildingsRoute(
-    `/building-submissions/${payload.submission.id}/approve`,
-    new Request(`https://data.mcmik.top/admin/api/building-submissions/${payload.submission.id}/approve`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-
-  expect(approved?.status).toBe(200);
-  const approvedBody = (await approved?.json()) as { building: Building; submission: { buildingId: string; status: string } };
-  expect(approvedBody.submission.status).toBe('approved');
-  expect(approvedBody.submission.buildingId).toBe(approvedBody.building.id);
-  expect(await env.BUILDINGS_KV.get(`building:${approvedBody.building.id}`)).not.toBe(null);
-  expect(await env.BUILDINGS_KV.get(`building-submission:${payload.submission.id}`)).toBe(null);
-  expect(await env.BUILDINGS_KV.get(`building-submission-player-pending:00000000-0000-0000-0000-000000000000:${payload.submission.id}`)).toBe(null);
-  expect(await env.BUILDINGS_KV.get(`building-submission-status:pending:${payload.submission.id}`)).toBe(null);
-  expect(await env.BUILDINGS_KV.get(`building-submission-status:approved:${payload.submission.id}`)).toBe(null);
-
-  const adminList = await handleAdminBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/admin/api/buildings'),
-    env,
-    { email: 'admin@example.com' },
-  );
-  expect(adminList?.status).toBe(200);
-  expect(await adminList?.json()).toEqual([approvedBody.building]);
-
-  const publicList = await handlePublicBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/api/buildings'),
-    env,
-  );
-  expect(publicList?.status).toBe(200);
-  expect(await publicList?.json()).toEqual([approvedBody.building]);
-});
-
-test('approved submissions can use the stored payload with an empty body', async () => {
-  const env = createMemoryEnv();
-  const created = await createPlayerBuildingSubmission(createSubmissionRequest(), env, {
-    playerUuid: '00000000-0000-0000-0000-000000000000',
-    currentName: 'Player',
-    role: 'member',
-  });
-  const payload = (await created.json()) as { submission: BuildingSubmission };
-
-  const approved = await handleAdminBuildingsRoute(
-    `/building-submissions/${payload.submission.id}/approve`,
-    new Request(`https://data.mcmik.top/admin/api/building-submissions/${payload.submission.id}/approve`, {
-      method: 'PUT',
-      headers: { 'X-Expected-Updated-At': payload.submission.updatedAt },
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-
-  expect(approved?.status).toBe(200);
-  const approvedBody = (await approved?.json()) as { building: Building };
-  expect(approvedBody.building.name.en).toBe('Test Building');
-});
-
-test('approved submission repair rebuilds stale building summary when building already exists', async () => {
-  const env = createMemoryEnv();
-  const created = await createPlayerBuildingSubmission(createSubmissionRequest(), env, {
-    playerUuid: '00000000-0000-0000-0000-000000000000',
-    currentName: 'Player',
-    role: 'member',
-  });
-  const payload = (await created.json()) as { submission: { id: string } };
-
-  const approved = await handleAdminBuildingsRoute(
-    `/building-submissions/${payload.submission.id}/approve`,
-    new Request(`https://data.mcmik.top/admin/api/building-submissions/${payload.submission.id}/approve`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-
-  expect(approved?.status).toBe(200);
-  const approvedBody = (await approved?.json()) as { building: Building; submission: BuildingSubmission };
-  await env.BUILDINGS_KV.put(`building-submission:${approvedBody.submission.id}`, JSON.stringify(approvedBody.submission));
-  await env.BUILDINGS_KV.put(`building-submission-status:approved:${approvedBody.submission.id}`, approvedBody.submission.id);
-  await env.BUILDINGS_KV.put('building-summary:v1', JSON.stringify([]));
-
-  const repair = await handleAdminBuildingsRoute(
-    '/building-submissions/repair-approved',
-    new Request('https://data.mcmik.top/admin/api/building-submissions/repair-approved', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    }),
-    env,
-    { email: 'admin@example.com' },
-  );
-
-  expect(repair?.status).toBe(200);
-  expect(await repair?.json()).toMatchObject({ scanned: 1, skipped: 1, deletedApproved: 1, failed: 0 });
-  expect(await env.BUILDINGS_KV.get(`building-submission:${approvedBody.submission.id}`)).toBe(null);
-  expect(await env.BUILDINGS_KV.get(`building-submission-status:approved:${approvedBody.submission.id}`)).toBe(null);
-  expect(JSON.parse((await env.BUILDINGS_KV.get('building-summary:v1')) ?? '[]')).toEqual([approvedBody.building]);
-
-  const repairedList = await handleAdminBuildingsRoute(
-    '/buildings',
-    new Request('https://data.mcmik.top/admin/api/buildings'),
-    env,
-    { email: 'admin@example.com' },
-  );
-  expect(await repairedList?.json()).toEqual([approvedBody.building]);
-});
-
-function createEnvWithSummary(buildings: Building[]): Env {
-  const kv = {
-    get: (key: string) => {
-      if (key === 'building-summary:v1') {
-        return Promise.resolve(JSON.stringify(buildings));
-      }
-      return Promise.resolve(null);
-    },
-    put: () => {
-      throw new Error('KV unavailable');
-    },
-    delete: () => {
-      throw new Error('KV unavailable');
-    },
-    list: () => {
-      throw new Error('KV unavailable');
+test('public third-party reads share an empty snapshot lookup and retain CORS on failures', async () => {
+  const f = setup();
+  let reads = 0;
+  const publicRequest = () =>
+    new Request('https://data.example/api/buildings', {
+      headers: { Origin: 'https://third-party.example' },
+    });
+  f.env.BUILDINGS_KV = {
+    get: async () => {
+      reads++;
+      await Promise.resolve();
+      return JSON.stringify({ version: 1, buildings: [] });
     },
   } as unknown as KVNamespace;
-
-  const env = {
-    BUILDINGS_KV: kv,
-    AUTH_STORE: {} as DurableObjectNamespace,
-    AUTH_STORE_RATE_LIMITER: createRateLimit(),
-    AUTH_CLIENT_RATE_LIMITER: createRateLimit(),
-    AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(),
-    AUTH_SENSITIVE_RATE_LIMITER: createRateLimit(),
-    PUBLIC_API_RATE_LIMITER: createRateLimit(),
-    VPC_SERVICE: {} as Fetcher,
-    MINECRAFT_SERVER_URL: 'https://upstream.example',
-    MINECRAFT_SERVER_ADDRESS: 'mc.example',
-    MINECRAFT_SERVER_PORT: '25565',
-    CLOUDFLARE_ACCESS_ISSUER: 'https://team.cloudflareaccess.com',
-    CLOUDFLARE_ACCESS_AUD: 'aud',
-  };
-  env.AUTH_STORE = createCoordinatorNamespace(env);
-  return env;
-}
-
-function createNoListEnvWithSummary(buildings: Building[]): Env & { BUILDINGS_KV: KVNamespace } {
-  const values = new Map<string, string>([['building-summary:v1', JSON.stringify(buildings)]]);
-  const kv = {
-    get: (key: string) => Promise.resolve(values.get(key) ?? null),
-    put: (key: string, value: string) => {
-      values.set(key, value);
-      return Promise.resolve();
-    },
-    delete: (key: string) => {
-      values.delete(key);
-      return Promise.resolve();
-    },
-    list: () => {
-      throw new Error('KV list should not be used');
+  const responses = await Promise.all(
+    Array.from({ length: 5 }, () =>
+      handlePublicBuildingsRoute('/buildings', publicRequest(), f.env),
+    ),
+  );
+  expect(reads).toBe(1);
+  expect(responses.every((r) => r?.headers.get('Access-Control-Allow-Origin') === '*')).toBe(true);
+  expect(await responses[0]?.json()).toEqual([]);
+  await handlePublicBuildingsRoute('/buildings', publicRequest(), f.env);
+  expect(reads).toBe(1);
+  f.env.BUILDINGS_KV = {
+    get: async () => {
+      throw new Error('Unavailable');
     },
   } as unknown as KVNamespace;
-
-  const env = {
-    BUILDINGS_KV: kv,
-    AUTH_STORE: {} as DurableObjectNamespace,
-    AUTH_STORE_RATE_LIMITER: createRateLimit(),
-    AUTH_CLIENT_RATE_LIMITER: createRateLimit(),
-    AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(),
-    AUTH_SENSITIVE_RATE_LIMITER: createRateLimit(),
-    PUBLIC_API_RATE_LIMITER: createRateLimit(),
-    VPC_SERVICE: {} as Fetcher,
-    MINECRAFT_SERVER_URL: 'https://upstream.example',
-    MINECRAFT_SERVER_ADDRESS: 'mc.example',
-    MINECRAFT_SERVER_PORT: '25565',
-    CLOUDFLARE_ACCESS_ISSUER: 'https://team.cloudflareaccess.com',
-    CLOUDFLARE_ACCESS_AUD: 'aud',
-  };
-  env.AUTH_STORE = createCoordinatorNamespace(env);
-  return env;
-}
-
-function createSubmissionRequest(overrides: {
-  imageUrl?: string;
-  width?: number;
-  height?: number;
-  size?: number;
-  mime?: string;
-} = {}): Request {
-  const imageUrl = overrides.imageUrl ?? 'https://i.ibb.co/example/test.webp';
-  return new Request('https://data.mcmik.top/api/account/building-submissions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      payload: {
-        ...validBuilding,
-        images: [imageUrl],
-      },
-      images: [
-        {
-          url: imageUrl,
-          width: overrides.width ?? 1280,
-          height: overrides.height ?? 720,
-          size: overrides.size ?? 1024,
-          mime: overrides.mime ?? 'image/webp',
-        },
-      ],
-    }),
-  });
-}
-
-function createMemoryEnv(): Env & { BUILDINGS_KV: KVNamespace; KV_GETS: string[] } {
-  const values = new Map<string, string>();
-  const getKeys: string[] = [];
-  const kv = {
-    get: (key: string) => {
-      getKeys.push(key);
-      return Promise.resolve(values.get(key) ?? null);
-    },
-    put: (key: string, value: string) => {
-      values.set(key, value);
-      return Promise.resolve();
-    },
-    delete: (key: string) => {
-      values.delete(key);
-      return Promise.resolve();
-    },
-    list: ({ prefix = '' }: { prefix?: string } = {}) =>
-      Promise.resolve({
-        keys: [...values.keys()]
-          .filter((key) => key.startsWith(prefix))
-          .sort()
-          .map((name) => ({ name })),
-        list_complete: true,
-        cursor: undefined,
-      }),
-  } as unknown as KVNamespace;
-
-  const env = {
-    BUILDINGS_KV: kv,
-    KV_GETS: getKeys,
-    AUTH_STORE: {} as DurableObjectNamespace,
-    AUTH_STORE_RATE_LIMITER: createRateLimit(),
-    AUTH_CLIENT_RATE_LIMITER: createRateLimit(),
-    AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(),
-    AUTH_SENSITIVE_RATE_LIMITER: createRateLimit(),
-    PUBLIC_API_RATE_LIMITER: createRateLimit(),
-    VPC_SERVICE: {} as Fetcher,
-    MINECRAFT_SERVER_URL: 'https://upstream.example',
-    MINECRAFT_SERVER_ADDRESS: 'mc.example',
-    MINECRAFT_SERVER_PORT: '25565',
-    CLOUDFLARE_ACCESS_ISSUER: 'https://team.cloudflareaccess.com',
-    CLOUDFLARE_ACCESS_AUD: 'aud',
-  };
-  env.AUTH_STORE = createCoordinatorNamespace(env);
-  return env;
-}
-
-function createRateLimit(): RateLimit {
-  return {
-    limit: () => Promise.resolve({ success: true }),
-  };
-}
-
-function createCoordinatorNamespace(env: Env): DurableObjectNamespace {
-  let queue: Promise<unknown> = Promise.resolve();
-
-  return {
-    idFromName: () => ({}),
-    get: () => ({
-      fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
-        const task = queue.then(async () => {
-          const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
-          const method = typeof body.method === 'string' ? body.method : 'GET';
-          const request = new Request(String(body.url ?? `https://data.mcmik.top/admin/api${body.routePath}`), {
-            method,
-            headers: objectHeaders(body.headers),
-            body: method === 'GET' || method === 'HEAD' ? undefined : String(body.requestBody ?? ''),
-          });
-          const response = await handleAdminBuildingsRouteDirect(
-            String(body.routePath ?? ''),
-            request,
-            env,
-            objectActor(body.actor),
-          );
-          return new Response(JSON.stringify({
-            status: response.status,
-            body: await response.json().catch(() => ({})),
-          }));
-        });
-        queue = task.catch(() => undefined);
-        return task;
-      },
-    }),
-  } as unknown as DurableObjectNamespace;
-}
-
-function objectHeaders(value: unknown): Headers {
-  const headers = new Headers();
-
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    for (const [key, headerValue] of Object.entries(value)) {
-      if (typeof headerValue === 'string') {
-        headers.set(key, headerValue);
-      }
-    }
-  }
-
-  return headers;
-}
-
-function objectActor(value: unknown): AdminActor {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return {};
-  }
-
-  const actor = value as Record<string, unknown>;
-  return {
-    email: typeof actor.email === 'string' ? actor.email : undefined,
-    subject: typeof actor.subject === 'string' ? actor.subject : undefined,
-  };
-}
+  const failed = await handlePublicBuildingsRoute('/buildings', publicRequest(), f.env);
+  expect(failed?.status).toBe(503);
+  expect(failed?.headers.get('Access-Control-Allow-Origin')).toBe('*');
+  expect(failed?.headers.get('Cache-Control')).toBe('no-store');
+});

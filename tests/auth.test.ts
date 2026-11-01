@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import worker, { AuthStore } from '../src/index';
 import type { Env } from '../src/env';
+import { memoryAuthStorage } from './helpers/auth-store';
 
 test('minecraft challenge completion rejects non-member plugin confirmations', async () => {
   const store = createAuthStore({
@@ -36,14 +37,17 @@ test('minecraft challenge completion rejects non-member plugin confirmations', a
 test('newcomer game access does not open a website account', async () => {
   const store = createAuthStore({
     VPC_SERVICE: {
-      fetch: () => Promise.resolve(Response.json({
-        status: 'confirmed',
-        player: {
-          uuid: '00000000-0000-0000-0000-000000000002',
-          name: 'NewPlayer',
-          role: 'default',
-        },
-      })),
+      fetch: () =>
+        Promise.resolve(
+          Response.json({
+            status: 'confirmed',
+            player: {
+              uuid: '00000000-0000-0000-0000-000000000002',
+              name: 'NewPlayer',
+              role: 'default',
+            },
+          }),
+        ),
     } as Fetcher,
   });
   const created = await callStore(store, { action: 'createMinecraftChallenge' });
@@ -111,8 +115,8 @@ test('minecraft challenge completion rejects malformed confirmed plugin players'
     browserNonce: created.body.browserNonce,
   });
 
-  expect(completed.status).toBe(403);
-  expect(completed.body).toEqual({ error: 'member_required' });
+  expect(completed.status).toBe(502);
+  expect(completed.body).toEqual({ error: 'plugin_invalid_response' });
 });
 
 test('passkey registration options require resident credentials', async () => {
@@ -180,10 +184,11 @@ test('minecraft challenge status polling is rate limited per client key', async 
     clientKey: 'ip:203.0.113.11',
   });
 
-  for (let index = 0; index < 120; index += 1) {
+  for (let index = 0; index < 60; index += 1) {
     const response = await callStore(store, {
       action: 'getMinecraftChallenge',
       challengeId: created.body.challengeId,
+      browserNonce: created.body.browserNonce,
       clientKey: 'ip:203.0.113.11',
     });
     expect(response.status).toBe(200);
@@ -192,6 +197,7 @@ test('minecraft challenge status polling is rate limited per client key', async 
   const limited = await callStore(store, {
     action: 'getMinecraftChallenge',
     challengeId: created.body.challengeId,
+    browserNonce: created.body.browserNonce,
     clientKey: 'ip:203.0.113.11',
   });
 
@@ -202,7 +208,6 @@ test('minecraft challenge status polling is rate limited per client key', async 
 test('worker rate limits auth requests before invoking the durable object', async () => {
   const createKeys: string[] = [];
   const clientKeys: string[] = [];
-  const storeKeys: string[] = [];
   const response = await worker.fetch(
     new Request('https://data.mcmik.top/auth/challenges', {
       method: 'POST',
@@ -213,8 +218,7 @@ test('worker rate limits auth requests before invoking the durable object', asyn
     }),
     createEnv({
       AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(true, createKeys),
-      AUTH_CLIENT_RATE_LIMITER: createRateLimit(true, clientKeys),
-      AUTH_STORE_RATE_LIMITER: createRateLimit(false, storeKeys),
+      AUTH_CLIENT_RATE_LIMITER: createRateLimit(false, clientKeys),
       AUTH_STORE: {
         idFromName: () => {
           throw new Error('auth store should not be called');
@@ -229,7 +233,6 @@ test('worker rate limits auth requests before invoking the durable object', asyn
   expect(await response.json()).toEqual({ error: 'rate_limited', retryAfterSeconds: 60 });
   expect(createKeys).toEqual(['ip:203.0.113.12']);
   expect(clientKeys).toEqual(['ip:203.0.113.12']);
-  expect(storeKeys).toEqual(['auth-store:v1']);
 });
 
 test('worker fails closed when an auth rate limiter is unavailable', async () => {
@@ -303,7 +306,7 @@ test('player resolve reuses durable object memory cache', async () => {
     VPC_SERVICE: {
       fetch: (input: RequestInfo | URL) => {
         const url = new URL(input.toString());
-        if (url.pathname.endsWith('/consume')) {
+        if (url.pathname.startsWith('/api/auth/challenges/')) {
           return Promise.resolve(
             Response.json({
               status: 'confirmed',
@@ -410,125 +413,30 @@ test('account security lists and revokes browser sessions', async () => {
   expect(revokedSecurity.status).toBe(401);
 });
 
-test('admin building mutations are queued inside auth store', async () => {
-  const values = new Map<string, string>([['building-summary:v1', JSON.stringify([])]]);
-  const kv = {
-    get: (key: string) => Promise.resolve(values.get(key) ?? null),
-    put: (key: string, value: string) => {
-      values.set(key, value);
-      return Promise.resolve();
-    },
-    delete: (key: string) => {
-      values.delete(key);
-      return Promise.resolve();
-    },
-    list: () => {
-      throw new Error('KV list should not be used');
-    },
-  } as unknown as KVNamespace;
-  const store = createAuthStore({ BUILDINGS_KV: kv });
-
-  const [first, second] = await Promise.all([
-    callStore(store, adminCreateBuildingMutation('Queued Building One')),
-    callStore(store, adminCreateBuildingMutation('Queued Building Two')),
-  ]);
-
-  expect(first.status).toBe(201);
-  expect(second.status).toBe(201);
-  const summary = JSON.parse(values.get('building-summary:v1') ?? '[]') as { name: { en: string } }[];
-  expect(summary.map((building) => building.name.en).sort()).toEqual([
-    'Queued Building One',
-    'Queued Building Two',
-  ]);
-});
-
-test('queued admin building mutations enforce stale update checks', async () => {
-  const existing = {
-    id: 'queuedstale',
-    name: { 'zh-CN': '原建筑', en: 'Original Building' },
-    description: { 'zh-CN': '描述', en: 'Description' },
-    coordinates: { x: 0, y: 64, z: 0 },
-    builders: [{ name: 'Player', uuid: '00000000-0000-0000-0000-000000000000', weight: 1 }],
-    buildType: 'original',
-    images: ['/images/test.png'],
-    buildDate: '2026-06-27',
-    createdAt: '2026-06-27T12:00:00.000Z',
-    updatedAt: '2026-06-27T12:00:00.000Z',
-  };
-  const values = new Map<string, string>([
-    ['building-summary:v1', JSON.stringify([existing])],
-    ['building:queuedstale', JSON.stringify(existing)],
-  ]);
-  const kv = {
-    get: (key: string) => Promise.resolve(values.get(key) ?? null),
-    put: (key: string, value: string) => {
-      values.set(key, value);
-      return Promise.resolve();
-    },
-    delete: (key: string) => {
-      values.delete(key);
-      return Promise.resolve();
-    },
-    list: () => {
-      throw new Error('KV list should not be used');
-    },
-  } as unknown as KVNamespace;
-  const store = createAuthStore({ BUILDINGS_KV: kv });
-
-  const [first, second] = await Promise.all([
-    callStore(store, adminReplaceBuildingMutation('queuedstale', 'First Update', existing.updatedAt)),
-    callStore(store, adminReplaceBuildingMutation('queuedstale', 'Second Update', existing.updatedAt)),
-  ]);
-
-  expect([first.status, second.status].sort()).toEqual([200, 409]);
-  const stored = JSON.parse(values.get('building:queuedstale') ?? '{}') as { name: { en: string } };
-  expect(['First Update', 'Second Update']).toContain(stored.name.en);
-});
-
-test('player building submissions are queued per player before enforcing pending limit', async () => {
-  const store = createAuthStore({
-    BUILDINGS_KV: createMemoryKv(),
-    VPC_SERVICE: {
-      fetch: () =>
-        Promise.resolve(
-          Response.json({
-            status: 'confirmed',
-            player: {
-              uuid: '00000000-0000-0000-0000-000000000020',
-              name: 'SubmitPlayer',
-              role: 'member',
-            },
-          }),
-        ),
-    } as Fetcher,
-  });
-  const challenge = await callStore(store, { action: 'createMinecraftChallenge' });
-  const login = await callStore(store, {
-    action: 'completeMinecraftChallenge',
-    challengeId: challenge.body.challengeId,
-    browserNonce: challenge.body.browserNonce,
-  });
-
-  const responses = await Promise.all(
-    Array.from({ length: 11 }, (_, index) =>
-      callStore(store, {
-        action: 'createBuildingSubmission',
-        sessionId: login.body.sessionId,
-        payload: buildingSubmissionPayload(index),
-      }),
-    ),
-  );
-
-  expect(responses.filter((response) => response.status === 201)).toHaveLength(10);
-  expect(responses.filter((response) => response.status === 429)).toHaveLength(1);
-});
-
 function createAuthStore(overrides: Partial<Env> = {}): AuthStore {
   const state = {
     storage: createStorage(),
   } as unknown as DurableObjectState;
 
-  return new AuthStore(state, createEnv(overrides));
+  const env = createEnv(overrides);
+  const original = env.VPC_SERVICE;
+  env.VPC_SERVICE = {
+    fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input.toString());
+      if (url.pathname.startsWith('/api/auth/accounts/'))
+        return Response.json({
+          player: { uuid: url.pathname.split('/').at(-1), role: 'member', credentialsChangedAt: 0 },
+        });
+      const response = await original.fetch(input, init);
+      const payload = (await response.json()) as Record<string, unknown>;
+      return Response.json(
+        payload.status === 'confirmed'
+          ? { ...payload, confirmedAt: new Date().toISOString() }
+          : payload,
+      );
+    },
+  } as Fetcher;
+  return new AuthStore(state, env);
 }
 
 async function callStore(
@@ -543,69 +451,6 @@ async function callStore(
   );
 
   return (await response.json()) as { status: number; body: StoreTestBody };
-}
-
-function adminCreateBuildingMutation(name: string): Record<string, unknown> {
-  return {
-    action: 'adminBuildingMutation',
-    routePath: '/buildings',
-    method: 'POST',
-    url: 'https://data.mcmik.top/admin/api/buildings',
-    headers: { 'Content-Type': 'application/json' },
-    requestBody: JSON.stringify({
-      name: { 'zh-CN': name, en: name },
-      description: { 'zh-CN': '描述', en: 'Description' },
-      coordinates: { x: 0, y: 64, z: 0 },
-      builders: [{ name: 'Player', uuid: '00000000-0000-0000-0000-000000000000', weight: 1 }],
-      buildType: 'original',
-      images: ['/images/test.png'],
-      buildDate: '2026-06-27',
-    }),
-  };
-}
-
-function adminReplaceBuildingMutation(id: string, name: string, expectedUpdatedAt: string): Record<string, unknown> {
-  return {
-    action: 'adminBuildingMutation',
-    routePath: `/buildings/${id}`,
-    method: 'PUT',
-    url: `https://data.mcmik.top/admin/api/buildings/${id}`,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Expected-Updated-At': expectedUpdatedAt,
-    },
-    requestBody: JSON.stringify({
-      name: { 'zh-CN': name, en: name },
-      description: { 'zh-CN': '描述', en: 'Description' },
-      coordinates: { x: 0, y: 64, z: 0 },
-      builders: [{ name: 'Player', uuid: '00000000-0000-0000-0000-000000000000', weight: 1 }],
-      buildType: 'original',
-      images: ['/images/test.png'],
-      buildDate: '2026-06-27',
-    }),
-  };
-}
-
-function buildingSubmissionPayload(index: number): Record<string, unknown> {
-  const imageUrl = `https://i.ibb.co/example/building-${index}.webp`;
-  return {
-    payload: {
-      name: { 'zh-CN': `申请建筑${index}`, en: `Submission Building ${index}` },
-      description: { 'zh-CN': '描述', en: 'Description' },
-      coordinates: { x: index, y: 64, z: 0 },
-      builders: [{ name: 'SubmitPlayer', uuid: '00000000-0000-0000-0000-000000000020', weight: 100 }],
-      buildType: 'original',
-      images: [imageUrl],
-      buildDate: '2026-06-27',
-    },
-    images: [{
-      url: imageUrl,
-      width: 1280,
-      height: 720,
-      size: 120_000,
-      mime: 'image/webp',
-    }],
-  };
 }
 
 type StoreTestBody = Record<string, unknown> & {
@@ -626,20 +471,7 @@ type StoreTestBody = Record<string, unknown> & {
 };
 
 function createStorage(): DurableObjectStorage {
-  const values = new Map<string, unknown>();
-
-  return {
-    get: (key: string) => Promise.resolve(values.get(key)),
-    put: (key: string, value: unknown) => {
-      values.set(key, value);
-      return Promise.resolve();
-    },
-    delete: (key: string) => Promise.resolve(values.delete(key)),
-    list: ({ prefix }: DurableObjectListOptions = {}) => {
-      const entries = [...values.entries()].filter(([key]) => !prefix || key.startsWith(prefix));
-      return Promise.resolve(new Map(entries));
-    },
-  } as unknown as DurableObjectStorage;
+  return memoryAuthStorage().storage;
 }
 
 function createMemoryKv(): KVNamespace {
@@ -668,7 +500,6 @@ function createEnv(overrides: Partial<Env> = {}): Env {
   return {
     BUILDINGS_KV: {} as KVNamespace,
     AUTH_STORE: {} as DurableObjectNamespace,
-    AUTH_STORE_RATE_LIMITER: createRateLimit(),
     AUTH_CLIENT_RATE_LIMITER: createRateLimit(),
     AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(),
     AUTH_SENSITIVE_RATE_LIMITER: createRateLimit(),

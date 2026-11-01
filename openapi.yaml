@@ -43,7 +43,7 @@ paths:
   /buildings:
     get:
       summary: 获取建筑列表
-      description: 从内存/Worker Cache API 缓存的建筑汇总返回所有已登记建筑；cache miss 时读取 Durable Object 快照，KV 仅作为建筑持久存储和快照重建来源。支持按 tag、type、builder、locale 过滤。
+      description: 从内存、Worker Cache API 和已发布的 KV 建筑快照读取公开目录；公开请求不进入 Durable Object。后台变更合并发布，公开读取受快照发布及缓存时效影响。支持按 tag、type、builder、locale 过滤。
       operationId: getBuildings
       parameters:
         - name: tag
@@ -274,8 +274,14 @@ components:
 
     Coordinates:
       type: object
-      required: [x, y, z]
+      additionalProperties: false
+      required: [world, x, y, z]
       properties:
+        world:
+          type: string
+          minLength: 1
+          maxLength: 128
+          example: world
         x:
           type: number
         y:

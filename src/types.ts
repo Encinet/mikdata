@@ -5,6 +5,7 @@ export interface I18n {
 }
 
 export interface Coord {
+  world: string;
   x: number;
   y: number;
   z: number;

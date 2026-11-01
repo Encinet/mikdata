@@ -1,4 +1,12 @@
 import type { Env } from './env';
+import {
+  BuildingStore,
+  PUBLIC_BUILDINGS_KEY,
+  type PublicBuildingsSnapshot,
+} from './building-store';
+interface BuildingEnv extends Env {
+  buildingStore: BuildingStore;
+}
 import { AUTH_STORE_NAME } from './constants';
 import { json } from './http';
 import { TtlMemoryCache } from './memory-cache';
@@ -51,23 +59,14 @@ const INPUT_FIELDS = [
   'source',
 ] as const;
 const VALID_FIELDS = new Set<string>(INPUT_FIELDS);
-const BUILDING_KEY_PREFIX = 'building:';
-const SUMMARY_KV_KEY = 'building-summary:v1';
-const BUILDINGS_CACHE_VERSION = 'v1';
-const SUMMARY_CACHE_KEY = `${BUILDINGS_CACHE_VERSION}:summary`;
+const BUILDINGS_CACHE_VERSION = 'v3';
+const SUMMARY_CACHE_KEY = 'v3:summary';
 const BUILDINGS_CACHE_TTL_SECONDS = 300;
 const MAX_IMPORT_ITEMS = 100;
 const MAX_PENDING_SUBMISSIONS_PER_PLAYER = 10;
 const MAX_SUBMISSION_REVIEW_NOTE_LEN = 500;
 const REJECTED_SUBMISSION_RETENTION_DAYS = 14;
 const REJECTED_SUBMISSION_RETENTION_MS = REJECTED_SUBMISSION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-const REJECTED_SUBMISSION_RETENTION_SECONDS = REJECTED_SUBMISSION_RETENTION_DAYS * 24 * 60 * 60;
-const SUBMISSION_KEY_PREFIX = 'building-submission:';
-const SUBMISSION_PLAYER_INDEX_PREFIX = 'building-submission-player:';
-const SUBMISSION_PLAYER_PENDING_INDEX_PREFIX = 'building-submission-player-pending:';
-const SUBMISSION_STATUS_INDEX_PREFIX = 'building-submission-status:';
-const SUBMISSION_INDEX_READY_KEY = 'building-submission-indexes:v1';
-const SUBMISSION_STATUSES: BuildingSubmission['status'][] = ['pending', 'approved', 'rejected'];
 const IMGBB_IMAGE_RE = /^https:\/\/i\.ibb\.co\/[^/]+\/[^/?#]+\.webp$/i;
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const PUBLIC_CACHE_HEADERS = {
@@ -75,24 +74,16 @@ const PUBLIC_CACHE_HEADERS = {
 } as const;
 const BUILDINGS_MEMORY_CACHE_TTL_MS = BUILDINGS_CACHE_TTL_SECONDS * 1000;
 const SUMMARY_MEMORY_CACHE_TTL_MS = 15 * 1000;
-const buildingMemoryCache = new TtlMemoryCache<Building>({
-  defaultTtlMs: BUILDINGS_MEMORY_CACHE_TTL_MS,
-  maxEntries: 512,
-});
 const buildingListMemoryCache = new TtlMemoryCache<unknown[]>({
   defaultTtlMs: BUILDINGS_MEMORY_CACHE_TTL_MS,
   maxEntries: 128,
 });
-const summaryMemoryCache = new TtlMemoryCache<Building[]>({
+const summaryMemoryCache = new TtlMemoryCache<PublicBuildingsSnapshot>({
   defaultTtlMs: SUMMARY_MEMORY_CACHE_TTL_MS,
   maxEntries: 32,
 });
-const submissionIndexReadyMemoryCache = new TtlMemoryCache<boolean>({
-  defaultTtlMs: 5 * 60 * 1000,
-  maxEntries: 1,
-});
 const memoryCacheScopes = new WeakMap<object, string>();
-const summaryUpdateQueues = new WeakMap<object, Promise<unknown>>();
+const summaryReads = new WeakMap<KVNamespace, Promise<PublicBuildingsSnapshot>>();
 let nextMemoryCacheScope = 0;
 
 export async function handlePublicBuildingsRoute(
@@ -100,27 +91,34 @@ export async function handlePublicBuildingsRoute(
   request: Request,
   env: Env,
 ): Promise<Response | null> {
-  if (routePath === '/buildings') {
+  try {
+    if (routePath === '/buildings') {
+      if (request.method === 'GET') {
+        return await listBuildings(request, env);
+      }
+
+      return methodNotAllowed(request, env);
+    }
+
+    const match = routePath.match(/^\/buildings\/([a-z0-9]{8,24})$/i);
+
+    if (!match) {
+      return null;
+    }
+
+    const id = match[1];
+
     if (request.method === 'GET') {
-      return listBuildings(request, env);
+      return await getBuilding(id, request, env);
     }
 
     return methodNotAllowed(request, env);
+  } catch (error) {
+    console.warn('Public buildings snapshot unavailable', error);
+    return json({ error: 'building_data_unavailable' }, 503, request, env, {
+      'Cache-Control': 'no-store',
+    });
   }
-
-  const match = routePath.match(/^\/buildings\/([a-z0-9]{8,24})$/i);
-
-  if (!match) {
-    return null;
-  }
-
-  const id = match[1];
-
-  if (request.method === 'GET') {
-    return getBuilding(id, request, env);
-  }
-
-  return methodNotAllowed(request, env);
 }
 
 export async function handleAdminBuildingsRoute(
@@ -138,36 +136,32 @@ export async function handleAdminBuildingsRoute(
     if (authError) {
       return authError;
     }
-    return coordinateAdminBuildingMutation(routePath, request, env, actor);
   }
 
-  return handleAdminBuildingsRouteDirect(routePath, request, env, actor);
+  return coordinateAdminBuildingMutation(routePath, request, env, actor);
 }
 
 export async function handleAdminBuildingsRouteDirect(
   routePath: string,
   request: Request,
-  env: Env,
+  env: BuildingEnv,
   actor: AdminActor,
 ): Promise<Response> {
   if (!isAdminBuildingsRoute(routePath)) {
     return error('not found', 404, request, env);
   }
+  request = withAdminHeaders(request, actor);
 
   if (isSubmissionRoute(routePath)) {
-    return handleSubmissionRoute(routePath, withAdminHeaders(request, actor), env);
+    return handleSubmissionRoute(routePath, request, env);
   }
 
-  const response = await handleAdminKvBuildingsRoute(routePath, request, env);
-  if (response.ok && MUTATING_METHODS.has(request.method)) {
-    await cacheMutationResponseBuildings(response.clone(), env);
-  }
-  return response;
+  return handleAdminStoredBuildingsRoute(routePath, request, env);
 }
 
 export async function createPlayerBuildingSubmission(
   request: Request,
-  env: Env,
+  env: BuildingEnv,
   account: { playerUuid: string; currentName: string; role: string },
 ): Promise<Response> {
   const headers = new Headers(request.headers);
@@ -179,15 +173,23 @@ export async function createPlayerBuildingSubmission(
 
 export async function listPlayerBuildingSubmissions(
   request: Request,
-  env: Env,
+  env: BuildingEnv,
   account: { playerUuid: string },
 ): Promise<Response> {
   const headers = new Headers(request.headers);
   headers.set('X-Player-Uuid', account.playerUuid);
-  return handleSubmissionRoute('/building-submissions/mine', new Request(request, { headers }), env);
+  return handleSubmissionRoute(
+    '/building-submissions/mine',
+    new Request(request, { headers }),
+    env,
+  );
 }
 
-async function handleSubmissionRoute(routePath: string, request: Request, env: Env): Promise<Response> {
+async function handleSubmissionRoute(
+  routePath: string,
+  request: Request,
+  env: BuildingEnv,
+): Promise<Response> {
   if (routePath === '/building-submissions') {
     if (request.method === 'GET') {
       return listSubmissions(request, env);
@@ -205,13 +207,6 @@ async function handleSubmissionRoute(routePath: string, request: Request, env: E
     return methodNotAllowed(request, env);
   }
 
-  if (routePath === '/building-submissions/repair-approved') {
-    if (request.method === 'POST') {
-      return repairApprovedSubmissions(request, env);
-    }
-    return methodNotAllowed(request, env);
-  }
-
   const submissionEdit = routePath.match(/^\/building-submissions\/([a-z0-9]{8,24})$/i);
   if (submissionEdit) {
     if (request.method === 'PUT') {
@@ -220,7 +215,9 @@ async function handleSubmissionRoute(routePath: string, request: Request, env: E
     return methodNotAllowed(request, env);
   }
 
-  const submissionAction = routePath.match(/^\/building-submissions\/([a-z0-9]{8,24})\/(approve|reject)$/i);
+  const submissionAction = routePath.match(
+    /^\/building-submissions\/([a-z0-9]{8,24})\/(approve|reject)$/i,
+  );
   if (submissionAction) {
     if (request.method !== 'PUT') {
       return methodNotAllowed(request, env);
@@ -233,7 +230,11 @@ async function handleSubmissionRoute(routePath: string, request: Request, env: E
   return error('not found', 404, request, env);
 }
 
-async function handleAdminKvBuildingsRoute(routePath: string, request: Request, env: Env): Promise<Response> {
+async function handleAdminStoredBuildingsRoute(
+  routePath: string,
+  request: Request,
+  env: BuildingEnv,
+): Promise<Response> {
   if (routePath === '/buildings') {
     if (request.method === 'GET') {
       const buildings = await readBuildingsMutationSnapshot(env);
@@ -277,8 +278,9 @@ async function listBuildings(request: Request, env: Env): Promise<Response> {
   const builder = params.get('builder');
   const locale = params.get('locale');
 
-  const buildings = await readBuildingsSummary(env);
-  const cacheKey = buildingListCacheKey(request, buildings);
+  const snapshot = await readBuildingsSummary(env);
+  const buildings = snapshot.buildings;
+  const cacheKey = buildingListCacheKey(request, snapshot.version);
   const cached = await readBuildingListCache(env, cacheKey);
 
   if (cached) {
@@ -311,27 +313,13 @@ async function listBuildings(request: Request, env: Env): Promise<Response> {
 }
 
 async function getBuilding(id: string, request: Request, env: Env): Promise<Response> {
-  const cached = await readCachedBuilding(env, id);
-
-  if (cached) {
-    return json(cached, 200, request, env, PUBLIC_CACHE_HEADERS);
-  }
-
-  const buildings = await readBuildingsSummary(env);
-  const building = buildings.find((item) => item.id === id);
-
-  if (!building) {
-    return error('building not found', 404, request, env);
-  }
-
-  await writeBuildingCache(env, building);
-  return json(building, 200, request, env, PUBLIC_CACHE_HEADERS);
+  const snapshot = await readBuildingsSummary(env);
+  const building = snapshot.buildings.find((item) => item.id === id);
+  return building
+    ? json(building, 200, request, env, PUBLIC_CACHE_HEADERS)
+    : error('building not found', 404, request, env);
 }
-
-async function createBuilding(
-  request: Request,
-  env: Env,
-): Promise<Response> {
+async function createBuilding(request: Request, env: BuildingEnv): Promise<Response> {
   const body = await readBody(request, env);
 
   if (!body.ok) {
@@ -359,18 +347,13 @@ async function createBuilding(
   };
 
   await writeBuilding(env, building);
-  await upsertBuildingSummary(env, building);
   auditBuildingMutation('create', building.id, request);
 
   return json(building, 201, request, env);
 }
 
-async function replaceBuilding(
-  id: string,
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  const existing = await buildingsKv(env).get(buildingKey(id));
+async function replaceBuilding(id: string, request: Request, env: BuildingEnv): Promise<Response> {
+  const existing = env.buildingStore.building(id);
 
   if (!existing) {
     return error('building not found', 404, request, env);
@@ -388,7 +371,7 @@ async function replaceBuilding(
     return error(validation.message, 422, request, env);
   }
 
-  const previous = parseBuilding(existing, id);
+  const previous = existing;
 
   if (!previous) {
     return error('building record is corrupt', 500, request, env);
@@ -402,21 +385,21 @@ async function replaceBuilding(
     id,
     ...validation.value,
     createdAt: previous.createdAt,
-    updatedAt: new Date().toISOString(),
+    updatedAt: nextUpdatedAt(previous.updatedAt),
   };
 
+  const duplicateId = findDuplicateBuildingIdInList(
+    env.buildingStore.buildings().filter((item) => item.id !== id),
+    building,
+  );
+  if (duplicateId) return error(`duplicate building: ${duplicateId}`, 409, request, env);
   await writeBuilding(env, building);
-  await upsertBuildingSummary(env, building);
   auditBuildingMutation('replace', id, request);
   return json(building, 200, request, env);
 }
 
-async function patchBuilding(
-  id: string,
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  const raw = await buildingsKv(env).get(buildingKey(id));
+async function patchBuilding(id: string, request: Request, env: BuildingEnv): Promise<Response> {
+  const raw = env.buildingStore.building(id);
 
   if (!raw) {
     return error('building not found', 404, request, env);
@@ -440,7 +423,7 @@ async function patchBuilding(
     }
   }
 
-  const previous = parseBuilding(raw, id);
+  const previous = raw;
 
   if (!previous) {
     return error('building record is corrupt', 500, request, env);
@@ -469,7 +452,7 @@ async function patchBuilding(
     }
   }
 
-  const validation = validateBuildingInput(merged);
+  const validation = validateBuildingInput(stripStoredBuildingFields(merged));
 
   if (!validation.ok) {
     return error(`patch produces invalid document: ${validation.message}`, 422, request, env);
@@ -479,25 +462,25 @@ async function patchBuilding(
     id,
     ...validation.value,
     createdAt: previous.createdAt,
-    updatedAt: new Date().toISOString(),
+    updatedAt: nextUpdatedAt(previous.updatedAt),
   };
 
+  const duplicateId = findDuplicateBuildingIdInList(
+    env.buildingStore.buildings().filter((item) => item.id !== id),
+    building,
+  );
+  if (duplicateId) return error(`duplicate building: ${duplicateId}`, 409, request, env);
   await writeBuilding(env, building);
-  await upsertBuildingSummary(env, building);
   auditBuildingMutation('patch', id, request);
   return json(building, 200, request, env);
 }
 
-async function deleteBuilding(
-  id: string,
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  const raw = await buildingsKv(env).get(buildingKey(id));
+async function deleteBuilding(id: string, request: Request, env: BuildingEnv): Promise<Response> {
+  const raw = env.buildingStore.building(id);
   if (!raw) {
     return error('building not found', 404, request, env);
   }
-  const building = parseBuilding(raw, id);
+  const building = raw;
   if (!building) {
     return error('building record is corrupt', 500, request, env);
   }
@@ -506,18 +489,13 @@ async function deleteBuilding(
     return error('building has changed, refresh before deleting', 409, request, env);
   }
 
-  await buildingsKv(env).delete(buildingKey(id));
-  await removeBuildingFromSummary(env, id);
-  await deleteBuildingCache(env, id);
+  env.buildingStore.deleteBuilding(id);
   auditBuildingMutation('delete', id, request);
 
   return json({ deleted: id }, 200, request, env);
 }
 
-async function importBuildings(
-  request: Request,
-  env: Env,
-): Promise<Response> {
+async function importBuildings(request: Request, env: BuildingEnv): Promise<Response> {
   const inputs = await readImportInputs(request, env);
 
   if (!inputs.ok) {
@@ -550,7 +528,6 @@ async function importBuildings(
   }
 
   await Promise.all(buildings.map((building) => writeBuilding(env, building)));
-  await upsertBuildingsSummary(env, buildings);
 
   for (const building of buildings) {
     auditBuildingMutation('import', building.id, request);
@@ -559,10 +536,7 @@ async function importBuildings(
   return json({ imported: buildings.length, buildings }, 201, request, env);
 }
 
-async function createSubmission(
-  request: Request,
-  env: Env,
-): Promise<Response> {
+async function createSubmission(request: Request, env: BuildingEnv): Promise<Response> {
   const submitterUuid = request.headers.get('X-Player-Uuid') ?? '';
   const submitterName = request.headers.get('X-Player-Name') ?? '';
   const submitterRole = request.headers.get('X-Player-Role') ?? '';
@@ -600,7 +574,9 @@ async function createSubmission(
     return error(images.message, 422, request, env);
   }
 
-  const submitterBuilder = validation.value.builders.find((builder) => builder.uuid === submitterUuid.toLowerCase());
+  const submitterBuilder = validation.value.builders.find(
+    (builder) => builder.uuid === submitterUuid.toLowerCase(),
+  );
   if (!submitterBuilder) {
     validation.value.builders.unshift({
       uuid: submitterUuid.toLowerCase(),
@@ -608,6 +584,17 @@ async function createSubmission(
       weight: 100,
     });
   }
+
+  const finalValidation = validateBuildingInput(validation.value);
+  if (!finalValidation.ok) return error(finalValidation.message, 422, request, env);
+  const ownedImages = env.buildingStore.ownedImages(submitterUuid.toLowerCase(), images.value);
+  if (!ownedImages)
+    return error(
+      'images must be uploaded by the current account within 24 hours',
+      422,
+      request,
+      env,
+    );
 
   if (!validation.value.images.every((url) => IMGBB_IMAGE_RE.test(url))) {
     return error('images must be uploaded through the image uploader', 422, request, env);
@@ -620,78 +607,43 @@ async function createSubmission(
     submitterUuid: submitterUuid.toLowerCase(),
     submitterName,
     submitterRole,
-    payload: validation.value,
-    images: images.value,
+    payload: finalValidation.value,
+    images: ownedImages,
     createdAt: now,
     updatedAt: now,
   };
 
-  await Promise.all([
-    writeSubmission(env, submission),
-    ...writeSubmissionIndexes(env, submission),
-  ]);
+  await writeSubmission(env, submission);
   return json({ submission }, 201, request, env);
 }
 
-async function listMineSubmissions(
-  request: Request,
-  env: Env,
-): Promise<Response> {
+async function listMineSubmissions(request: Request, env: BuildingEnv): Promise<Response> {
   const playerUuid = request.headers.get('X-Player-Uuid') ?? '';
   if (!UUID_RE.test(playerUuid)) {
     return error('unauthenticated', 401, request, env);
   }
 
-  return json({ submissions: await listPlayerSubmissions(env, playerUuid.toLowerCase()) }, 200, request, env);
+  return json(
+    { submissions: await listPlayerSubmissions(env, playerUuid.toLowerCase()) },
+    200,
+    request,
+    env,
+  );
 }
 
-async function listSubmissions(
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  await ensureSubmissionIndexes(env);
-  const statusFilter = parseSubmissionStatus(new URL(request.url).searchParams.get('status'));
-  const statuses = statusFilter ? [statusFilter] : SUBMISSION_STATUSES;
-  const statusKeys = await Promise.all(
-    statuses.map(async (status) => ({
-      status,
-      keys: await listKvKeys(env, submissionStatusPrefix(status)),
-    })),
+async function listSubmissions(request: Request, env: BuildingEnv): Promise<Response> {
+  const status = parseSubmissionStatus(new URL(request.url).searchParams.get('status'));
+  return json(
+    { submissions: env.buildingStore.submissions(undefined, status ?? undefined) },
+    200,
+    request,
+    env,
   );
-  const submissions = await Promise.all(
-    statusKeys.flatMap(({ keys, status }) =>
-      keys.map(async (key) => {
-        const submission = await readSubmission(env, key.slice(submissionStatusPrefix(status).length));
-        if (!submission) {
-          await buildingsKv(env).delete(key);
-          return null;
-        }
-        if (submission.status !== status) {
-          await buildingsKv(env).delete(key);
-        }
-        if (isExpiredRejectedSubmission(submission)) {
-          await deleteSubmission(env, submission);
-          return null;
-        }
-        return submission;
-      }),
-    ),
-  );
-  const byId = new Map<string, BuildingSubmission>();
-  for (const submission of submissions) {
-    if (submission) {
-      byId.set(submission.id, submission);
-    }
-  }
-  const sorted = [...byId.values()]
-    .filter((submission): submission is BuildingSubmission => !!submission)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return json({ submissions: sorted }, 200, request, env);
 }
 async function approveSubmission(
   id: string,
   request: Request,
-  env: Env,
+  env: BuildingEnv,
 ): Promise<Response> {
   const submission = await readSubmission(env, id);
   if (!submission) {
@@ -716,7 +668,10 @@ async function approveSubmission(
     if (!validation.ok) {
       return error(validation.message, 422, request, env);
     }
-    const imageValidation = validateSubmissionImages(body.data.images ?? submission.images, validation.value.images);
+    const imageValidation = validateSubmissionImages(
+      body.data.images ?? submission.images,
+      validation.value.images,
+    );
     if (!imageValidation.ok) {
       return error(imageValidation.message, 422, request, env);
     }
@@ -749,138 +704,12 @@ async function approveSubmission(
   submission.updatedAt = now;
 
   await writeBuilding(env, building);
-  await deleteSubmission(env, submission);
-  await upsertBuildingSummary(env, building);
-  await writeBuildingCache(env, building);
+  await writeSubmission(env, submission);
   auditBuildingMutation('approve-submission', building.id, request);
   return json({ submission, building }, 200, request, env);
 }
 
-async function repairApprovedSubmissions(
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  await ensureSubmissionIndexes(env);
-
-  const keys = await listKvKeys(env, submissionStatusPrefix('approved'));
-  const existingBuildings = await readAllBuildings(env);
-  const buildingsById = new Map(existingBuildings.map((building) => [building.id, building]));
-  const changedBuildings: Building[] = [];
-  const results: {
-    submissionId: string;
-    action: 'created' | 'restored' | 'linked' | 'skipped' | 'removed-index' | 'failed';
-    buildingId?: string;
-    reason?: string;
-  }[] = [];
-
-  let created = 0;
-  let restored = 0;
-  let linked = 0;
-  let skipped = 0;
-  let deletedApproved = 0;
-  let removedIndexes = 0;
-  let failed = 0;
-
-  for (const key of keys) {
-    const submissionId = key.slice(submissionStatusPrefix('approved').length);
-    const submission = await readSubmission(env, submissionId);
-
-    if (!submission) {
-      await buildingsKv(env).delete(key);
-      removedIndexes += 1;
-      results.push({ submissionId, action: 'removed-index', reason: 'submission not found' });
-      continue;
-    }
-
-    if (submission.status !== 'approved') {
-      await buildingsKv(env).delete(key);
-      removedIndexes += 1;
-      results.push({ submissionId, action: 'removed-index', reason: `status is ${submission.status}` });
-      continue;
-    }
-
-    const validation = validateBuildingInput(submission.payload);
-    if (!validation.ok) {
-      failed += 1;
-      results.push({ submissionId, action: 'failed', reason: validation.message });
-      continue;
-    }
-
-    const payload = validation.value;
-    const existingId =
-      typeof submission.buildingId === 'string' && isValidBuildingId(submission.buildingId)
-        ? submission.buildingId
-        : null;
-
-    if (existingId && buildingsById.has(existingId)) {
-      await deleteSubmission(env, submission);
-      skipped += 1;
-      deletedApproved += 1;
-      results.push({ submissionId, action: 'skipped', buildingId: existingId });
-      continue;
-    }
-
-    const duplicateId = findDuplicateBuildingIdInList(existingBuildings, payload);
-    if (duplicateId && duplicateId !== existingId) {
-      await deleteSubmission(env, submission);
-      linked += 1;
-      deletedApproved += 1;
-      results.push({ submissionId, action: 'linked', buildingId: duplicateId });
-      continue;
-    }
-
-    const now = submission.updatedAt || submission.createdAt || new Date().toISOString();
-    const building: Building = {
-      id: existingId ?? (await createBuildingId(env)),
-      ...payload,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    submission.payload = payload;
-    submission.buildingId = building.id;
-    await Promise.all([writeBuilding(env, building), deleteSubmission(env, submission)]);
-
-    existingBuildings.push(building);
-    buildingsById.set(building.id, building);
-    changedBuildings.push(building);
-    deletedApproved += 1;
-
-    if (existingId) {
-      restored += 1;
-      results.push({ submissionId, action: 'restored', buildingId: building.id });
-    } else {
-      created += 1;
-      results.push({ submissionId, action: 'created', buildingId: building.id });
-    }
-  }
-
-  await rebuildBuildingsSummary(env);
-  await Promise.all(changedBuildings.map((building) => writeBuildingCache(env, building)));
-
-  return json(
-    {
-      scanned: keys.length,
-      created,
-      restored,
-      linked,
-      skipped,
-      deletedApproved,
-      removedIndexes,
-      failed,
-      results,
-    },
-    200,
-    request,
-    env,
-  );
-}
-
-async function updateSubmission(
-  id: string,
-  request: Request,
-  env: Env,
-): Promise<Response> {
+async function updateSubmission(id: string, request: Request, env: BuildingEnv): Promise<Response> {
   const submission = await readSubmission(env, id);
   if (!submission) {
     return error('submission not found', 404, request, env);
@@ -915,16 +744,12 @@ async function updateSubmission(
   submission.images = images.value;
   submission.reviewer = adminActorLabel(request);
   submission.reviewNote = optionalReviewNote(body.data.reviewNote);
-  submission.updatedAt = new Date().toISOString();
+  submission.updatedAt = nextUpdatedAt(submission.updatedAt);
   await writeSubmission(env, submission);
   return json({ submission }, 200, request, env);
 }
 
-async function rejectSubmission(
-  id: string,
-  request: Request,
-  env: Env,
-): Promise<Response> {
+async function rejectSubmission(id: string, request: Request, env: BuildingEnv): Promise<Response> {
   const submission = await readSubmission(env, id);
   if (!submission) {
     return error('submission not found', 404, request, env);
@@ -953,7 +778,7 @@ async function rejectSubmission(
   submission.rejectedAt = now.toISOString();
   submission.expiresAt = new Date(now.getTime() + REJECTED_SUBMISSION_RETENTION_MS).toISOString();
   submission.updatedAt = submission.rejectedAt;
-  await writeRejectedSubmission(env, submission);
+  await writeSubmission(env, submission);
   return json({ submission }, 200, request, env);
 }
 
@@ -1036,7 +861,11 @@ function validateSubmissionImages(
       return { ok: false, message: `images[${index}] metadata must be an object` };
     }
     const value = item as Record<string, unknown>;
-    if (value.url !== urls[index] || typeof value.url !== 'string' || !IMGBB_IMAGE_RE.test(value.url)) {
+    if (
+      value.url !== urls[index] ||
+      typeof value.url !== 'string' ||
+      !IMGBB_IMAGE_RE.test(value.url)
+    ) {
       return { ok: false, message: `images[${index}].url must be an uploaded image URL` };
     }
     if (
@@ -1064,70 +893,21 @@ function validateSubmissionImages(
 }
 
 async function listPlayerSubmissions(
-  env: Env,
+  env: BuildingEnv,
   playerUuid: string,
   status?: BuildingSubmission['status'],
 ): Promise<BuildingSubmission[]> {
-  const prefix =
-    status === 'pending'
-      ? playerPendingSubmissionPrefix(playerUuid.toLowerCase())
-      : playerSubmissionPrefix(playerUuid.toLowerCase());
-  const keys = await listKvKeys(env, prefix);
-  const submissions = await Promise.all(
-    keys.map(async (key) => {
-      const submission = await readSubmission(env, key.slice(prefix.length));
-      if (!submission) {
-        await buildingsKv(env).delete(key);
-        return null;
-      }
-      if (isExpiredRejectedSubmission(submission)) {
-        await deleteSubmission(env, submission);
-        return null;
-      }
-      if (status && submission.status !== status) {
-        await buildingsKv(env).delete(key);
-        return null;
-      }
-      return submission;
-    }),
-  );
-  return submissions
-    .filter((submission): submission is BuildingSubmission => !!submission)
-    .filter((submission) => !status || submission.status === status)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return env.buildingStore.submissions(playerUuid, status);
 }
-
-async function countPlayerPendingSubmissions(env: Env, playerUuid: string): Promise<number> {
-  await ensureSubmissionIndexes(env);
-  const prefix = playerPendingSubmissionPrefix(playerUuid.toLowerCase());
-  const keys = await listKvKeys(env, prefix);
-
-  if (keys.length < MAX_PENDING_SUBMISSIONS_PER_PLAYER) {
-    return keys.length;
-  }
-
-  const submissions = await Promise.all(
-    keys.map(async (key) => {
-      const submission = await readSubmission(
-        env,
-        key.slice(prefix.length),
-      );
-
-      if (!submission || submission.status !== 'pending') {
-        await buildingsKv(env).delete(key);
-        return null;
-      }
-
-      return submission;
-    }),
-  );
-
-  return submissions.filter(Boolean).length;
+async function countPlayerPendingSubmissions(
+  env: BuildingEnv,
+  playerUuid: string,
+): Promise<number> {
+  return env.buildingStore.pendingCount(playerUuid);
 }
-
-async function createSubmissionId(env: Env): Promise<string> {
+async function createSubmissionId(env: BuildingEnv): Promise<string> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`.slice(0, 16);
+    const id = crypto.randomUUID().replaceAll('-', '').slice(0, 16);
     if (!(await readSubmission(env, id))) {
       return id;
     }
@@ -1195,6 +975,12 @@ export function validateBuildingInput(data: unknown): ValidationResult {
   }
 
   const coord = coordinates as Record<string, unknown>;
+
+  if (typeof coord.world !== 'string' || !coord.world.trim() || coord.world.length > 128
+      || /[\u0000-\u001f\u007f-\u009f]/u.test(coord.world)
+      || Object.keys(coord).some((key) => !['world', 'x', 'y', 'z'].includes(key))) {
+    return { ok: false, message: 'coordinates must contain a valid world name and x, y, z' };
+  }
 
   if (!Number.isFinite(coord.x) || !Number.isFinite(coord.y) || !Number.isFinite(coord.z)) {
     return { ok: false, message: 'coordinates x, y, z must be finite numbers' };
@@ -1319,10 +1105,7 @@ export function validateBuildingInput(data: unknown): ValidationResult {
       return { ok: false, message: 'source.originalAuthor must be a string' };
     }
 
-    if (
-      typeof source.originalAuthor === 'string' &&
-      source.originalAuthor.length > MAX_NAME_LEN
-    ) {
+    if (typeof source.originalAuthor === 'string' && source.originalAuthor.length > MAX_NAME_LEN) {
       return { ok: false, message: `source.originalAuthor exceeds max length ${MAX_NAME_LEN}` };
     }
 
@@ -1391,9 +1174,7 @@ function normalizeInput(building: Record<string, unknown>): Input {
         ? null
         : {
             originalAuthor:
-              typeof source?.originalAuthor === 'string'
-                ? source.originalAuthor.trim()
-                : undefined,
+              typeof source?.originalAuthor === 'string' ? source.originalAuthor.trim() : undefined,
             originalLink:
               typeof source?.originalLink === 'string' ? source.originalLink.trim() : undefined,
             notes:
@@ -1415,13 +1196,17 @@ function normalizeI18n(value: Record<string, unknown>): I18n {
 
 function normalizeCoordinates(value: Record<string, unknown>): Coord {
   return {
+    world: (value.world as string).trim(),
     x: value.x as number,
     y: value.y as number,
     z: value.z as number,
   };
 }
 
-function findUnknownField(data: Record<string, unknown>, allowedFields: Set<string>): string | null {
+function findUnknownField(
+  data: Record<string, unknown>,
+  allowedFields: Set<string>,
+): string | null {
   return Object.keys(data).find((key) => !allowedFields.has(key)) ?? null;
 }
 
@@ -1449,149 +1234,53 @@ function isRealDate(value: string): boolean {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-async function readAllBuildings(env: Env): Promise<Building[]> {
-  const ids = await listBuildingIds(env);
-  const buildings = await Promise.all(
-    ids.map(async (id) => {
-      const raw = await buildingsKv(env).get(buildingKey(id));
-
-      if (!raw) {
-        return null;
-      }
-
-      return parseBuilding(raw, id);
-    }),
-  );
-
-  return buildings.filter(isBuilding);
-}
-
-async function readBuildingsSummary(env: Env): Promise<Building[]> {
-  const memorySummary = summaryMemoryCache.get(summaryMemoryKey(env));
-
-  if (memorySummary) {
-    return memorySummary;
-  }
-
-  const snapshot = await readSummaryFromKv(env);
-
-  if (snapshot) {
-    await writeSummaryCache(env, snapshot);
+async function readBuildingsSummary(env: Env): Promise<PublicBuildingsSnapshot> {
+  const key = summaryMemoryKey(env);
+  const cached = summaryMemoryCache.get(key);
+  if (cached) return cached;
+  const kv = buildingsKv(env);
+  const pending = summaryReads.get(kv);
+  if (pending) return pending;
+  const read = (async () => {
+    const raw = await kv.get(PUBLIC_BUILDINGS_KEY, { cacheTtl: 60 });
+    let value: unknown;
+    try { value = raw === null ? null : JSON.parse(raw); } catch { value = null; }
+    let snapshot: PublicBuildingsSnapshot;
+    if (isPublicSnapshot(value)) snapshot = value;
+    else {
+      const stub = env.AUTH_STORE.get(env.AUTH_STORE.idFromName(AUTH_STORE_NAME));
+      const response = await stub.fetch(new Request('https://auth-store.local/', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'publicBuildingSnapshot' }),
+      }));
+      const result = await response.json() as { status: number; body: unknown };
+      if (!response.ok || result.status !== 200 || !isPublicSnapshot(result.body))
+        throw new Error('Building catalog recovery unavailable');
+      snapshot = result.body;
+    }
+    summaryMemoryCache.set(key, snapshot);
     return snapshot;
-  }
-
-  const buildings = await readAllBuildings(env);
-  buildings.sort(compareBuildingsForSummary);
-  await writeSummaryKv(env, buildings);
-  await writeSummaryCache(env, buildings);
-  return buildings;
-}
-
-async function rebuildBuildingsSummary(env: Env): Promise<Building[]> {
-  const buildings = await readAllBuildings(env);
-  buildings.sort(compareBuildingsForSummary);
-  await writeSummaryKv(env, buildings);
-  await writeSummaryCache(env, buildings);
-  return buildings;
-}
-
-async function upsertBuildingSummary(env: Env, building: Building): Promise<Building[]> {
-  return upsertBuildingsSummary(env, [building]);
-}
-
-async function upsertBuildingsSummary(env: Env, buildings: Building[]): Promise<Building[]> {
-  return updateBuildingsSummary(env, (current) => {
-    const byId = new Map(current.map((building) => [building.id, building]));
-    for (const building of buildings) {
-      byId.set(building.id, building);
-    }
-    return [...byId.values()];
-  });
-}
-
-async function removeBuildingFromSummary(env: Env, id: string): Promise<Building[]> {
-  return updateBuildingsSummary(env, (current) => current.filter((building) => building.id !== id));
-}
-
-async function updateBuildingsSummary(
-  env: Env,
-  update: (buildings: Building[]) => Building[],
-): Promise<Building[]> {
-  return queueSummaryUpdate(env, async () => {
-    const current = await readBuildingsMutationSnapshot(env);
-    const buildings = update([...current]);
-    buildings.sort(compareBuildingsForSummary);
-    await writeSummaryKv(env, buildings);
-    await writeSummaryCache(env, buildings);
-    return buildings;
-  });
-}
-
-async function readBuildingsMutationSnapshot(env: Env): Promise<Building[]> {
-  return await readSummaryFromKv(env) ?? await rebuildBuildingsSummary(env);
-}
-
-async function readSummaryFromKv(env: Env): Promise<Building[] | null> {
-  const raw = await buildingsKv(env).get(SUMMARY_KV_KEY);
-
-  if (raw) {
-    try {
-      return normalizeSummary(JSON.parse(raw) as unknown);
-    } catch (error) {
-      console.warn('Building summary snapshot is corrupt', error);
-    }
-  }
-
-  return null;
-}
-
-async function writeSummaryKv(env: Env, buildings: Building[]): Promise<void> {
-  await buildingsKv(env).put(SUMMARY_KV_KEY, JSON.stringify(buildings));
-}
-
-function normalizeSummary(value: unknown): Building[] | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-
-  const buildings = value.filter(isBuildingDocument);
-  buildings.sort(compareBuildingsForSummary);
-  return buildings;
-}
-
-function compareBuildingsForSummary(a: Building, b: Building): number {
-  return b.buildDate.localeCompare(a.buildDate);
-}
-
-function parseBuilding(raw: string, id: string): Building | null {
+  })();
+  summaryReads.set(kv, read);
   try {
-    const building = JSON.parse(raw) as unknown;
-
-    if (!building || typeof building !== 'object' || Array.isArray(building)) {
-      throw new Error('record is not an object');
-    }
-
-    if (!isBuildingDocument(building) || building.id !== id) {
-      throw new Error('record does not match current building schema');
-    }
-
-    return building;
-  } catch (error) {
-    console.warn('Skipping corrupt building record', id, error);
-    return null;
+    return await read;
+  } finally {
+    if (summaryReads.get(kv) === read) summaryReads.delete(kv);
   }
 }
 
-function isBuilding(building: Building | null): building is Building {
-  return building !== null;
+async function readBuildingsMutationSnapshot(env: BuildingEnv): Promise<Building[]> {
+  return env.buildingStore.buildings();
+}
+function isPublicSnapshot(value: unknown): value is PublicBuildingsSnapshot {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const snapshot = value as PublicBuildingsSnapshot;
+  return Number.isSafeInteger(snapshot.version) && snapshot.version >= 0
+    && Array.isArray(snapshot.buildings) && snapshot.buildings.every(isBuildingDocument);
 }
 
-function isUnknownBuilding(building: unknown): building is Building {
-  return Boolean(building && typeof building === 'object' && !Array.isArray(building));
-}
-
-function isBuildingDocument(building: unknown): building is Building {
-  if (!isUnknownBuilding(building)) {
+export function isBuildingDocument(building: unknown): building is Building {
+  if (!building || typeof building !== 'object' || Array.isArray(building)) {
     return false;
   }
 
@@ -1607,29 +1296,14 @@ function isBuildingDocument(building: unknown): building is Building {
   );
 }
 
-function isBuildingSubmission(value: unknown): value is BuildingSubmission {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-  const submission = value as Partial<BuildingSubmission>;
-  return (
-    typeof submission.id === 'string' &&
-    isValidBuildingId(submission.id) &&
-    (submission.status === 'pending' ||
-      submission.status === 'approved' ||
-      submission.status === 'rejected') &&
-    typeof submission.submitterUuid === 'string' &&
-    UUID_RE.test(submission.submitterUuid) &&
-    typeof submission.submitterName === 'string' &&
-    isUnknownBuilding(submission.payload)
-  );
-}
-
-async function findDuplicateBuildingId(env: Env, input: Input): Promise<string | null> {
+async function findDuplicateBuildingId(env: BuildingEnv, input: Input): Promise<string | null> {
   return findDuplicateBuildingIdInList(await readBuildingsMutationSnapshot(env), input);
 }
 
-function findDuplicateBuildingIdInList(buildings: (Input | Building)[], input: Input): string | null {
+function findDuplicateBuildingIdInList(
+  buildings: (Input | Building)[],
+  input: Input,
+): string | null {
   for (const building of buildings) {
     if ('id' in building && isDuplicateBuilding(building, input)) {
       return building.id;
@@ -1662,24 +1336,23 @@ function findDuplicateInput(inputs: Input[], existing: Building[]): string | nul
 function isDuplicateBuilding(left: Input | Building, right: Input | Building): boolean {
   return (
     (left.name['zh-CN'] === right.name['zh-CN'] || left.name.en === right.name.en) &&
+    left.coordinates.world === right.coordinates.world &&
     left.buildDate === right.buildDate &&
     left.builders[0]?.uuid === right.builders[0]?.uuid
   );
 }
 
-async function createBuildingId(env: Env): Promise<string> {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`.slice(0, 16);
-
-    if (!(await buildingsKv(env).get(buildingKey(id)))) {
-      return id;
-    }
+async function createBuildingId(env: BuildingEnv): Promise<string> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const id = crypto.randomUUID().replaceAll('-', '').slice(0, 16);
+    if (!env.buildingStore.building(id)) return id;
   }
-
   throw new Error('Could not allocate building id');
 }
-
-function localizeBuilding(building: Building, locale: string): Omit<Building, 'name' | 'description' | 'tags' | 'source'> & {
+function localizeBuilding(
+  building: Building,
+  locale: string,
+): Omit<Building, 'name' | 'description' | 'tags' | 'source'> & {
   name: string;
   description: string;
   tags?: (string | undefined)[];
@@ -1701,256 +1374,21 @@ function localizeBuilding(building: Building, locale: string): Omit<Building, 'n
   };
 }
 
-async function listBuildingIds(env: Env): Promise<string[]> {
-  const ids: string[] = [];
-  let cursor: string | undefined;
-
-  do {
-    const page = await buildingsKv(env).list({ prefix: BUILDING_KEY_PREFIX, cursor });
-
-    for (const key of page.keys) {
-      const id = key.name.slice(BUILDING_KEY_PREFIX.length);
-
-      if (isValidBuildingId(id)) {
-        ids.push(id);
-      }
-    }
-
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
-
-  return [...new Set(ids)];
-}
-
 function buildingsKv(env: Env): KVNamespace {
   return env.BUILDINGS_KV;
 }
 
-function buildingKey(id: string): string {
-  return `${BUILDING_KEY_PREFIX}${id}`;
+async function writeBuilding(env: BuildingEnv, building: Building): Promise<void> {
+  env.buildingStore.saveBuilding(building);
 }
-
-function submissionKey(id: string): string {
-  return `${SUBMISSION_KEY_PREFIX}${id}`;
+async function readSubmission(env: BuildingEnv, id: string): Promise<BuildingSubmission | null> {
+  return env.buildingStore.submission(id);
 }
-
-function playerSubmissionPrefix(playerUuid: string): string {
-  return `${SUBMISSION_PLAYER_INDEX_PREFIX}${playerUuid}:`;
+async function writeSubmission(env: BuildingEnv, submission: BuildingSubmission): Promise<void> {
+  env.buildingStore.saveSubmission(submission);
 }
-
-function playerSubmissionKey(playerUuid: string, submissionId: string): string {
-  return `${playerSubmissionPrefix(playerUuid)}${submissionId}`;
-}
-
-function playerPendingSubmissionPrefix(playerUuid: string): string {
-  return `${SUBMISSION_PLAYER_PENDING_INDEX_PREFIX}${playerUuid}:`;
-}
-
-function playerPendingSubmissionKey(playerUuid: string, submissionId: string): string {
-  return `${playerPendingSubmissionPrefix(playerUuid)}${submissionId}`;
-}
-
-function submissionStatusPrefix(status: BuildingSubmission['status']): string {
-  return `${SUBMISSION_STATUS_INDEX_PREFIX}${status}:`;
-}
-
-function submissionStatusKey(status: BuildingSubmission['status'], submissionId: string): string {
-  return `${submissionStatusPrefix(status)}${submissionId}`;
-}
-
-function writeBuilding(env: Env, building: Building): Promise<void> {
-  return buildingsKv(env).put(buildingKey(building.id), JSON.stringify(building));
-}
-
-async function readSubmission(env: Env, id: string): Promise<BuildingSubmission | null> {
-  return readSubmissionByKey(env, submissionKey(id));
-}
-
-async function readSubmissionByKey(env: Env, key: string): Promise<BuildingSubmission | null> {
-  const raw = await buildingsKv(env).get(key);
-  if (!raw) {
-    return null;
-  }
-
-  try {
-    const value = JSON.parse(raw) as unknown;
-    return isBuildingSubmission(value) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeSubmission(env: Env, submission: BuildingSubmission): Promise<void> {
-  return buildingsKv(env).put(submissionKey(submission.id), JSON.stringify(submission));
-}
-
-function writeRejectedSubmission(
-  env: Env,
-  submission: BuildingSubmission,
-  expirationTtl = REJECTED_SUBMISSION_RETENTION_SECONDS,
-): Promise<void[]> {
-  return Promise.all([
-    buildingsKv(env).put(submissionKey(submission.id), JSON.stringify(submission), {
-      expirationTtl,
-    }),
-    buildingsKv(env).delete(playerPendingSubmissionKey(submission.submitterUuid.toLowerCase(), submission.id)),
-    buildingsKv(env).delete(submissionStatusKey('pending', submission.id)),
-    ...writeSubmissionIndexes(env, submission, expirationTtl),
-  ]);
-}
-
-function writeSubmissionIndexes(
-  env: Env,
-  submission: BuildingSubmission,
-  expirationTtl?: number,
-): Promise<void>[] {
-  const playerUuid = submission.submitterUuid.toLowerCase();
-  const writeOptions = expirationTtl ? { expirationTtl } : undefined;
-  const writes = [
-    buildingsKv(env).put(playerSubmissionKey(playerUuid, submission.id), submission.id, writeOptions),
-    buildingsKv(env).put(submissionStatusKey(submission.status, submission.id), submission.id, writeOptions),
-  ];
-
-  if (submission.status === 'pending') {
-    writes.push(
-      buildingsKv(env).put(playerPendingSubmissionKey(playerUuid, submission.id), submission.id),
-    );
-  }
-
-  return writes;
-}
-
-async function ensureSubmissionIndexes(env: Env): Promise<void> {
-  const readyMemoryKey = submissionIndexReadyMemoryKey(env);
-
-  if (submissionIndexReadyMemoryCache.get(readyMemoryKey)) {
-    return;
-  }
-
-  if ((await buildingsKv(env).get(SUBMISSION_INDEX_READY_KEY)) === 'ready') {
-    submissionIndexReadyMemoryCache.set(readyMemoryKey, true);
-    return;
-  }
-
-  const keys = await listKvKeys(env, SUBMISSION_KEY_PREFIX);
-  await Promise.all(
-    keys.map(async (key) => {
-      const submission = await readSubmissionByKey(env, key);
-      if (!submission) {
-        return;
-      }
-      if (isExpiredRejectedSubmission(submission)) {
-        await deleteSubmission(env, submission);
-        return;
-      }
-      if (submission.status === 'rejected') {
-        const ttl = rejectedSubmissionRemainingTtlSeconds(submission);
-        if (ttl <= 0) {
-          await deleteSubmission(env, submission);
-          return;
-        }
-        await Promise.all([
-          buildingsKv(env).put(submissionKey(submission.id), JSON.stringify(submission), {
-            expirationTtl: ttl,
-          }),
-          ...writeSubmissionIndexes(env, submission, ttl),
-        ]);
-        return;
-      }
-      await Promise.all(writeSubmissionIndexes(env, submission));
-    }),
-  );
-  await buildingsKv(env).put(SUBMISSION_INDEX_READY_KEY, 'ready');
-  submissionIndexReadyMemoryCache.set(readyMemoryKey, true);
-}
-
-function deleteSubmission(env: Env, submission: BuildingSubmission): Promise<void[]> {
-  return Promise.all([
-    buildingsKv(env).delete(submissionKey(submission.id)),
-    buildingsKv(env).delete(playerSubmissionKey(submission.submitterUuid.toLowerCase(), submission.id)),
-    buildingsKv(env).delete(playerPendingSubmissionKey(submission.submitterUuid.toLowerCase(), submission.id)),
-    ...SUBMISSION_STATUSES.map((status) =>
-      buildingsKv(env).delete(submissionStatusKey(status, submission.id)),
-    ),
-  ]);
-}
-
-function isExpiredRejectedSubmission(submission: BuildingSubmission, now = new Date()): boolean {
-  if (submission.status !== 'rejected') {
-    return false;
-  }
-  const expiresAt = rejectedSubmissionExpiresAt(submission);
-  return Number.isFinite(expiresAt) && expiresAt <= now.getTime();
-}
-
-function rejectedSubmissionRemainingTtlSeconds(
-  submission: BuildingSubmission,
-  now = new Date(),
-): number {
-  const expiresAt = rejectedSubmissionExpiresAt(submission);
-  if (!Number.isFinite(expiresAt)) {
-    return 0;
-  }
-  return Math.ceil((expiresAt - now.getTime()) / 1000);
-}
-
-function rejectedSubmissionExpiresAt(submission: BuildingSubmission): number {
-  return Date.parse(
-    submission.expiresAt ??
-      addRetentionDays(submission.rejectedAt ?? submission.updatedAt ?? submission.createdAt),
-  );
-}
-
 function parseSubmissionStatus(value: string | null): BuildingSubmission['status'] | null {
   return value === 'pending' || value === 'approved' || value === 'rejected' ? value : null;
-}
-
-function addRetentionDays(value: string | undefined): string {
-  const timestamp = Date.parse(value ?? '');
-  if (!Number.isFinite(timestamp)) {
-    return '';
-  }
-  return new Date(timestamp + REJECTED_SUBMISSION_RETENTION_MS).toISOString();
-}
-
-async function listKvKeys(env: Env, prefix: string): Promise<string[]> {
-  const keys: string[] = [];
-  let cursor: string | undefined;
-
-  do {
-    const page = await buildingsKv(env).list({ prefix, cursor });
-    keys.push(...page.keys.map((key) => key.name));
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
-
-  return keys;
-}
-
-async function writeSummaryCache(env: Env, buildings: Building[]): Promise<void> {
-  summaryMemoryCache.set(summaryMemoryKey(env), buildings);
-  buildingListMemoryCache.deletePrefix(buildingListMemoryPrefix(env));
-}
-
-async function readCachedBuilding(env: Env, id: string): Promise<Building | null> {
-  const memoryBuilding = buildingMemoryCache.get(buildingMemoryKey(env, id));
-
-  if (memoryBuilding) {
-    return memoryBuilding;
-  }
-
-  const cached = await readJsonCache(buildingCacheKey(id));
-
-  if (!isBuildingDocument(cached)) {
-    return null;
-  }
-
-  buildingMemoryCache.set(buildingMemoryKey(env, id), cached);
-  return cached;
-}
-
-async function writeBuildingCache(env: Env, building: Building): Promise<void> {
-  buildingMemoryCache.set(buildingMemoryKey(env, building.id), building);
-  await writeJsonCache(buildingCacheKey(building.id), building);
 }
 
 async function readBuildingListCache(env: Env, cacheKey: string): Promise<unknown[] | null> {
@@ -1974,21 +1412,6 @@ async function readBuildingListCache(env: Env, cacheKey: string): Promise<unknow
 async function writeBuildingListCache(env: Env, cacheKey: string, body: unknown[]): Promise<void> {
   buildingListMemoryCache.set(buildingListMemoryKey(env, cacheKey), body);
   await writeJsonCache(cacheKey, body);
-}
-
-async function deleteBuildingCache(env: Env, id: string): Promise<void> {
-  buildingMemoryCache.delete(buildingMemoryKey(env, id));
-  const cache = getWorkerCache();
-
-  if (!cache) {
-    return;
-  }
-
-  try {
-    await cache.delete(cacheRequest(buildingCacheKey(id)));
-  } catch (error) {
-    console.warn('Building cache delete failed', id, error);
-  }
 }
 
 async function readJsonCache(cacheKey: string): Promise<unknown | null> {
@@ -2045,27 +1468,9 @@ async function writeJsonCache(cacheKey: string, body: unknown): Promise<void> {
   }
 }
 
-function buildingCacheKey(id: string): string {
-  return `${BUILDINGS_CACHE_VERSION}:building:${id}`;
+function buildingListCacheKey(request: Request, version: number): string {
+  return `${BUILDINGS_CACHE_VERSION}:building-list:${version}:${canonicalBuildingListQuery(request)}`;
 }
-
-function buildingListCacheKey(request: Request, buildings: Building[]): string {
-  return `${BUILDINGS_CACHE_VERSION}:building-list:${buildingsSummaryVersion(buildings)}:${canonicalBuildingListQuery(request)}`;
-}
-
-function buildingsSummaryVersion(buildings: Building[]): string {
-  let hash = 5381;
-
-  for (const building of buildings) {
-    const part = `${building.id}:${building.updatedAt};`;
-    for (let index = 0; index < part.length; index += 1) {
-      hash = ((hash << 5) + hash + part.charCodeAt(index)) >>> 0;
-    }
-  }
-
-  return `${buildings.length}:${hash.toString(36)}`;
-}
-
 function canonicalBuildingListQuery(request: Request): string {
   const params = new URL(request.url).searchParams;
   const relevant = ['builder', 'locale', 'tag', 'type'];
@@ -2088,28 +1493,8 @@ function summaryMemoryKey(env: Env): string {
   return `${memoryCacheScope(env)}:${SUMMARY_CACHE_KEY}`;
 }
 
-function buildingMemoryKey(env: Env, id: string): string {
-  return `${memoryCacheScope(env)}:${id}`;
-}
-
 function buildingListMemoryKey(env: Env, cacheKey: string): string {
   return `${memoryCacheScope(env)}:${cacheKey}`;
-}
-
-function buildingListMemoryPrefix(env: Env): string {
-  return `${memoryCacheScope(env)}:${BUILDINGS_CACHE_VERSION}:building-list:`;
-}
-
-function submissionIndexReadyMemoryKey(env: Env): string {
-  return `${memoryCacheScope(env)}:${SUBMISSION_INDEX_READY_KEY}`;
-}
-
-function queueSummaryUpdate<T>(env: Env, task: () => Promise<T>): Promise<T> {
-  const kv = buildingsKv(env) as object;
-  const previous = summaryUpdateQueues.get(kv) ?? Promise.resolve();
-  const next = previous.catch(() => undefined).then(task);
-  summaryUpdateQueues.set(kv, next.catch(() => undefined));
-  return next;
 }
 
 function memoryCacheScope(env: Env): string {
@@ -2145,23 +1530,24 @@ async function coordinateAdminBuildingMutation(
     return requestBody.response;
   }
 
-  const response = await env.AUTH_STORE.get(env.AUTH_STORE.idFromName(AUTH_STORE_NAME)).fetch('https://auth-store.local/', {
-    method: 'POST',
-    body: JSON.stringify({
-      action: 'adminBuildingMutation',
-      routePath,
-      method: request.method,
-      url: request.url,
-      headers: adminMutationHeaders(request),
-      requestBody: requestBody.text,
-      actor,
-    }),
-  });
+  const response = await env.AUTH_STORE.get(env.AUTH_STORE.idFromName(AUTH_STORE_NAME)).fetch(
+    'https://auth-store.local/',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'adminBuildingMutation',
+        routePath,
+        method: request.method,
+        url: request.url,
+        headers: adminMutationHeaders(request),
+        requestBody: requestBody.text,
+        actor,
+      }),
+    },
+  );
   const result = (await response.json().catch(() => ({}))) as { status?: unknown; body?: unknown };
   const status = typeof result.status === 'number' ? result.status : 500;
-  if (status >= 200 && status < 300) {
-    await refreshFrontCacheAfterAdminMutation(routePath, result.body, env);
-  }
+
   return json(result.body ?? { error: 'internal_error' }, status, request, env);
 }
 
@@ -2242,45 +1628,6 @@ function isSameOriginBrowserRequest(request: Request): boolean {
   return true;
 }
 
-async function refreshFrontCacheAfterAdminMutation(routePath: string, body: unknown, env: Env): Promise<void> {
-  try {
-    await deleteMutationBodyBuildingCache(body, env);
-    await cacheMutationBodyBuildings(body, env);
-
-    if (!mutationChangesBuildingSummary(routePath)) {
-      return;
-    }
-
-    const summary = await readSummaryFromKv(env);
-    if (summary) {
-      await writeSummaryCache(env, summary);
-    }
-  } catch (error) {
-    console.warn('Front building cache refresh failed', error);
-  }
-}
-
-async function deleteMutationBodyBuildingCache(body: unknown, env: Env): Promise<void> {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return;
-  }
-
-  const deleted = (body as Record<string, unknown>).deleted;
-  if (typeof deleted === 'string' && isValidBuildingId(deleted)) {
-    await deleteBuildingCache(env, deleted);
-  }
-}
-
-function mutationChangesBuildingSummary(routePath: string): boolean {
-  return (
-    routePath === '/buildings' ||
-    routePath === '/buildings/import' ||
-    routePath === '/building-submissions/repair-approved' ||
-    /^\/buildings\/[a-z0-9]{8,24}$/i.test(routePath) ||
-    /^\/building-submissions\/[a-z0-9]{8,24}\/approve$/i.test(routePath)
-  );
-}
-
 function error(message: string, status: number, request: Request, env: Env): Response {
   return json({ error: message }, status, request, env);
 }
@@ -2304,7 +1651,6 @@ function isSubmissionRoute(routePath: string): boolean {
   return (
     routePath === '/building-submissions' ||
     routePath === '/building-submissions/mine' ||
-    routePath === '/building-submissions/repair-approved' ||
     /^\/building-submissions\/[a-z0-9]{8,24}(?:\/(?:approve|reject))?$/i.test(routePath)
   );
 }
@@ -2314,47 +1660,9 @@ function isAdminBuildingsRoute(routePath: string): boolean {
     routePath === '/buildings' ||
     routePath === '/buildings/import' ||
     routePath === '/building-submissions' ||
-    routePath === '/building-submissions/repair-approved' ||
     /^\/buildings\/[a-z0-9]{8,24}$/i.test(routePath) ||
     /^\/building-submissions\/[a-z0-9]{8,24}(?:\/(?:approve|reject))?$/i.test(routePath)
   );
-}
-
-async function cacheMutationResponseBuildings(response: Response, env: Env): Promise<void> {
-  const contentType = response.headers.get('Content-Type') ?? '';
-
-  if (!contentType.toLowerCase().includes('application/json')) {
-    return;
-  }
-
-  try {
-    const body = (await response.json()) as unknown;
-    await cacheMutationBodyBuildings(body, env);
-  } catch (error) {
-    console.warn('Building mutation cache update failed', error);
-  }
-}
-
-async function cacheMutationBodyBuildings(body: unknown, env: Env): Promise<void> {
-  if (isBuildingDocument(body)) {
-    await writeBuildingCache(env, body);
-    return;
-  }
-
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return;
-  }
-
-  const building = (body as Record<string, unknown>).building;
-  if (isBuildingDocument(building)) {
-    await writeBuildingCache(env, building);
-  }
-
-  const buildings = (body as Record<string, unknown>).buildings;
-
-  if (Array.isArray(buildings)) {
-    await Promise.all(buildings.filter(isBuildingDocument).map((item) => writeBuildingCache(env, item)));
-  }
 }
 
 async function readImportInputs(
@@ -2432,6 +1740,11 @@ function auditBuildingMutation(action: string, id: string, request: Request): vo
   console.log('building mutation', {
     action,
     id,
-    actor: request.headers.get('X-Admin-Email') ?? request.headers.get('X-Admin-Subject') ?? 'unknown',
+    actor:
+      request.headers.get('X-Admin-Email') ?? request.headers.get('X-Admin-Subject') ?? 'unknown',
   });
+}
+
+function nextUpdatedAt(previous: string): string {
+  return new Date(Math.max(Date.now(), Date.parse(previous) + 1)).toISOString();
 }

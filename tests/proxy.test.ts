@@ -131,7 +131,6 @@ function createEnvWithUnavailableKv(): Env {
   return {
     BUILDINGS_KV: unavailableKv,
     AUTH_STORE: {} as DurableObjectNamespace,
-    AUTH_STORE_RATE_LIMITER: createRateLimit(),
     AUTH_CLIENT_RATE_LIMITER: createRateLimit(),
     AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(),
     AUTH_SENSITIVE_RATE_LIMITER: createRateLimit(),
