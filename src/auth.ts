@@ -1233,6 +1233,8 @@ export class AuthStore implements DurableObject {
     try {
       const response = await this.env.VPC_SERVICE.fetch(new URL('/api/chat/authorize', this.env.MINECRAFT_SERVER_URL), {
         method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        // Workers supports follow/manual only; non-2xx responses are rejected below.
+        redirect: 'manual',
         body: JSON.stringify({ connectionId, playerUuid: session.playerUuid, playerName: account.currentName,
           sessionRef: session.sidHash, authenticatedAt: Date.parse(session.authenticatedAt), checkedAt, expiresAt }),
         signal: AbortSignal.timeout(5000),
@@ -1260,6 +1262,7 @@ export class AuthStore implements DurableObject {
     try {
       const response = await this.env.VPC_SERVICE.fetch(new URL('/api/chat/revoke', this.env.MINECRAFT_SERVER_URL), {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionRefs }),
+        redirect: 'manual',
         signal: AbortSignal.timeout(3000),
       });
       if (!response.ok) throw new Error('chat_revocation_failed');

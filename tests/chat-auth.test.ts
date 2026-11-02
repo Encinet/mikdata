@@ -4,22 +4,23 @@ import { authCall, OTHER_UUID, PLAYER_UUID, seedSession, testAuthEnv, testAuthSt
 
 const CONNECTION = 'A'.repeat(32);
 
-function chatStore(onControl: (path: string, body: Record<string, unknown>) => Response | Promise<Response>) {
+function chatStore(onControl: (path: string, body: Record<string, unknown>, init?: RequestInit) => Response | Promise<Response>) {
   return testAuthStore({ VPC_SERVICE: {
     fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       if (url.pathname.startsWith('/api/auth/accounts/')) return Response.json({ player: {
         uuid: url.pathname.split('/').at(-1), role: 'member', credentialsChangedAt: 0,
       } });
-      return onControl(url.pathname, JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
+      return onControl(url.pathname, JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>, init);
     },
   } as Fetcher });
 }
 
 test('chat authorization binds the cookie session owner and does not expose the grant to the browser', async () => {
   let grant: Record<string, unknown> = {};
-  const { store, values } = chatStore((path, body) => {
+  const { store, values } = chatStore((path, body, init) => {
     expect(path).toBe('/api/chat/authorize'); grant = body;
+    expect(init?.redirect).toBe('manual');
     return Response.json({ ok: true, lastActivityAt: 0 });
   });
   const { token, record } = await seedSession(values);
@@ -69,8 +70,9 @@ test('only plugin-attested message activity can coalesce an idle-session touch',
 test('logout deletes authority before notifying every connection of that exact session', async () => {
   let expectedRef = '';
   const notifications: unknown[] = [];
-  const { store, values } = chatStore((path, body) => {
+  const { store, values } = chatStore((path, body, init) => {
     expect(path).toBe('/api/chat/revoke');
+    expect(init?.redirect).toBe('manual');
     expect(values.has(`session:${expectedRef}`)).toBe(false);
     notifications.push(body.sessionRefs); return Response.json({ ok: true });
   });
@@ -91,8 +93,8 @@ test('signing out all sessions notifies all own session references and preserves
   expect(values.has(`session:${foreign.record.sidHash}`)).toBe(true);
 });
 
-test('plugin unavailability never reports chat authorization success', async () => {
-  const { store, values } = chatStore(() => new Response(null, { status: 503 }));
+test.each([503, 307])('plugin failure or redirect (%i) never reports chat authorization success', async (status) => {
+  const { store, values } = chatStore(() => new Response(null, { status, headers: { Location: 'https://untrusted.invalid' } }));
   const { token } = await seedSession(values);
   expect((await authCall(store, { action: 'authorizeWebChat', sessionId: token, connectionId: CONNECTION })).status).toBe(503);
 });
