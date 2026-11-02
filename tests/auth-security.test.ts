@@ -21,7 +21,7 @@ const sessionCount = (values: Map<string, unknown>) =>
 
 test('one game approval issues one session across parallel completion and reconfirmation', async () => {
   const { store, values } = testAuthStore();
-  const created = await authCall(store, { action: 'createMinecraftChallenge' });
+  const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   const results = await Promise.all([
     authCall(store, completion(created.body)),
     authCall(store, completion(created.body)),
@@ -33,7 +33,7 @@ test('one game approval issues one session across parallel completion and reconf
 
 test('storage failure rolls back challenge consumption and session creation, allowing retry', async () => {
   const { store, values, failNextPut } = testAuthStore();
-  const created = await authCall(store, { action: 'createMinecraftChallenge' });
+  const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   failNextPut('session:');
   expect((await authCall(store, completion(created.body))).status).toBe(500);
   expect(sessionCount(values)).toBe(0);
@@ -46,7 +46,7 @@ test('storage failure rolls back challenge consumption and session creation, all
 
 test('game status and completion both require the initiating browser', async () => {
   const { store } = testAuthStore();
-  const created = await authCall(store, { action: 'createMinecraftChallenge' });
+  const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   expect(
     (
       await authCall(store, {
@@ -55,7 +55,7 @@ test('game status and completion both require the initiating browser', async () 
         browserNonce: 'wrong',
       })
     ).status,
-  ).toBe(404);
+  ).toBe(403);
   expect(
     (await authCall(store, { ...completion(created.body), browserNonce: 'wrong' })).status,
   ).toBe(403);
@@ -76,7 +76,7 @@ test('parallel status polling makes one plugin request', async () => {
       },
     } as Fetcher,
   });
-  const created = await authCall(store, { action: 'createMinecraftChallenge' });
+  const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   await Promise.all(
     Array.from({ length: 5 }, () =>
       authCall(store, { action: 'getMinecraftChallenge', ...created.body }),
@@ -97,7 +97,7 @@ test('moderator and custodian game accounts are eligible', async () => {
           }),
       } as Fetcher,
     });
-    const created = await authCall(store, { action: 'createMinecraftChallenge' });
+    const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
     expect((await authCall(store, completion(created.body))).status).toBe(200);
   }
 });
@@ -110,7 +110,7 @@ test('disabled accounts cannot be re-enabled by game login', async () => {
     role: 'member',
     disabledAt: new Date().toISOString(),
   });
-  const created = await authCall(store, { action: 'createMinecraftChallenge' });
+  const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   expect((await authCall(store, completion(created.body))).body.error).toBe('account_disabled');
   expect(sessionCount(values)).toBe(0);
 });
@@ -118,16 +118,19 @@ test('disabled accounts cannot be re-enabled by game login', async () => {
 test('a real zero-counter Passkey assertion is browser bound and consumed once in parallel', async () => {
   const { store, values } = testAuthStore();
   const key = await passkeyFixture(values);
-  const options = await authCall(store, { action: 'passkeyAuthenticationOptions' });
+  const options = await authCall(store, {
+    action: 'passkeyAuthenticationOptions',
+    purpose: 'login',
+  });
   const credential = await key.assertion(options.body.options.challenge);
   expect(
-    (await authCall(store, { action: 'passkeyLogin', credential, browserNonce: 'wrong' })).body
-      .error,
-  ).toBe('invalid_challenge');
+    (await authCall(store, { action: 'passkeyAuthenticate', credential, browserNonce: 'wrong' }))
+      .body.error,
+  ).toBe('invalid_browser_nonce');
   const results = await Promise.all(
     [0, 1].map(() =>
       authCall(store, {
-        action: 'passkeyLogin',
+        action: 'passkeyAuthenticate',
         credential,
         browserNonce: options.body.browserNonce,
       }),
@@ -138,7 +141,7 @@ test('a real zero-counter Passkey assertion is browser bound and consumed once i
   expect(
     (
       await authCall(store, {
-        action: 'passkeyLogin',
+        action: 'passkeyAuthenticate',
         credential,
         browserNonce: options.body.browserNonce,
       })
@@ -149,7 +152,10 @@ test('a real zero-counter Passkey assertion is browser bound and consumed once i
 test('Passkey authentication checks the user handle and user verification', async () => {
   const { store, values } = testAuthStore();
   const key = await passkeyFixture(values);
-  const options = await authCall(store, { action: 'passkeyAuthenticationOptions' });
+  const options = await authCall(store, {
+    action: 'passkeyAuthenticationOptions',
+    purpose: 'login',
+  });
   for (const credential of [
     await key.assertion(options.body.options.challenge, OTHER_UUID),
     await key.assertion(options.body.options.challenge, PLAYER_UUID, false),
@@ -157,7 +163,7 @@ test('Passkey authentication checks the user handle and user verification', asyn
     expect(
       (
         await authCall(store, {
-          action: 'passkeyLogin',
+          action: 'passkeyAuthenticate',
           credential,
           browserNonce: options.body.browserNonce,
         })
@@ -263,11 +269,14 @@ test('web revocation during an in-flight passkey login cannot recreate the crede
   const { store, values } = testAuthStore({}, { ...memory, storage });
   const session = await seedSession(values);
   const key = await passkeyFixture(values);
-  const options = await authCall(store, { action: 'passkeyAuthenticationOptions' });
+  const options = await authCall(store, {
+    action: 'passkeyAuthenticationOptions',
+    purpose: 'login',
+  });
   const credential = await key.assertion(options.body.options.challenge);
   pausedCredential = `passkey:${key.id}`;
   const login = authCall(store, {
-    action: 'passkeyLogin',
+    action: 'passkeyAuthenticate',
     credential,
     browserNonce: options.body.browserNonce,
   });
@@ -351,7 +360,7 @@ test('unknown routes and methods spend no auth-store or limiter budget', async (
   for (const [method, path] of [
     ['POST', '/auth/unknown'],
     ['POST', '/me/summary'],
-    ['GET', '/auth/passkeys/login'],
+    ['GET', '/auth/passkeys/authenticate'],
   ]) {
     const result = await worker.fetch(
       new Request(`https://data.mcmik.top${path}`, {
@@ -420,8 +429,12 @@ test('signing out all browsers uses the session owner, clears the current cookie
   const response = await worker.fetch(
     new Request('https://data.mcmik.top/me/sessions/revoke', {
       method: 'POST',
-      headers: { 'X-Mikweb-Auth': 'test-secret', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: actor.token, all: true, playerUuid: OTHER_UUID }),
+      headers: {
+        'X-Mikweb-Auth': 'test-secret',
+        'X-Mik-Session': actor.token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ all: true, playerUuid: OTHER_UUID, sessionId: 'untrusted-body' }),
     }),
     env,
     {} as ExecutionContext,
@@ -544,7 +557,10 @@ test('a successful login caps active sessions at sixteen without touching anothe
   const f = testAuthStore();
   for (let i = 0; i < 17; i++) await seedSession(f.values);
   const foreign = await seedSession(f.values, 0, OTHER_UUID);
-  const challenge = await authCall(f.store, { action: 'createMinecraftChallenge' });
+  const challenge = await authCall(f.store, {
+    action: 'createMinecraftChallenge',
+    purpose: 'login',
+  });
   expect((await authCall(f.store, completion(challenge.body))).status).toBe(200);
   expect(
     [...f.values.keys()].filter((key) => key.startsWith(`account-session:${PLAYER_UUID}:`)),

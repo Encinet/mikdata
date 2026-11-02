@@ -3,6 +3,8 @@ import worker from '../src/index';
 import { authCall, OTHER_UUID, PLAYER_UUID, seedSession, testAuthEnv, testAuthStore } from './helpers/auth-store';
 
 const CONNECTION = 'A'.repeat(32);
+const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+const CLIENT_PUBLIC_KEY = Buffer.from(await crypto.subtle.exportKey('raw', pair.publicKey)).toString('base64url');
 
 function chatStore(onControl: (path: string, body: Record<string, unknown>, init?: RequestInit) => Response | Promise<Response>) {
   return testAuthStore({ VPC_SERVICE: {
@@ -26,7 +28,7 @@ test('chat authorization binds the cookie session owner and does not expose the 
   const { token, record } = await seedSession(values);
   record.idleExpiresAt = new Date(Date.now() + 12_000).toISOString();
   values.set(`session:${record.sidHash}`, record);
-  const result = await authCall(store, { action: 'authorizeWebChat', sessionId: token, connectionId: CONNECTION,
+  const result = await authCall(store, { action: 'authorizeWebChat', sessionId: token, connectionId: CONNECTION, clientPublicKey: CLIENT_PUBLIC_KEY,
     playerUuid: OTHER_UUID, sessionRef: 'attacker', role: 'custodian' });
   expect(result).toEqual({ status: 200, body: { ok: true } });
   expect(grant.playerUuid).toBe(PLAYER_UUID);
@@ -34,6 +36,7 @@ test('chat authorization binds the cookie session owner and does not expose the 
   expect(grant.sessionRef).toMatch(/^[A-Za-z0-9_-]{43}$/);
   expect(grant).not.toHaveProperty('sessionId');
   expect(grant.connectionId).toBe(CONNECTION);
+  expect(grant.clientPublicKey).toBe(CLIENT_PUBLIC_KEY);
   expect(Number(grant.expiresAt)).toBeLessThanOrEqual(Date.parse(record.idleExpiresAt));
   expect(Number(grant.expiresAt) - Number(grant.checkedAt)).toBeLessThanOrEqual(60_000);
 });
@@ -41,7 +44,7 @@ test('chat authorization binds the cookie session owner and does not expose the 
 test('chat authorization rejects anonymous sessions and invalid connection locators before plugin work', async () => {
   let calls = 0;
   const { store } = chatStore(() => { calls++; return Response.json({ ok: true }); });
-  expect((await authCall(store, { action: 'authorizeWebChat', connectionId: CONNECTION })).status).toBe(401);
+  expect((await authCall(store, { action: 'authorizeWebChat', connectionId: CONNECTION, clientPublicKey: CLIENT_PUBLIC_KEY })).status).toBe(401);
   expect((await authCall(store, { action: 'authorizeWebChat', connectionId: { id: CONNECTION } })).status).toBe(422);
   expect(calls).toBe(0);
 });
@@ -52,7 +55,7 @@ test('timer-only chat renewal does not write or extend the web session', async (
   record.lastSeenAt = new Date(Date.now() - 11 * 60_000).toISOString();
   values.set(`session:${record.sidHash}`, record);
   for (let i = 0; i < 3; i++) expect((await authCall(store, {
-    action: 'authorizeWebChat', sessionId: token, connectionId: CONNECTION, lastActivityAt: Date.now(),
+    action: 'authorizeWebChat', sessionId: token, connectionId: CONNECTION, clientPublicKey: CLIENT_PUBLIC_KEY, lastActivityAt: Date.now(),
   })).status).toBe(200);
   expect(values.get(`session:${record.sidHash}`)).toEqual(record);
 });
@@ -62,7 +65,7 @@ test('only plugin-attested message activity can coalesce an idle-session touch',
   const { token, record } = await seedSession(values);
   record.lastSeenAt = new Date(Date.now() - 11 * 60_000).toISOString();
   values.set(`session:${record.sidHash}`, record);
-  expect((await authCall(store, { action: 'authorizeWebChat', sessionId: token, connectionId: CONNECTION })).status).toBe(200);
+  expect((await authCall(store, { action: 'authorizeWebChat', sessionId: token, connectionId: CONNECTION, clientPublicKey: CLIENT_PUBLIC_KEY })).status).toBe(200);
   const touched = values.get(`session:${record.sidHash}`) as typeof record;
   expect(Date.parse(touched.lastSeenAt)).toBeGreaterThan(Date.parse(record.lastSeenAt));
 });
@@ -96,7 +99,7 @@ test('signing out all sessions notifies all own session references and preserves
 test.each([503, 307])('plugin failure or redirect (%i) never reports chat authorization success', async (status) => {
   const { store, values } = chatStore(() => new Response(null, { status, headers: { Location: 'https://untrusted.invalid' } }));
   const { token } = await seedSession(values);
-  expect((await authCall(store, { action: 'authorizeWebChat', sessionId: token, connectionId: CONNECTION })).status).toBe(503);
+  expect((await authCall(store, { action: 'authorizeWebChat', sessionId: token, connectionId: CONNECTION, clientPublicKey: CLIENT_PUBLIC_KEY })).status).toBe(503);
 });
 
 test('chat authorization is limited per account across browser sessions and client addresses', async () => {
@@ -105,16 +108,16 @@ test('chat authorization is limited per account across browser sessions and clie
   const first = await seedSession(values), second = await seedSession(values);
   for (let i = 0; i < 20; i++) expect((await authCall(store, {
     action: 'authorizeWebChat', sessionId: i % 2 ? first.token : second.token,
-    connectionId: CONNECTION, clientKey: `different-ip-${i}`,
+    connectionId: CONNECTION, clientPublicKey: CLIENT_PUBLIC_KEY, clientKey: `different-ip-${i}`,
   })).status).toBe(200);
-  expect((await authCall(store, { action: 'authorizeWebChat', sessionId: first.token, connectionId: CONNECTION })).status).toBe(429);
+  expect((await authCall(store, { action: 'authorizeWebChat', sessionId: first.token, connectionId: CONNECTION, clientPublicKey: CLIENT_PUBLIC_KEY })).status).toBe(429);
   expect(calls).toBe(20);
 });
 
 test('third-party callers cannot use the private chat authorization endpoint', async () => {
   let calls = 0;
   const response = await worker.fetch(new Request('https://data.mcmik.top/me/chat/authorize', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId: CONNECTION }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId: CONNECTION, clientPublicKey: CLIENT_PUBLIC_KEY }),
   }), testAuthEnv({ AUTH_STORE: { idFromName: () => { calls++; throw new Error('must not reach store'); } } as unknown as DurableObjectNamespace }), {} as ExecutionContext);
   expect(response.status).toBe(403);
   expect(response.headers.has('Access-Control-Allow-Origin')).toBe(false);

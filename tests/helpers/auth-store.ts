@@ -161,8 +161,17 @@ export function testAuthEnv(overrides: Partial<Env> = {}): Env {
 
 export function testAuthStore(overrides: Partial<Env> = {}, memory = memoryAuthStorage()) {
   const env = testAuthEnv(overrides);
-  const store = new AuthStore({ storage: memory.storage } as DurableObjectState, env);
-  return { store, env, ...memory };
+  const background: Promise<unknown>[] = [];
+  const store = new AuthStore(
+    {
+      storage: memory.storage,
+      waitUntil: (promise: Promise<unknown>) => {
+        background.push(promise);
+      },
+    } as DurableObjectState,
+    env,
+  );
+  return { store, env, background, ...memory };
 }
 
 export async function authCall(store: AuthStore, body: Record<string, unknown>) {

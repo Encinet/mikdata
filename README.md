@@ -28,7 +28,7 @@ Admin UI and write API:
 - `PUT /admin/api/building-submissions/:id/approve`
 - `PUT /admin/api/building-submissions/:id/reject`
 
-Private MikWeb endpoints use `/auth/*` and `/me/*` and require `MIKWEB_AUTH_CLIENT_SECRET`.
+Private MikWeb endpoints use `/auth/*` and `/me/*` and require `MIKWEB_AUTH_CLIENT_SECRET`. The BFF supplies session authority through `X-Mik-Session` and login binding through `X-Mik-Browser-Nonce`; JSON bodies carry operation inputs.
 
 ## Security and storage
 
@@ -48,11 +48,15 @@ Rate limits per 60 seconds:
 | Public data | 120 | Client IP |
 | Minecraft challenge creation | 8 | Client key |
 | Challenge completion and Passkey login | 20 | Action and client key |
+| Passkey registration options | 8 | Session |
+| Passkey and session naming | 20 | Account |
 | All auth requests | 60 | Client key |
 
 ## Login and chat
 
-Login supports Minecraft codes and discoverable Passkeys. The plugin verifies current membership; sessions expire after 30 days idle or 90 days absolute. Passkeys and sessions are managed at `https://mcmik.top/account/security`. Adding or revoking Passkeys and revoking other sessions require authentication within the last five minutes.
+Login supports Minecraft codes and discoverable Passkeys. The plugin verifies current membership; sessions expire after 30 days idle or 90 days absolute. Passkeys and sessions are managed at `https://mcmik.top/account/security`. Sensitive changes require authentication within the last five minutes. Settings reauthenticate in place with an existing Passkey or in-game confirmation; successful reauthentication rotates the current session. Registration challenges are session-bound, single-use, and independently valid for five minutes. Authentication and sensitive writes refresh plugin account policy; ordinary reads retain the existing cache.
+
+`PATCH /auth/passkeys/:id` and `PATCH /me/sessions/:id` update an account-owned display name (up to 64 characters; empty resets it). Names are display metadata and do not refresh authentication. Session names survive reauthentication.
 
 `POST /me/chat/authorize` authorizes the browser's WebSocket connection through the private VPC service. Chat messages travel directly to the plugin through Cloudflare Tunnel; history stays in the browser. Tunnel configuration is documented in the mik plugin's `docs/web-chat.md`.
 

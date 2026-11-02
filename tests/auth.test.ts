@@ -20,7 +20,7 @@ test('minecraft challenge completion rejects non-member plugin confirmations', a
     } as Fetcher,
   });
 
-  const created = await callStore(store, { action: 'createMinecraftChallenge' });
+  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
 
   expect(created.status).toBe(200);
 
@@ -50,7 +50,7 @@ test('newcomer game access does not open a website account', async () => {
         ),
     } as Fetcher,
   });
-  const created = await callStore(store, { action: 'createMinecraftChallenge' });
+  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   const completed = await callStore(store, {
     action: 'completeMinecraftChallenge',
     challengeId: created.body.challengeId,
@@ -79,7 +79,7 @@ test('minecraft challenge completion reports unavailable plugin without creating
     } as Fetcher,
   });
 
-  const created = await callStore(store, { action: 'createMinecraftChallenge' });
+  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
 
   const completed = await callStore(store, {
     action: 'completeMinecraftChallenge',
@@ -108,7 +108,7 @@ test('minecraft challenge completion rejects malformed confirmed plugin players'
     } as Fetcher,
   });
 
-  const created = await callStore(store, { action: 'createMinecraftChallenge' });
+  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   const completed = await callStore(store, {
     action: 'completeMinecraftChallenge',
     challengeId: created.body.challengeId,
@@ -136,7 +136,7 @@ test('passkey registration options require resident credentials', async () => {
     } as Fetcher,
   });
 
-  const created = await callStore(store, { action: 'createMinecraftChallenge' });
+  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   const completed = await callStore(store, {
     action: 'completeMinecraftChallenge',
     challengeId: created.body.challengeId,
@@ -159,6 +159,7 @@ test('minecraft challenge creation is rate limited per client key', async () => 
   for (let index = 0; index < 8; index += 1) {
     const response = await callStore(store, {
       action: 'createMinecraftChallenge',
+      purpose: 'login',
       clientKey: 'ip:203.0.113.10',
     });
     expect(response.status).toBe(200);
@@ -166,6 +167,7 @@ test('minecraft challenge creation is rate limited per client key', async () => 
 
   const limited = await callStore(store, {
     action: 'createMinecraftChallenge',
+    purpose: 'login',
     clientKey: 'ip:203.0.113.10',
   });
 
@@ -181,6 +183,7 @@ test('minecraft challenge status polling is rate limited per client key', async 
   });
   const created = await callStore(store, {
     action: 'createMinecraftChallenge',
+    purpose: 'login',
     clientKey: 'ip:203.0.113.11',
   });
 
@@ -334,7 +337,7 @@ test('player resolve reuses durable object memory cache', async () => {
     } as Fetcher,
   });
 
-  const created = await callStore(store, { action: 'createMinecraftChallenge' });
+  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   const completed = await callStore(store, {
     action: 'completeMinecraftChallenge',
     challengeId: created.body.challengeId,
@@ -374,13 +377,19 @@ test('account security lists and revokes browser sessions', async () => {
     } as Fetcher,
   });
 
-  const firstChallenge = await callStore(store, { action: 'createMinecraftChallenge' });
+  const firstChallenge = await callStore(store, {
+    action: 'createMinecraftChallenge',
+    purpose: 'login',
+  });
   const firstLogin = await callStore(store, {
     action: 'completeMinecraftChallenge',
     challengeId: firstChallenge.body.challengeId,
     browserNonce: firstChallenge.body.browserNonce,
   });
-  const secondChallenge = await callStore(store, { action: 'createMinecraftChallenge' });
+  const secondChallenge = await callStore(store, {
+    action: 'createMinecraftChallenge',
+    purpose: 'login',
+  });
   const secondLogin = await callStore(store, {
     action: 'completeMinecraftChallenge',
     challengeId: secondChallenge.body.challengeId,
@@ -416,6 +425,9 @@ test('account security lists and revokes browser sessions', async () => {
 function createAuthStore(overrides: Partial<Env> = {}): AuthStore {
   const state = {
     storage: createStorage(),
+    waitUntil: (promise: Promise<unknown>) => {
+      void promise;
+    },
   } as unknown as DurableObjectState;
 
   const env = createEnv(overrides);
