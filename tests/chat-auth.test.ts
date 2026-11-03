@@ -11,7 +11,7 @@ function chatStore(onControl: (path: string, body: Record<string, unknown>, init
     fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       if (url.pathname.startsWith('/api/auth/accounts/')) return Response.json({ player: {
-        uuid: url.pathname.split('/').at(-1), role: 'member', credentialsChangedAt: 0,
+        uuid: url.pathname.split('/').at(-1), role: 'member', banned: false, credentialsChangedAt: 0,
       } });
       return onControl(url.pathname, JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>, init);
     },

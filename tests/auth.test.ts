@@ -3,7 +3,7 @@ import worker, { AuthStore } from '../src/index';
 import type { Env } from '../src/env';
 import { memoryAuthStorage } from './helpers/auth-store';
 
-test('minecraft challenge completion rejects non-member plugin confirmations', async () => {
+test('minecraft challenge completion rejects unknown plugin roles', async () => {
   const store = createAuthStore({
     VPC_SERVICE: {
       fetch: () =>
@@ -30,17 +30,18 @@ test('minecraft challenge completion rejects non-member plugin confirmations', a
     browserNonce: created.body.browserNonce,
   });
 
-  expect(completed.status).toBe(403);
-  expect(completed.body).toEqual({ error: 'member_required' });
+  expect(completed.status).toBe(502);
+  expect(completed.body).toEqual({ error: 'plugin_invalid_response' });
 });
 
-test('newcomer game access does not open a website account', async () => {
+test('newcomer game confirmation opens a website account without promoting its role', async () => {
   const store = createAuthStore({
     VPC_SERVICE: {
       fetch: () =>
         Promise.resolve(
           Response.json({
             status: 'confirmed',
+            confirmedAt: new Date().toISOString(),
             player: {
               uuid: '00000000-0000-0000-0000-000000000002',
               name: 'NewPlayer',
@@ -56,8 +57,9 @@ test('newcomer game access does not open a website account', async () => {
     challengeId: created.body.challengeId,
     browserNonce: created.body.browserNonce,
   });
-  expect(completed.status).toBe(403);
-  expect(completed.body).toEqual({ error: 'member_required' });
+  expect(completed.status).toBe(200);
+  expect(completed.body.account).toMatchObject({ currentName: 'NewPlayer', role: 'default' });
+  expect(completed.body.sessionId).toEqual(expect.any(String));
 });
 
 test('passkey registration options require an authenticated session', async () => {
@@ -437,7 +439,7 @@ function createAuthStore(overrides: Partial<Env> = {}): AuthStore {
       const url = new URL(input.toString());
       if (url.pathname.startsWith('/api/auth/accounts/'))
         return Response.json({
-          player: { uuid: url.pathname.split('/').at(-1), role: 'member', credentialsChangedAt: 0 },
+          player: { uuid: url.pathname.split('/').at(-1), role: 'member', banned: false, credentialsChangedAt: 0 },
         });
       const response = await original.fetch(input, init);
       const payload = (await response.json()) as Record<string, unknown>;

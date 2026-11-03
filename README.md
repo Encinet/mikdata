@@ -54,7 +54,7 @@ Rate limits per 60 seconds:
 
 ## Login and chat
 
-Login supports Minecraft codes and discoverable Passkeys. The plugin verifies current membership; sessions expire after 30 days idle or 90 days absolute. Passkeys and sessions are managed at `https://mcmik.top/account/security`. Sensitive changes require authentication within the last five minutes. Settings reauthenticate in place with an existing Passkey or in-game confirmation; successful reauthentication rotates the current session. Registration challenges are session-bound, single-use, and independently valid for five minutes. Authentication and sensitive writes refresh plugin account policy; ordinary reads retain the existing cache.
+Login supports Minecraft codes and discoverable Passkeys. The plugin checks account eligibility and active bans; sessions expire after 30 days idle or 90 days absolute. Passkeys and sessions are managed at `https://mcmik.top/account/security`. Sensitive changes require authentication within the last five minutes. Settings reauthenticate in place with an existing Passkey or in-game confirmation; successful reauthentication rotates the current session. Registration challenges are session-bound, single-use, and independently valid for five minutes. Authentication and sensitive writes refresh plugin account policy; ordinary reads retain the existing cache.
 
 `PATCH /auth/passkeys/:id` and `PATCH /me/sessions/:id` update an account-owned display name (up to 64 characters; empty resets it). Names are display metadata and do not refresh authentication. Session names survive reauthentication.
 

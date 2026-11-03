@@ -145,7 +145,7 @@ export function testAuthEnv(overrides: Partial<Env> = {}): Env {
               player: {
                 uuid: url.pathname.split('/').at(-1),
                 role: 'member',
-                credentialsChangedAt: 0,
+                banned: false, credentialsChangedAt: 0,
               },
             })
           : Response.json({

@@ -29,7 +29,7 @@ function plugin(playerUuid = PLAYER_UUID) {
       const url = new URL(input.toString());
       if (url.pathname.startsWith('/api/auth/accounts/'))
         return Response.json({
-          player: { uuid: url.pathname.split('/').at(-1), role: 'member', credentialsChangedAt: 0 },
+          player: { uuid: url.pathname.split('/').at(-1), role: 'member', banned: false, credentialsChangedAt: 0 },
         });
       return Response.json({
         status: 'confirmed',
@@ -324,7 +324,7 @@ test('account credential revocation during registration verification prevents th
         const account = memory.values.get(`account:${PLAYER_UUID}`) as object;
         memory.values.set(`account:${PLAYER_UUID}`, {
           ...account,
-          credentialsChangedAt: Date.now() + 1,
+          banned: false, credentialsChangedAt: Date.now() + 1,
         });
       }
       return transaction(task);
@@ -387,7 +387,7 @@ test('sensitive writes refresh plugin policy even when the ordinary account cach
           player: {
             uuid: new URL(input.toString()).pathname.split('/').at(-1),
             role,
-            credentialsChangedAt: 0,
+            banned: false, credentialsChangedAt: 0,
           },
         }),
     } as Fetcher,
@@ -396,11 +396,11 @@ test('sensitive writes refresh plugin policy even when the ordinary account cach
   expect(
     (await authCall(store, { action: 'me', sessionId: session.token })).body.authenticated,
   ).toBe(true);
-  role = 'default';
+  role = 'unknown';
   expect(
     (await authCall(store, { action: 'passkeyRegistrationOptions', sessionId: session.token })).body
       .error,
-  ).toBe('member_required');
+  ).toBe('authentication_invalidated');
   expect(sessions(values)).toBe(0);
 });
 

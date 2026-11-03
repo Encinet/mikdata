@@ -299,10 +299,10 @@ test('web revocation during an in-flight passkey login cannot recreate the crede
   expect(sessionCount(values)).toBe(1);
 });
 
-test('authoritative membership loss and credential changes invalidate existing web sessions', async () => {
+test('unknown roles and credential changes invalidate existing web sessions', async () => {
   for (const policy of [
-    { role: 'default', credentialsChangedAt: 0 },
-    { role: 'member', credentialsChangedAt: Date.now() },
+    { role: 'unknown', banned: false, credentialsChangedAt: 0 },
+    { role: 'member', banned: false, credentialsChangedAt: Date.now() },
   ]) {
     const memory = memoryAuthStorage();
     const session = await seedSession(memory.values, 60_000);
@@ -506,7 +506,7 @@ test('concurrent requests for one account share one authoritative policy lookup'
         requests += 1;
         await new Promise((resolve) => setTimeout(resolve, 10));
         return Response.json({
-          player: { uuid: PLAYER_UUID, role: 'member', credentialsChangedAt: 0 },
+          player: { uuid: PLAYER_UUID, role: 'member', banned: false, credentialsChangedAt: 0 },
         });
       },
     } as Fetcher,

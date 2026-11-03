@@ -36,7 +36,7 @@ const AUTH_RATE_LIMIT_WINDOW_SECONDS = 60;
 const AUTH_RATE_LIMIT_RETRY_SECONDS = 10;
 const WEB_LOGIN_CODE_RE = /^[0-9]{6,10}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ALLOWED_ROLES = new Set(['member', 'moderator', 'custodian']);
+const ALLOWED_ROLES = new Set(['default', 'member', 'moderator', 'custodian']);
 const DEFAULT_WEBAUTHN_RP_ID = 'mcmik.top';
 const DEFAULT_WEBAUTHN_ORIGIN = 'https://mcmik.top';
 const RP_NAME = 'Mik Casual';
@@ -53,7 +53,7 @@ interface PlayerAccountSummary {
 }
 
 interface PluginChallengeResponse {
-  status: 'confirmed' | 'pending' | 'expired' | 'not_found' | 'consumed' | 'unavailable';
+  status: 'confirmed' | 'pending' | 'expired' | 'not_found' | 'consumed' | 'unavailable' | 'banned';
   player?: {
     uuid?: string;
     name?: string;
@@ -87,6 +87,7 @@ interface AccountRecord {
   updatedAt: string;
   role: string;
   disabledAt?: string;
+  banned?: boolean;
   credentialsChangedAt?: number;
 }
 
@@ -150,7 +151,11 @@ function activeSession(session: SessionRecord | undefined | null): session is Se
 }
 
 function eligibleAccount(account: AccountRecord | undefined | null): account is AccountRecord {
-  return !!account && !account.disabledAt && isEligibleRole(account.role);
+  return !!account && !account.disabledAt && !account.banned && isEligibleRole(account.role);
+}
+
+function eligibleMemberAccount(account: AccountRecord | undefined | null): account is AccountRecord {
+  return eligibleAccount(account) && account.role !== 'default';
 }
 
 function sameAuthenticationContext(
@@ -954,6 +959,8 @@ export class AuthStore implements DurableObject {
         const plugin = await this.fetchPluginChallenge(record.displayCode);
         if (plugin.status === 'unavailable')
           return { status: 503, body: { error: 'plugin_unavailable' } };
+        if (plugin.status === 'banned')
+          return { status: 403, body: { error: 'account_banned' } };
         const player = normalizePluginPlayer(plugin.player);
         const role = normalizeRole(plugin.player?.role);
         await this.storage.transaction(async (txn) => {
@@ -1008,12 +1015,14 @@ export class AuthStore implements DurableObject {
     const plugin = await this.fetchPluginChallenge(record.displayCode);
     if (plugin.status === 'unavailable')
       return { status: 503, body: { error: 'plugin_unavailable' } };
+    if (plugin.status === 'banned')
+      return { status: 403, body: { error: 'account_banned' } };
     const player = normalizePluginPlayer(plugin.player);
     const role = normalizeRole(plugin.player?.role);
     if (plugin.status !== 'confirmed')
       return { status: 409, body: { error: 'confirmation_required' } };
     if (!player) return { status: 502, body: { error: 'plugin_invalid_response' } };
-    if (!role) return { status: 403, body: { error: 'member_required' } };
+    if (!role) return { status: 502, body: { error: 'plugin_invalid_response' } };
     if (!validConfirmationTime(record, plugin.confirmedAt))
       return { status: 409, body: { error: 'invalid_confirmation' } };
     const session = await this.prepareSession(
@@ -1039,6 +1048,7 @@ export class AuthStore implements DurableObject {
         playerUuid: player.uuid,
         currentName: player.name,
         role,
+        banned: false,
         updatedAt: new Date().toISOString(),
       };
       const sessionError = await this.storeAuthenticatedSession(txn, record.context, session);
@@ -1105,7 +1115,7 @@ export class AuthStore implements DurableObject {
     );
     if (limited) return limited;
     const account = await this.loadAccount(session.playerUuid);
-    if (!account) return { status: 403, body: { error: 'member_required' } };
+    if (!account) return { status: 403, body: { error: 'authentication_invalidated' } };
     await this.cleanupExpiredChallenges();
     const passkeys = await this.listPasskeys(account.playerUuid);
     if (passkeys.length >= MAX_PASSKEYS_PER_ACCOUNT)
@@ -1166,7 +1176,7 @@ export class AuthStore implements DurableObject {
     if (!verification.verified || !verification.registrationInfo)
       return { status: 400, body: { error: 'passkey_verification_failed' } };
     const account = await this.loadAccount(session.playerUuid);
-    if (!account) return { status: 403, body: { error: 'member_required' } };
+    if (!account) return { status: 403, body: { error: 'authentication_invalidated' } };
     const verifiedCredential = verification.registrationInfo.credential;
     const record: PasskeyRecord = {
       credentialId: verifiedCredential.id,
@@ -1182,7 +1192,7 @@ export class AuthStore implements DurableObject {
         return { status: 401, body: { error: 'unauthenticated' } };
       const currentAccount = await txn.get<AccountRecord>(accountKey(session.playerUuid));
       if (!eligibleAccount(currentAccount))
-        return { status: 403, body: { error: 'member_required' } };
+        return { status: 403, body: { error: 'authentication_invalidated' } };
       const current = await txn.get<ChallengeRecord>(webauthnChallengeKey(challenge.challenge));
       if (
         !current ||
@@ -1301,7 +1311,10 @@ export class AuthStore implements DurableObject {
     if (!verification?.verified)
       return { status: 400, body: { error: 'passkey_verification_failed' } };
     const account = await this.loadAccount(passkey.playerUuid);
-    if (!account) return { status: 403, body: { error: 'member_required' } };
+    if (!account) {
+      const stored = await this.storage.get<AccountRecord>(accountKey(passkey.playerUuid));
+      return { status: 403, body: { error: stored?.banned ? 'account_banned' : 'authentication_invalidated' } };
+    }
     const session = await this.prepareSession(account.playerUuid, 'passkey');
     const result = await this.storage.transaction(async (txn): Promise<StoreResult> => {
       const currentChallenge = await txn.get<ChallengeRecord>(
@@ -1355,7 +1368,7 @@ export class AuthStore implements DurableObject {
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     if (!recentlyAuthenticated(session)) return reauthenticationRequired();
     if (!(await this.loadAccount(session.playerUuid)))
-      return { status: 403, body: { error: 'member_required' } };
+      return { status: 403, body: { error: 'authentication_invalidated' } };
     const result = await this.storage.transaction(async (txn): Promise<StoreResult> => {
       const current = await txn.get<SessionRecord>(sessionKey(session.sidHash));
       if (!(await this.sessionStillActive(txn, session)))
@@ -1447,7 +1460,7 @@ export class AuthStore implements DurableObject {
     const requiresRecentAuth = all || targetSessionId !== current.sidHash;
     if (requiresRecentAuth && !recentlyAuthenticated(current)) return reauthenticationRequired();
     if (requiresRecentAuth && !(await this.loadAccount(current.playerUuid)))
-      return { status: 403, body: { error: 'member_required' } };
+      return { status: 403, body: { error: 'authentication_invalidated' } };
     let revokedSessionHashes: string[] = [];
     const result = await this.storage.transaction(async (txn): Promise<StoreResult> => {
       const actor = await txn.get<SessionRecord>(sessionKey(current.sidHash));
@@ -1508,7 +1521,7 @@ export class AuthStore implements DurableObject {
     );
     if (rateLimited) return rateLimited;
     const account = await this.readAccount(session.playerUuid);
-    if (!eligibleAccount(account)) return { status: 403, body: { error: 'member_required' } };
+    if (!eligibleAccount(account)) return { status: 403, body: { error: 'chat_forbidden' } };
     const valid = await this.storage.transaction((txn) => this.sessionStillActive(txn, session));
     if (!valid) return { status: 401, body: { error: 'unauthenticated', clearSession: true } };
     const checkedAt = Date.now();
@@ -1593,7 +1606,7 @@ export class AuthStore implements DurableObject {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     const requester = await this.readAccount(session.playerUuid);
-    if (!requester) return { status: 403, body: { error: 'member_required' } };
+    if (!requester) return { status: 403, body: { error: 'authentication_invalidated' } };
 
     const normalizedName = normalizePlayerName(name);
     if (!normalizedName) {
@@ -1623,11 +1636,14 @@ export class AuthStore implements DurableObject {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     const account = await this.readAccount(session.playerUuid);
-    if (!account) return { status: 403, body: { error: 'member_required' } };
+    if (!eligibleMemberAccount(account)) return { status: 403, body: { error: 'member_required' } };
 
     return this.storage.transaction(async (txn) => {
       if (!(await this.sessionStillActive(txn, session)))
         return { status: 401, body: { error: 'unauthenticated' } };
+      const currentAccount = await txn.get<AccountRecord>(accountKey(session.playerUuid));
+      if (!eligibleMemberAccount(currentAccount))
+        return { status: 403, body: { error: 'member_required' } };
       const result = await responseToStoreResult(
         await createPlayerBuildingSubmission(
           new Request('https://auth-store.local/building-submissions', {
@@ -1650,7 +1666,7 @@ export class AuthStore implements DurableObject {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     const account = await this.readAccount(session.playerUuid);
-    if (!account) return { status: 403, body: { error: 'member_required' } };
+    if (!eligibleMemberAccount(account)) return { status: 403, body: { error: 'member_required' } };
     await this.ensureBuildingCatalog();
 
     return responseToStoreResult(
@@ -1670,10 +1686,13 @@ export class AuthStore implements DurableObject {
     const session = await this.readValidSession(sessionId);
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     const account = await this.readAccount(session.playerUuid);
-    if (!eligibleAccount(account)) return { status: 403, body: { error: 'member_required' } };
+    if (!eligibleMemberAccount(account)) return { status: 403, body: { error: 'member_required' } };
     return this.storage.transaction(async (txn) => {
       if (!(await this.sessionStillActive(txn, session)))
         return { status: 401, body: { error: 'unauthenticated' } };
+      const currentAccount = await txn.get<AccountRecord>(accountKey(session.playerUuid));
+      if (!eligibleMemberAccount(currentAccount))
+        return { status: 403, body: { error: 'member_required' } };
       if (uploadId !== undefined) {
         if (!validUploadedImage(rawImage)) return { status: 422, body: { error: 'invalid_image' } };
         const saved = this.buildings.completeUpload(account.playerUuid, uploadId, rawImage);
@@ -1927,30 +1946,42 @@ export class AuthStore implements DurableObject {
       this.sessionCache.clear();
       return null;
     }
-    const policy = await this.fetchPluginAccountPolicy(playerUuid);
+    const policy = await this.fetchPluginAccountPolicy(playerUuid, account.currentName);
     const role = policy.role;
-    if (!isEligibleRole(role)) {
+    if (policy.banned || !isEligibleRole(role)) {
       await this.storage.transaction(async (txn) => {
         const current = await txn.get<AccountRecord>(accountKey(playerUuid));
         if (current)
           await txn.put(accountKey(playerUuid), {
             ...current,
             role,
+            banned: policy.banned,
             updatedAt: new Date().toISOString(),
           });
         await this.deleteAccountSessions(txn, playerUuid);
       });
       this.sessionCache.clear();
+      this.accountCache.delete(playerUuid);
       return null;
     }
-    const updated = { ...account, role, credentialsChangedAt: policy.credentialsChangedAt };
-    if (account.role !== role || account.credentialsChangedAt !== policy.credentialsChangedAt) {
+    const updated = {
+      ...account,
+      role,
+      banned: false,
+      credentialsChangedAt: policy.credentialsChangedAt,
+    };
+    if (
+      account.banned ||
+      account.role !== role ||
+      account.credentialsChangedAt !== policy.credentialsChangedAt
+    ) {
       const committed = await this.storage.transaction(async (txn) => {
         const current = await txn.get<AccountRecord>(accountKey(playerUuid));
         if (!current || current.disabledAt) return false;
         await txn.put(accountKey(playerUuid), {
           ...current,
           role,
+          banned: false,
           credentialsChangedAt: policy.credentialsChangedAt,
         });
         if (policy.credentialsChangedAt > (current.credentialsChangedAt ?? 0)) {
@@ -1967,11 +1998,12 @@ export class AuthStore implements DurableObject {
 
   private async fetchPluginAccountPolicy(
     playerUuid: string,
-  ): Promise<{ role: string; credentialsChangedAt: number }> {
+    currentName: string,
+  ): Promise<{ role: string; credentialsChangedAt: number; banned: boolean }> {
     try {
       const response = await this.env.VPC_SERVICE.fetch(
         new URL(
-          `/api/auth/accounts/${encodeURIComponent(playerUuid)}`,
+          `/api/auth/accounts/${encodeURIComponent(playerUuid)}?name=${encodeURIComponent(currentName)}`,
           this.env.MINECRAFT_SERVER_URL,
         ),
         {
@@ -1982,17 +2014,22 @@ export class AuthStore implements DurableObject {
       );
       if (!response.ok) throw new PluginUnavailableError();
       const payload = (await response.json()) as {
-        player?: { uuid?: string; role?: string; credentialsChangedAt?: number };
+        player?: { uuid?: string; role?: string; credentialsChangedAt?: number; banned?: boolean };
       };
       if (
         payload.player?.uuid?.toLowerCase() !== playerUuid ||
-        typeof payload.player.role !== 'string'
+        typeof payload.player.role !== 'string' ||
+        typeof payload.player.banned !== 'boolean'
       )
         throw new PluginUnavailableError();
       const changed = payload.player.credentialsChangedAt;
       if (typeof changed !== 'number' || !Number.isSafeInteger(changed) || changed < 0)
         throw new PluginUnavailableError();
-      return { role: payload.player.role.toLowerCase(), credentialsChangedAt: changed };
+      return {
+        role: payload.player.role.toLowerCase(),
+        credentialsChangedAt: changed,
+        banned: payload.player.banned,
+      };
     } catch {
       throw new PluginUnavailableError();
     }
