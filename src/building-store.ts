@@ -65,16 +65,6 @@ export class BuildingStore {
     );
     this.markChanged();
   }
-  saveCatalog(buildings: Building[]): void {
-    for (const building of buildings) {
-      this.storage.sql.exec(
-        'INSERT INTO buildings(id,document) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document',
-        building.id, JSON.stringify(building),
-      );
-    }
-    // Even a new, empty catalog needs an explicit public snapshot.
-    this.markChanged();
-  }
   snapshot(): PublicBuildingsSnapshot {
     return { version: this.publication().revision, buildings: this.buildings() };
   }

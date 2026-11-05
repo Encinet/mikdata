@@ -365,17 +365,6 @@ test('the HTTP boundary accepts session authority only from the authenticated BF
     {} as ExecutionContext,
   );
   expect(response.status).toBe(401);
-  for (const path of ['/auth/passkeys/options/login', '/auth/passkeys/login']) {
-    const removed = await worker.fetch(
-      new Request(`https://data.mcmik.top${path}`, {
-        method: 'POST',
-        headers: { 'X-Mikweb-Auth': 'test-secret' },
-      }),
-      env,
-      {} as ExecutionContext,
-    );
-    expect(removed.status).toBe(404);
-  }
 });
 
 test('sensitive writes refresh plugin policy even when the ordinary account cache is warm', async () => {

@@ -22,18 +22,23 @@ test('ttl memory cache evicts oldest records past max entries', () => {
   expect(cache.get('c', 1_001)).toBe('C');
 });
 
-test('ttl memory cache deletes records by prefix', () => {
-  const cache = new TtlMemoryCache<string>({ defaultTtlMs: 1_000, maxEntries: 8 });
-
-  cache.set('kv0:v1:building-list:a', 'A', undefined, 1_000);
-  cache.set('kv0:v1:building-list:b', 'B', undefined, 1_000);
-  cache.set('kv1:v1:building-list:a', 'C', undefined, 1_000);
-  cache.set('kv0:v1:building:detail', 'D', undefined, 1_000);
-
-  cache.deletePrefix('kv0:v1:building-list:');
-
-  expect(cache.get('kv0:v1:building-list:a', 1_001)).toBe(null);
-  expect(cache.get('kv0:v1:building-list:b', 1_001)).toBe(null);
-  expect(cache.get('kv1:v1:building-list:a', 1_001)).toBe('C');
-  expect(cache.get('kv0:v1:building:detail', 1_001)).toBe('D');
+test('weighted cache evicts least recently used entries and rejects oversized values', () => {
+  const cache = new TtlMemoryCache<string>({
+    defaultTtlMs: 1000,
+    maxEntries: 10,
+    maxWeight: 4,
+    weightOf: (value) => value.length,
+  });
+  cache.set('a', 'aa', undefined, 1000);
+  cache.set('b', 'bb', undefined, 1000);
+  expect(cache.get('a', 1001)).toBe('aa');
+  cache.set('c', 'cc', undefined, 1001);
+  expect(cache.get('b', 1001)).toBeNull();
+  expect(cache.get('a', 1001)).toBe('aa');
+  cache.set('c', 'oversized', undefined, 1001);
+  expect(cache.get('c', 1001)).toBeNull();
+  cache.set('a', 'x', undefined, 1001);
+  cache.set('d', 'ddd', undefined, 1001);
+  expect(cache.get('a', 1001)).toBe('x');
+  expect(cache.get('d', 1001)).toBe('ddd');
 });

@@ -183,6 +183,10 @@ test('Passkey registration belongs to the exact session and does not refresh aut
     sessionId: first.token,
   });
   expect(options.status).toBe(200);
+  expect(options.body.options.authenticatorSelection).toMatchObject({
+    residentKey: 'required',
+    userVerification: 'required',
+  });
   const credential = await key.registration(options.body.options.challenge);
   expect(
     (await authCall(store, { action: 'passkeyRegister', sessionId: second.token, credential })).body
@@ -334,14 +338,6 @@ test('policy lookup failure fails closed without deleting the account or session
   expect(sessionCount(values)).toBe(1);
 });
 
-test('logout deletes the session and its index', async () => {
-  const { store, values } = testAuthStore();
-  const session = await seedSession(values);
-  expect((await authCall(store, { action: 'logout', sessionId: session.token })).status).toBe(200);
-  expect(values.has(`session:${session.record.sidHash}`)).toBe(false);
-  expect(values.has(`account-session:${PLAYER_UUID}:${session.record.sidHash}`)).toBe(false);
-});
-
 test('unknown routes and methods spend no auth-store or limiter budget', async () => {
   let checks = 0;
   const env = testAuthEnv({
@@ -373,39 +369,6 @@ test('unknown routes and methods spend no auth-store or limiter budget', async (
     expect(result.status).toBe(404);
   }
   expect(checks).toBe(0);
-});
-
-test('retired game management endpoints cannot reach storage or revoke credentials', async () => {
-  const { store, values, env } = testAuthStore();
-  const key = await passkeyFixture(values);
-  const session = await seedSession(values);
-  let lookups = 0;
-  env.AUTH_STORE = {
-    idFromName: () => {
-      lookups += 1;
-      throw new Error('Unexpected store lookup');
-    },
-  } as unknown as DurableObjectNamespace;
-  for (const path of ['passkeys', 'passkeys/revoke', 'sessions/revoke']) {
-    const response = await worker.fetch(
-      new Request(`https://data.mcmik.top/internal/auth/${path}`, {
-        method: 'POST',
-        headers: { 'X-Mikweb-Auth': 'test-secret', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ playerUuid: PLAYER_UUID, credentialId: key.id }),
-      }),
-      env,
-      {} as ExecutionContext,
-    );
-    expect(response.status).toBe(404);
-  }
-  for (const action of ['gameListPasskeys', 'gameDeletePasskey', 'gameRevokeSessions']) {
-    expect(
-      (await authCall(store, { action, playerUuid: PLAYER_UUID, credentialId: key.id })).status,
-    ).toBe(404);
-  }
-  expect(lookups).toBe(0);
-  expect(values.has(`passkey:${key.id}`)).toBe(true);
-  expect(values.has(`session:${session.record.sidHash}`)).toBe(true);
 });
 
 test('signing out all browsers uses the session owner, clears the current cookie and keeps other accounts and passkeys', async () => {

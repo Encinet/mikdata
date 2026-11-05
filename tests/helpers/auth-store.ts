@@ -25,10 +25,13 @@ export function memoryAuthStorage() {
         data.set(name, structuredClone(entry));
       }
     },
-    delete: async (key: string | string[]) =>
-      Array.isArray(key)
+    delete: async (key: string | string[]) => {
+      if (Array.isArray(key) && key.length > 128)
+        throw new Error('Storage bulk delete exceeds 128 keys');
+      return Array.isArray(key)
         ? key.reduce((count, name) => count + Number(data.delete(name)), 0)
-        : data.delete(key),
+        : data.delete(key);
+    },
     list: async ({ prefix, limit, startAfter }: DurableObjectListOptions = {}) =>
       new Map(
         [...data.entries()]

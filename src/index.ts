@@ -2,10 +2,8 @@ import type { Env } from './env';
 import { requireCloudflareAccess } from './access';
 import { adminPage } from './admin';
 import { AuthStore, handleAuthRoute } from './auth';
-import {
-  handleAdminBuildingsRoute,
-  handlePublicBuildingsRoute,
-} from './buildings';
+import { handleAdminBuildingsRoute } from './buildings';
+import { handlePublicBuildingsRoute } from './public-buildings';
 import { corsHeaders } from './http';
 import { json, proxyJson } from './http';
 import { matchProxyRoute, refreshProxyRoutes, serveProxyRoute } from './proxy';

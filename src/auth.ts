@@ -1,5 +1,4 @@
 import { BuildingStore } from './building-store';
-import { migrateBuildingCatalog } from './building-migration';
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -11,11 +10,7 @@ import {
 } from '@simplewebauthn/server';
 import type { Env } from './env';
 import { AUTH_STORE_NAME } from './constants';
-import {
-  createPlayerBuildingSubmission,
-  handleAdminBuildingsRouteDirect,
-  listPlayerBuildingSubmissions,
-} from './buildings';
+import { BuildingService, type AdminBuildingCommand } from './building-service';
 import { authJson } from './http';
 import { TtlMemoryCache } from './memory-cache';
 
@@ -40,7 +35,6 @@ const ALLOWED_ROLES = new Set(['default', 'member', 'moderator', 'custodian']);
 const DEFAULT_WEBAUTHN_RP_ID = 'mcmik.top';
 const DEFAULT_WEBAUTHN_ORIGIN = 'https://mcmik.top';
 const RP_NAME = 'Mik Casual';
-class BuildingCatalogUnavailableError extends Error {}
 
 type AuthRouteResult = Response | null;
 
@@ -154,7 +148,9 @@ function eligibleAccount(account: AccountRecord | undefined | null): account is 
   return !!account && !account.disabledAt && !account.banned && isEligibleRole(account.role);
 }
 
-function eligibleMemberAccount(account: AccountRecord | undefined | null): account is AccountRecord {
+function eligibleMemberAccount(
+  account: AccountRecord | undefined | null,
+): account is AccountRecord {
   return eligibleAccount(account) && account.role !== 'default';
 }
 
@@ -613,17 +609,16 @@ export class AuthStore implements DurableObject {
     maxEntries: 1024,
   });
   private readonly accountReads = new Map<string, Promise<AccountRecord | null>>();
-  private lastChallengeCleanupAt = 0;
   private initialized: Promise<void> | null = null;
-  private catalogReady: Promise<void> | null = null;
-  private catalogRetryAt = 0;
   private readonly buildings: BuildingStore;
+  private readonly buildingService: BuildingService;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
     this.storage = state.storage;
     this.env = env;
     this.buildings = new BuildingStore(this.storage);
+    this.buildingService = new BuildingService(this.buildings);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -631,7 +626,8 @@ export class AuthStore implements DurableObject {
     let body: StoreRequest;
 
     try {
-      const text = await readLimitedRequestText(request);
+      // The public boundary enforces 64 KiB; allow space for the trusted internal envelope.
+      const text = await readLimitedRequestText(request, MAX_AUTH_BODY_BYTES + 8 * 1024);
       body = (text.trim() ? JSON.parse(text) : {}) as StoreRequest;
     } catch (error) {
       return json({
@@ -648,9 +644,6 @@ export class AuthStore implements DurableObject {
     try {
       return json(await this.dispatch(body));
     } catch (error) {
-      if (error instanceof BuildingCatalogUnavailableError) {
-        return json({ status: 503, body: { error: 'building_data_unavailable' } });
-      }
       if (error instanceof PluginUnavailableError) {
         return json({ status: 503, body: { error: 'plugin_unavailable' } });
       }
@@ -689,11 +682,7 @@ export class AuthStore implements DurableObject {
       case 'passkeyRegistrationOptions':
         return this.passkeyRegistrationOptions(asString(body.sessionId));
       case 'passkeyRegister':
-        return this.passkeyRegister(
-          asString(body.sessionId),
-          body.credential,
-          body.displayName,
-        );
+        return this.passkeyRegister(asString(body.sessionId), body.credential, body.displayName);
       case 'passkeyAuthenticationOptions':
         return this.passkeyAuthenticationOptions(
           asString(body.clientKey),
@@ -742,10 +731,8 @@ export class AuthStore implements DurableObject {
       case 'listBuildingSubmissions':
         return this.listBuildingSubmissions(asString(body.sessionId));
       case 'adminBuildingMutation':
-        await this.ensureBuildingCatalog();
         return this.adminBuildingMutation(body);
       case 'publicBuildingSnapshot':
-        await this.ensureBuildingCatalog();
         this.buildings.requestPublication();
         await this.scheduleMaintenance();
         return { status: 200, body: this.buildings.snapshot() };
@@ -757,44 +744,18 @@ export class AuthStore implements DurableObject {
   private async adminBuildingMutation(
     body: StoreRequest,
   ): Promise<{ status: number; body: unknown }> {
-    return this.storage.transaction(async () => {
-      const result = await this.runAdminBuildingMutation(body);
+    return this.storage.transaction(async (txn) => {
+      const result = this.buildingService.admin({
+        operation: asString(body.operation) as AdminBuildingCommand['operation'],
+        id: asString(body.id),
+        body: body.body,
+        expectedUpdatedAt: optionalString(body.expectedUpdatedAt),
+        status: optionalString(body.status),
+        actor: adminActorFromStoreBody(body.actor),
+      });
       if (result.status < 400) await this.scheduleMaintenance();
       return result;
     });
-  }
-
-  private async runAdminBuildingMutation(
-    body: StoreRequest,
-  ): Promise<{ status: number; body: unknown }> {
-    const routePath = asString(body.routePath);
-    const method = asString(body.method) || 'GET';
-    const url = asString(body.url) || `https://data.mcmik.top/admin/api${routePath}`;
-    const headers = new Headers();
-    const rawHeaders = body.headers;
-
-    if (rawHeaders && typeof rawHeaders === 'object' && !Array.isArray(rawHeaders)) {
-      for (const [key, value] of Object.entries(rawHeaders)) {
-        if (typeof value === 'string') {
-          headers.set(key, value);
-        }
-      }
-    }
-
-    const request = new Request(url, {
-      method,
-      headers,
-      body: method === 'GET' || method === 'HEAD' ? undefined : asString(body.requestBody),
-    });
-    const actor = adminActorFromStoreBody(body.actor);
-    return responseToStoreResult(
-      await handleAdminBuildingsRouteDirect(
-        routePath,
-        request,
-        { ...this.env, buildingStore: this.buildings },
-        actor,
-      ),
-    );
   }
 
   private async createAuthenticationContext(
@@ -886,7 +847,6 @@ export class AuthStore implements DurableObject {
       60,
     );
     if (rateLimited) return rateLimited;
-    await this.cleanupExpiredChallenges();
     const binding = await this.createAuthenticationContext(purpose, previousNonce, sessionId);
     if ('status' in binding) return binding;
     for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -904,6 +864,7 @@ export class AuthStore implements DurableObject {
       const created = await this.storage.transaction(async (txn) => {
         if (await txn.get(codeKey(displayCode))) return false;
         await txn.put({ [challengeKey(challengeId)]: record, [codeKey(displayCode)]: challengeId });
+        await this.scheduleChallengeCleanup(txn);
         return true;
       });
       if (created)
@@ -959,8 +920,7 @@ export class AuthStore implements DurableObject {
         const plugin = await this.fetchPluginChallenge(record.displayCode);
         if (plugin.status === 'unavailable')
           return { status: 503, body: { error: 'plugin_unavailable' } };
-        if (plugin.status === 'banned')
-          return { status: 403, body: { error: 'account_banned' } };
+        if (plugin.status === 'banned') return { status: 403, body: { error: 'account_banned' } };
         const player = normalizePluginPlayer(plugin.player);
         const role = normalizeRole(plugin.player?.role);
         await this.storage.transaction(async (txn) => {
@@ -1015,8 +975,7 @@ export class AuthStore implements DurableObject {
     const plugin = await this.fetchPluginChallenge(record.displayCode);
     if (plugin.status === 'unavailable')
       return { status: 503, body: { error: 'plugin_unavailable' } };
-    if (plugin.status === 'banned')
-      return { status: 403, body: { error: 'account_banned' } };
+    if (plugin.status === 'banned') return { status: 403, body: { error: 'account_banned' } };
     const player = normalizePluginPlayer(plugin.player);
     const role = normalizeRole(plugin.player?.role);
     if (plugin.status !== 'confirmed')
@@ -1116,7 +1075,6 @@ export class AuthStore implements DurableObject {
     if (limited) return limited;
     const account = await this.loadAccount(session.playerUuid);
     if (!account) return { status: 403, body: { error: 'authentication_invalidated' } };
-    await this.cleanupExpiredChallenges();
     const passkeys = await this.listPasskeys(account.playerUuid);
     if (passkeys.length >= MAX_PASSKEYS_PER_ACCOUNT)
       return { status: 409, body: { error: 'passkey_limit' } };
@@ -1144,6 +1102,7 @@ export class AuthStore implements DurableObject {
         return { status: 401, body: { error: 'unauthenticated' } };
       if (!recentlyAuthenticated(current)) return reauthenticationRequired();
       await txn.put(webauthnChallengeKey(options.challenge), challenge);
+      await this.scheduleChallengeCleanup(txn);
       return { status: 200, body: { options } };
     });
   }
@@ -1232,7 +1191,6 @@ export class AuthStore implements DurableObject {
       60,
     );
     if (rateLimited) return rateLimited;
-    await this.cleanupExpiredChallenges();
     const binding = await this.createAuthenticationContext(purpose, previousNonce, sessionId);
     if ('status' in binding) return binding;
     const allowed =
@@ -1247,13 +1205,16 @@ export class AuthStore implements DurableObject {
       userVerification: 'required',
       allowCredentials: allowed,
     });
-    await this.storage.put(webauthnChallengeKey(options.challenge), {
-      type: 'passkey-authentication',
-      context: binding.context,
-      challenge: options.challenge,
-      createdAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + CHALLENGE_TTL_SECONDS * 1000).toISOString(),
-    } satisfies ChallengeRecord);
+    await this.storage.transaction(async (txn) => {
+      await txn.put(webauthnChallengeKey(options.challenge), {
+        type: 'passkey-authentication',
+        context: binding.context,
+        challenge: options.challenge,
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + CHALLENGE_TTL_SECONDS * 1000).toISOString(),
+      } satisfies ChallengeRecord);
+      await this.scheduleChallengeCleanup(txn);
+    });
     return { status: 200, body: { options, ...binding.browser } };
   }
 
@@ -1313,7 +1274,10 @@ export class AuthStore implements DurableObject {
     const account = await this.loadAccount(passkey.playerUuid);
     if (!account) {
       const stored = await this.storage.get<AccountRecord>(accountKey(passkey.playerUuid));
-      return { status: 403, body: { error: stored?.banned ? 'account_banned' : 'authentication_invalidated' } };
+      return {
+        status: 403,
+        body: { error: stored?.banned ? 'account_banned' : 'authentication_invalidated' },
+      };
     }
     const session = await this.prepareSession(account.playerUuid, 'passkey');
     const result = await this.storage.transaction(async (txn): Promise<StoreResult> => {
@@ -1429,9 +1393,7 @@ export class AuthStore implements DurableObject {
       if (!(await this.sessionStillActive(txn, session)))
         return { status: 401, body: { error: 'unauthenticated' } };
       const target =
-        kind === 'session'
-          ? await txn.get<SessionRecord>(key)
-          : await txn.get<PasskeyRecord>(key);
+        kind === 'session' ? await txn.get<SessionRecord>(key) : await txn.get<PasskeyRecord>(key);
       if (
         !target ||
         target.playerUuid !== session.playerUuid ||
@@ -1503,10 +1465,7 @@ export class AuthStore implements DurableObject {
     connectionId: string,
     clientPublicKey: string,
   ): Promise<StoreResult> {
-    if (
-      !/^[A-Za-z0-9_-]{32}$/.test(connectionId) ||
-      !/^[A-Za-z0-9_-]{87}$/.test(clientPublicKey)
-    )
+    if (!/^[A-Za-z0-9_-]{32}$/.test(connectionId) || !/^[A-Za-z0-9_-]{87}$/.test(clientPublicKey))
       return { status: 422, body: { error: 'invalid_connection' } };
     const keyBytes = base64urlToBuffer(clientPublicKey);
     if (keyBytes[0] !== 4 || bufferToBase64url(keyBytes) !== clientPublicKey)
@@ -1644,17 +1603,7 @@ export class AuthStore implements DurableObject {
       const currentAccount = await txn.get<AccountRecord>(accountKey(session.playerUuid));
       if (!eligibleMemberAccount(currentAccount))
         return { status: 403, body: { error: 'member_required' } };
-      const result = await responseToStoreResult(
-        await createPlayerBuildingSubmission(
-          new Request('https://auth-store.local/building-submissions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload ?? {}),
-          }),
-          { ...this.env, buildingStore: this.buildings },
-          account,
-        ),
-      );
+      const result = this.buildingService.createSubmission(payload, currentAccount);
       if (result.status < 400) await this.scheduleMaintenance();
       return result;
     });
@@ -1667,15 +1616,8 @@ export class AuthStore implements DurableObject {
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
     const account = await this.readAccount(session.playerUuid);
     if (!eligibleMemberAccount(account)) return { status: 403, body: { error: 'member_required' } };
-    await this.ensureBuildingCatalog();
 
-    return responseToStoreResult(
-      await listPlayerBuildingSubmissions(
-        new Request('https://auth-store.local/building-submissions/mine', { method: 'POST' }),
-        { ...this.env, buildingStore: this.buildings },
-        account,
-      ),
-    );
+    return this.buildingService.listSubmissions(account.playerUuid);
   }
 
   private async imageUpload(
@@ -1725,9 +1667,14 @@ export class AuthStore implements DurableObject {
     );
   }
 
-  private async scheduleMaintenance(): Promise<void> {
+  private async scheduleMaintenance(challenges = Infinity): Promise<void> {
     const current = await this.storage.getAlarm();
-    const due = Math.min(this.buildings.publicationDue() ?? Infinity, Date.now() + 3600_000);
+    const due = Math.min(
+      this.buildings.publicationDue() ?? Infinity,
+      challenges,
+      Date.now() + 3600_000,
+    );
+    // Ordinary writes preserve an already armed challenge alarm without reading its metadata.
     if (current === null || current > due) await this.storage.setAlarm(due);
   }
 
@@ -1735,11 +1682,11 @@ export class AuthStore implements DurableObject {
     await this.ensureInitialized();
     // Install a recovery alarm before external I/O. Publication state remains durable on failure.
     await this.storage.setAlarm(Date.now() + 3600_000);
+    await this.cleanupExpiredChallenges();
     try {
-      await this.ensureBuildingCatalog();
       await this.buildings.publish(this.env.BUILDINGS_KV);
     } catch (error) {
-      console.warn('Building catalog maintenance deferred', error);
+      console.warn('Building snapshot publication deferred', error);
     }
     const nextSweep = (await this.storage.get<number>('maintenance:next-sweep')) ?? 0;
     if (nextSweep <= Date.now()) {
@@ -1764,7 +1711,9 @@ export class AuthStore implements DurableObject {
         await txn.put('maintenance:next-sweep', Date.now() + 3600_000);
       });
     }
-    await this.scheduleMaintenance();
+    await this.scheduleMaintenance(
+      (await this.storage.get<number>('maintenance:challenges-next-sweep')) ?? Infinity,
+    );
   }
 
   private async pruneAccountSessions(
@@ -2170,46 +2119,54 @@ export class AuthStore implements DurableObject {
     return this.initialized;
   }
 
-  private ensureBuildingCatalog(): Promise<void> {
-    if (this.catalogReady) return this.catalogReady;
-    if (this.catalogRetryAt > Date.now())
-      return Promise.reject(new BuildingCatalogUnavailableError());
-    this.catalogReady = migrateBuildingCatalog(this.storage, this.env.BUILDINGS_KV, this.buildings)
-      .then(() => this.scheduleMaintenance())
-      .catch((error: unknown) => {
-        this.catalogReady = null;
-        this.catalogRetryAt = Date.now() + 60_000;
-        console.error('Building catalog initialization deferred', error);
-        throw new BuildingCatalogUnavailableError();
-      });
-    return this.catalogReady;
+  private async scheduleChallengeCleanup(txn: DurableObjectTransaction): Promise<void> {
+    const key = 'maintenance:challenges-next-sweep';
+    const existing = await txn.get<number>(key);
+    const due = existing ?? Date.now() + CHALLENGE_TTL_SECONDS * 1000 + 1000;
+    if (existing === undefined) await txn.put(key, due);
+    const current = await this.storage.getAlarm();
+    if (current === null || current > due) await this.storage.setAlarm(due);
   }
 
   private async cleanupExpiredChallenges(): Promise<void> {
-    const now = Date.now();
-    if (now - this.lastChallengeCleanupAt < CHALLENGE_CLEANUP_INTERVAL_SECONDS * 1000) {
-      return;
-    }
-    this.lastChallengeCleanupAt = now;
-
-    const [minecraftChallenges, webauthnChallenges] = await Promise.all([
-      this.storage.list<MinecraftChallenge>({ prefix: 'challenge:' }),
-      this.storage.list<ChallengeRecord>({ prefix: 'webauthn:' }),
-    ]);
-
-    const deletes: Promise<unknown>[] = [];
-    for (const record of minecraftChallenges.values()) {
-      if (isExpired(record.expiresAt)) {
-        deletes.push(this.deleteMinecraftChallenge(record));
+    const dueKey = 'maintenance:challenges-next-sweep';
+    const due = await this.storage.get<number>(dueKey);
+    if (due !== undefined && due > Date.now()) return;
+    await this.storage.transaction(async (txn) => {
+      let more = false,
+        hasRecords = false;
+      const deletes: string[] = [];
+      for (const prefix of ['challenge:', 'webauthn:']) {
+        const cursorKey = `maintenance:${prefix}cursor`;
+        const cursor = await txn.get<string>(cursorKey);
+        const rows = await txn.list<ChallengeRecord>({ prefix, startAfter: cursor, limit: 128 });
+        hasRecords ||= !!cursor || rows.size > 0;
+        for (const [key, record] of rows) {
+          if (!isExpired(record.expiresAt)) continue;
+          deletes.push(key);
+          if (
+            record.type === 'minecraft-authentication' &&
+            (await txn.get(codeKey(record.displayCode))) === record.challengeId
+          ) {
+            deletes.push(codeKey(record.displayCode));
+          }
+        }
+        const last = [...rows.keys()].at(-1);
+        if (rows.size === 128 && last) {
+          more = true;
+          await txn.put(cursorKey, last);
+        } else await txn.delete(cursorKey);
       }
-    }
-    for (const [key, record] of webauthnChallenges.entries()) {
-      if (isExpired(record.expiresAt)) {
-        deletes.push(this.storage.delete(key));
-      }
-    }
-
-    await Promise.all(deletes);
+      // Storage bulk calls accept at most 128 keys; all chunks share this transaction.
+      for (let offset = 0; offset < deletes.length; offset += 128)
+        await txn.delete(deletes.slice(offset, offset + 128));
+      if (more || hasRecords)
+        await txn.put(
+          dueKey,
+          Date.now() + (more ? 1000 : CHALLENGE_CLEANUP_INTERVAL_SECONDS * 1000),
+        );
+      else await txn.delete(dueKey);
+    });
   }
 
   private async deleteMinecraftChallenge(record: MinecraftChallenge): Promise<void> {
@@ -2281,13 +2238,6 @@ async function callStore(
   return (await response.json()) as { status: number; body: Record<string, unknown> };
 }
 
-async function responseToStoreResult(
-  response: Response,
-): Promise<{ status: number; body: unknown }> {
-  const body = await response.json().catch(() => ({}));
-  return { status: response.status, body };
-}
-
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -2336,10 +2286,13 @@ async function readJsonObject(
 
 class RequestBodyTooLargeError extends Error {}
 
-async function readLimitedRequestText(request: Request): Promise<string> {
+async function readLimitedRequestText(
+  request: Request,
+  maxBytes = MAX_AUTH_BODY_BYTES,
+): Promise<string> {
   const contentLength = request.headers.get('content-length');
 
-  if (contentLength && Number.parseInt(contentLength, 10) > MAX_AUTH_BODY_BYTES) {
+  if (contentLength && Number.parseInt(contentLength, 10) > maxBytes) {
     throw new RequestBodyTooLargeError('request body too large');
   }
 
@@ -2360,7 +2313,7 @@ async function readLimitedRequestText(request: Request): Promise<string> {
     }
 
     size += value.byteLength;
-    if (size > MAX_AUTH_BODY_BYTES) {
+    if (size > maxBytes) {
       await reader.cancel().catch(() => undefined);
       throw new RequestBodyTooLargeError('request body too large');
     }

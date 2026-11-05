@@ -16,7 +16,18 @@ export function json(
   env: Env,
   extraHeaders: Record<string, string> = {},
 ): Response {
-  return new Response(JSON.stringify(body), {
+  return serializedJson(JSON.stringify(body), status, request, env, extraHeaders);
+}
+
+/** Respond with an already serialized body without parsing or encoding it again. */
+export function serializedJson(
+  body: string,
+  status: number,
+  request: Request,
+  env: Env,
+  extraHeaders: Record<string, string> = {},
+): Response {
+  return new Response(body, {
     status,
     headers: {
       ...JSON_HEADERS,

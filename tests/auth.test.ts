@@ -1,10 +1,15 @@
 import { expect, test } from 'bun:test';
-import worker, { AuthStore } from '../src/index';
-import type { Env } from '../src/env';
-import { memoryAuthStorage } from './helpers/auth-store';
+import worker from '../src/index';
+import {
+  authCall,
+  PLAYER_UUID,
+  seedSession,
+  testAuthEnv,
+  testAuthStore,
+} from './helpers/auth-store';
 
 test('minecraft challenge completion rejects unknown plugin roles', async () => {
-  const store = createAuthStore({
+  const { store } = testAuthStore({
     VPC_SERVICE: {
       fetch: () =>
         Promise.resolve(
@@ -20,11 +25,11 @@ test('minecraft challenge completion rejects unknown plugin roles', async () => 
     } as Fetcher,
   });
 
-  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
+  const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
 
   expect(created.status).toBe(200);
 
-  const completed = await callStore(store, {
+  const completed = await authCall(store, {
     action: 'completeMinecraftChallenge',
     challengeId: created.body.challengeId,
     browserNonce: created.body.browserNonce,
@@ -35,7 +40,7 @@ test('minecraft challenge completion rejects unknown plugin roles', async () => 
 });
 
 test('newcomer game confirmation opens a website account without promoting its role', async () => {
-  const store = createAuthStore({
+  const { store } = testAuthStore({
     VPC_SERVICE: {
       fetch: () =>
         Promise.resolve(
@@ -51,8 +56,8 @@ test('newcomer game confirmation opens a website account without promoting its r
         ),
     } as Fetcher,
   });
-  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
-  const completed = await callStore(store, {
+  const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
+  const completed = await authCall(store, {
     action: 'completeMinecraftChallenge',
     challengeId: created.body.challengeId,
     browserNonce: created.body.browserNonce,
@@ -62,28 +67,16 @@ test('newcomer game confirmation opens a website account without promoting its r
   expect(completed.body.sessionId).toEqual(expect.any(String));
 });
 
-test('passkey registration options require an authenticated session', async () => {
-  const store = createAuthStore();
-
-  const response = await callStore(store, {
-    action: 'passkeyRegistrationOptions',
-    sessionId: '',
-  });
-
-  expect(response.status).toBe(401);
-  expect(response.body).toEqual({ error: 'unauthenticated' });
-});
-
 test('minecraft challenge completion reports unavailable plugin without creating a session', async () => {
-  const store = createAuthStore({
+  const { store } = testAuthStore({
     VPC_SERVICE: {
       fetch: () => Promise.reject(new Error('plugin unavailable')),
     } as Fetcher,
   });
 
-  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
+  const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
 
-  const completed = await callStore(store, {
+  const completed = await authCall(store, {
     action: 'completeMinecraftChallenge',
     challengeId: created.body.challengeId,
     browserNonce: created.body.browserNonce,
@@ -94,7 +87,7 @@ test('minecraft challenge completion reports unavailable plugin without creating
 });
 
 test('minecraft challenge completion rejects malformed confirmed plugin players', async () => {
-  const store = createAuthStore({
+  const { store } = testAuthStore({
     VPC_SERVICE: {
       fetch: () =>
         Promise.resolve(
@@ -110,8 +103,8 @@ test('minecraft challenge completion rejects malformed confirmed plugin players'
     } as Fetcher,
   });
 
-  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
-  const completed = await callStore(store, {
+  const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
+  const completed = await authCall(store, {
     action: 'completeMinecraftChallenge',
     challengeId: created.body.challengeId,
     browserNonce: created.body.browserNonce,
@@ -121,45 +114,11 @@ test('minecraft challenge completion rejects malformed confirmed plugin players'
   expect(completed.body).toEqual({ error: 'plugin_invalid_response' });
 });
 
-test('passkey registration options require resident credentials', async () => {
-  const store = createAuthStore({
-    VPC_SERVICE: {
-      fetch: () =>
-        Promise.resolve(
-          Response.json({
-            status: 'confirmed',
-            player: {
-              uuid: '00000000-0000-0000-0000-000000000002',
-              name: 'MemberPlayer',
-              role: 'member',
-            },
-          }),
-        ),
-    } as Fetcher,
-  });
-
-  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
-  const completed = await callStore(store, {
-    action: 'completeMinecraftChallenge',
-    challengeId: created.body.challengeId,
-    browserNonce: created.body.browserNonce,
-  });
-
-  const options = await callStore(store, {
-    action: 'passkeyRegistrationOptions',
-    sessionId: completed.body.sessionId,
-  });
-
-  expect(options.status).toBe(200);
-  expect(options.body.options.authenticatorSelection.residentKey).toBe('required');
-  expect(options.body.options.authenticatorSelection.userVerification).toBe('required');
-});
-
 test('minecraft challenge creation is rate limited per client key', async () => {
-  const store = createAuthStore();
+  const { store } = testAuthStore();
 
   for (let index = 0; index < 8; index += 1) {
-    const response = await callStore(store, {
+    const response = await authCall(store, {
       action: 'createMinecraftChallenge',
       purpose: 'login',
       clientKey: 'ip:203.0.113.10',
@@ -167,7 +126,7 @@ test('minecraft challenge creation is rate limited per client key', async () => 
     expect(response.status).toBe(200);
   }
 
-  const limited = await callStore(store, {
+  const limited = await authCall(store, {
     action: 'createMinecraftChallenge',
     purpose: 'login',
     clientKey: 'ip:203.0.113.10',
@@ -178,19 +137,19 @@ test('minecraft challenge creation is rate limited per client key', async () => 
 });
 
 test('minecraft challenge status polling is rate limited per client key', async () => {
-  const store = createAuthStore({
+  const { store } = testAuthStore({
     VPC_SERVICE: {
       fetch: () => Promise.resolve(Response.json({ status: 'pending' })),
     } as Fetcher,
   });
-  const created = await callStore(store, {
+  const created = await authCall(store, {
     action: 'createMinecraftChallenge',
     purpose: 'login',
     clientKey: 'ip:203.0.113.11',
   });
 
   for (let index = 0; index < 60; index += 1) {
-    const response = await callStore(store, {
+    const response = await authCall(store, {
       action: 'getMinecraftChallenge',
       challengeId: created.body.challengeId,
       browserNonce: created.body.browserNonce,
@@ -199,7 +158,7 @@ test('minecraft challenge status polling is rate limited per client key', async 
     expect(response.status).toBe(200);
   }
 
-  const limited = await callStore(store, {
+  const limited = await authCall(store, {
     action: 'getMinecraftChallenge',
     challengeId: created.body.challengeId,
     browserNonce: created.body.browserNonce,
@@ -221,7 +180,7 @@ test('worker rate limits auth requests before invoking the durable object', asyn
         'X-Mikweb-Auth': 'test-secret',
       },
     }),
-    createEnv({
+    testAuthEnv({
       AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(true, createKeys),
       AUTH_CLIENT_RATE_LIMITER: createRateLimit(false, clientKeys),
       AUTH_STORE: {
@@ -249,7 +208,7 @@ test('worker fails closed when an auth rate limiter is unavailable', async () =>
         'X-Mikweb-Auth': 'test-secret',
       },
     }),
-    createEnv({
+    testAuthEnv({
       AUTH_CHALLENGE_CREATE_RATE_LIMITER: {
         limit: () => Promise.reject(new Error('rate limiter unavailable')),
       } as RateLimit,
@@ -270,7 +229,7 @@ test('worker fails closed when an auth rate limiter is unavailable', async () =>
 test('auth preflight does not return wildcard cors headers', async () => {
   const response = await worker.fetch(
     new Request('https://data.mcmik.top/auth/me', { method: 'OPTIONS' }),
-    createEnv(),
+    testAuthEnv(),
     createExecutionContext(),
   );
 
@@ -288,7 +247,7 @@ test('auth routes reject oversized JSON bodies before hitting auth store', async
       },
       body: JSON.stringify({ value: 'x'.repeat(65 * 1024) }),
     }),
-    createEnv({
+    testAuthEnv({
       AUTH_STORE: {
         idFromName: () => ({}),
         get: () => ({
@@ -305,229 +264,54 @@ test('auth routes reject oversized JSON bodies before hitting auth store', async
   expect(await response.json()).toEqual({ error: 'request_body_too_large' });
 });
 
-test('player resolve reuses durable object memory cache', async () => {
+test('player resolution normalizes names and reuses the cached result', async () => {
   let resolveRequests = 0;
-  const store = createAuthStore({
+  const policy = testAuthEnv().VPC_SERVICE;
+  const { store, values } = testAuthStore({
     VPC_SERVICE: {
-      fetch: (input: RequestInfo | URL) => {
-        const url = new URL(input.toString());
-        if (url.pathname.startsWith('/api/auth/challenges/')) {
-          return Promise.resolve(
-            Response.json({
-              status: 'confirmed',
-              player: {
-                uuid: '00000000-0000-0000-0000-000000000010',
-                name: 'MemberPlayer',
-                role: 'member',
-              },
-            }),
-          );
-        }
-        if (url.pathname === '/api/players/resolve') {
-          resolveRequests += 1;
-          return Promise.resolve(
-            Response.json({
-              player: {
-                uuid: '00000000-0000-4000-8000-000000000011',
-                name: 'BuilderOne',
-              },
-            }),
-          );
-        }
-        return Promise.resolve(Response.json({ status: 'pending' }));
+      fetch: async (input: RequestInfo | URL) => {
+        if (new URL(input.toString()).pathname !== '/api/players/resolve')
+          return policy.fetch(input);
+        resolveRequests++;
+        return Response.json({
+          player: { uuid: '00000000-0000-4000-8000-000000000011', name: 'BuilderOne' },
+        });
       },
     } as Fetcher,
   });
-
-  const created = await callStore(store, { action: 'createMinecraftChallenge', purpose: 'login' });
-  const completed = await callStore(store, {
-    action: 'completeMinecraftChallenge',
-    challengeId: created.body.challengeId,
-    browserNonce: created.body.browserNonce,
-  });
-
-  const first = await callStore(store, {
-    action: 'resolvePlayer',
-    sessionId: completed.body.sessionId,
-    name: 'BuilderOne',
-  });
-  const second = await callStore(store, {
-    action: 'resolvePlayer',
-    sessionId: completed.body.sessionId,
-    name: 'builderone',
-  });
-
-  expect(first.status).toBe(200);
-  expect(second.status).toBe(200);
+  const { token } = await seedSession(values);
+  for (const name of ['BuilderOne', 'builderone']) {
+    const response = await authCall(store, { action: 'resolvePlayer', sessionId: token, name });
+    expect(response.status).toBe(200);
+    expect(response.body.player).toMatchObject({ name: 'BuilderOne' });
+  }
   expect(resolveRequests).toBe(1);
 });
 
-test('account security lists and revokes browser sessions', async () => {
-  const store = createAuthStore({
-    VPC_SERVICE: {
-      fetch: () =>
-        Promise.resolve(
-          Response.json({
-            status: 'confirmed',
-            player: {
-              uuid: '00000000-0000-0000-0000-000000000004',
-              name: 'SessionPlayer',
-              role: 'member',
-            },
-          }),
-        ),
-    } as Fetcher,
-  });
-
-  const firstChallenge = await callStore(store, {
-    action: 'createMinecraftChallenge',
-    purpose: 'login',
-  });
-  const firstLogin = await callStore(store, {
-    action: 'completeMinecraftChallenge',
-    challengeId: firstChallenge.body.challengeId,
-    browserNonce: firstChallenge.body.browserNonce,
-  });
-  const secondChallenge = await callStore(store, {
-    action: 'createMinecraftChallenge',
-    purpose: 'login',
-  });
-  const secondLogin = await callStore(store, {
-    action: 'completeMinecraftChallenge',
-    challengeId: secondChallenge.body.challengeId,
-    browserNonce: secondChallenge.body.browserNonce,
-  });
-
-  const security = await callStore(store, {
-    action: 'accountSecurity',
-    sessionId: firstLogin.body.sessionId,
-  });
-
+test('account security lists own sessions and revokes one without signing out the current browser', async () => {
+  const { store, values } = testAuthStore();
+  const first = await seedSession(values),
+    second = await seedSession(values);
+  const security = await authCall(store, { action: 'accountSecurity', sessionId: first.token });
   expect(security.status).toBe(200);
-  expect(security.body.sessions).toHaveLength(2);
-  const secondSession = security.body.sessions?.find((session) => !session.current);
-  expect(typeof secondSession?.id).toBe('string');
-
-  const revoked = await callStore(store, {
-    action: 'revokeAccountSession',
-    sessionId: firstLogin.body.sessionId,
-    targetSessionId: secondSession?.id,
-  });
-
-  expect(revoked.status).toBe(200);
-  expect(revoked.body.clearSession).toBe(false);
-
-  const revokedSecurity = await callStore(store, {
-    action: 'accountSecurity',
-    sessionId: secondLogin.body.sessionId,
-  });
-  expect(revokedSecurity.status).toBe(401);
-});
-
-function createAuthStore(overrides: Partial<Env> = {}): AuthStore {
-  const state = {
-    storage: createStorage(),
-    waitUntil: (promise: Promise<unknown>) => {
-      void promise;
-    },
-  } as unknown as DurableObjectState;
-
-  const env = createEnv(overrides);
-  const original = env.VPC_SERVICE;
-  env.VPC_SERVICE = {
-    fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = new URL(input.toString());
-      if (url.pathname.startsWith('/api/auth/accounts/'))
-        return Response.json({
-          player: { uuid: url.pathname.split('/').at(-1), role: 'member', banned: false, credentialsChangedAt: 0 },
-        });
-      const response = await original.fetch(input, init);
-      const payload = (await response.json()) as Record<string, unknown>;
-      return Response.json(
-        payload.status === 'confirmed'
-          ? { ...payload, confirmedAt: new Date().toISOString() }
-          : payload,
-      );
-    },
-  } as Fetcher;
-  return new AuthStore(state, env);
-}
-
-async function callStore(
-  store: AuthStore,
-  body: Record<string, unknown>,
-): Promise<{ status: number; body: StoreTestBody }> {
-  const response = await store.fetch(
-    new Request('https://auth-store.local/', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
+  expect(security.body.sessions).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ id: first.record.sidHash, current: true }),
+      expect.objectContaining({ id: second.record.sidHash, current: false }),
+    ]),
   );
-
-  return (await response.json()) as { status: number; body: StoreTestBody };
-}
-
-type StoreTestBody = Record<string, unknown> & {
-  browserNonce?: string;
-  challengeId?: string;
-  error?: unknown;
-  options?: {
-    authenticatorSelection?: {
-      residentKey?: unknown;
-      userVerification?: unknown;
-    };
-  };
-  sessionId?: string;
-  sessions?: {
-    id: string;
-    current: boolean;
-  }[];
-};
-
-function createStorage(): DurableObjectStorage {
-  return memoryAuthStorage().storage;
-}
-
-function createMemoryKv(): KVNamespace {
-  const values = new Map<string, string>();
-  return {
-    get: (key: string) => Promise.resolve(values.get(key) ?? null),
-    put: (key: string, value: string) => {
-      values.set(key, value);
-      return Promise.resolve();
-    },
-    delete: (key: string) => {
-      values.delete(key);
-      return Promise.resolve();
-    },
-    list: ({ prefix }: KVNamespaceListOptions = {}) => {
-      const keys = [...values.keys()]
-        .filter((key) => !prefix || key.startsWith(prefix))
-        .sort()
-        .map((name) => ({ name }));
-      return Promise.resolve({ keys, list_complete: true, cacheStatus: null });
-    },
-  } as unknown as KVNamespace;
-}
-
-function createEnv(overrides: Partial<Env> = {}): Env {
-  return {
-    BUILDINGS_KV: {} as KVNamespace,
-    AUTH_STORE: {} as DurableObjectNamespace,
-    AUTH_CLIENT_RATE_LIMITER: createRateLimit(),
-    AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(),
-    AUTH_SENSITIVE_RATE_LIMITER: createRateLimit(),
-    PUBLIC_API_RATE_LIMITER: createRateLimit(),
-    VPC_SERVICE: {} as Fetcher,
-    MINECRAFT_SERVER_URL: 'https://minecraft.internal',
-    MINECRAFT_SERVER_ADDRESS: 'mc.example',
-    MINECRAFT_SERVER_PORT: '25565',
-    CLOUDFLARE_ACCESS_ISSUER: 'https://team.cloudflareaccess.com',
-    CLOUDFLARE_ACCESS_AUD: 'aud',
-    MIKWEB_AUTH_CLIENT_SECRET: 'test-secret',
-    ...overrides,
-  };
-}
+  expect(security.body.sessions).toHaveLength(2);
+  const revoked = await authCall(store, {
+    action: 'revokeAccountSession',
+    sessionId: first.token,
+    targetSessionId: second.record.sidHash,
+  });
+  expect(revoked).toMatchObject({ status: 200, body: { clearSession: false } });
+  expect(
+    (await authCall(store, { action: 'accountSecurity', sessionId: second.token })).status,
+  ).toBe(401);
+  expect(values.has(`account-session:${PLAYER_UUID}:${second.record.sidHash}`)).toBe(false);
+});
 
 function createRateLimit(success = true, keys?: string[]): RateLimit {
   return {

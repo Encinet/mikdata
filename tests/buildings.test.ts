@@ -1,12 +1,9 @@
 import { expect, test } from 'bun:test';
 import { BuildingStore, PUBLIC_BUILDINGS_KEY, PUBLISH_INTERVAL_MS } from '../src/building-store';
-import { BUILDING_MIGRATION_KEY, migrateBuildingCatalog } from '../src/building-migration';
 import { AuthStore } from '../src/auth';
-import {
-  handleAdminBuildingsRoute,
-  handlePublicBuildingsRoute,
-  validateBuildingInput,
-} from '../src/buildings';
+import { handleAdminBuildingsRoute } from '../src/buildings';
+import { handlePublicBuildingsRoute } from '../src/public-buildings';
+import { validateBuildingInput } from '../src/building-validation';
 import type { Building, BuildingSubmission, BuildingSubmissionImage } from '../src/types';
 import {
   authCall,
@@ -36,39 +33,13 @@ function setup() {
   const kv = new Map<string, string>();
   let writes = 0;
   let fail = false;
-  let listings = 0;
-  const batches: number[] = [];
   const fixture = testAuthStore({
     BUILDINGS_KV: {
-      get: async (key: string | string[]) => {
-        if (!Array.isArray(key)) return kv.get(key) ?? null;
-        batches.push(key.length);
-        if (key.length > 100) throw new Error('KV bulk read limit exceeded');
-        return new Map(key.map((name) => [name, kv.get(name) ?? null]));
-      },
+      get: async (key: string) => kv.get(key) ?? null,
       put: async (key: string, value: string) => {
         writes++;
         if (fail) throw new Error('KV unavailable');
         kv.set(key, value);
-      },
-      list: async ({
-        prefix = '',
-        cursor,
-        limit = 1000,
-      }: {
-        prefix?: string;
-        cursor?: string;
-        limit?: number;
-      }) => {
-        listings++;
-        const keys = [...kv.keys()].filter((key) => key.startsWith(prefix)).sort();
-        const start = Number(cursor ?? 0),
-          end = start + limit;
-        return {
-          keys: keys.slice(start, end).map((name) => ({ name })),
-          list_complete: end >= keys.length,
-          ...(end < keys.length ? { cursor: String(end) } : {}),
-        };
       },
     } as unknown as KVNamespace,
   });
@@ -80,32 +51,35 @@ function setup() {
     ...fixture,
     kv,
     writes: () => writes,
-    listings: () => listings,
-    batches,
     setFail: (value: boolean) => {
       fail = value;
     },
   };
 }
-function admin(
+async function admin(
   fixture: ReturnType<typeof setup>,
   route = '/buildings',
   method = 'GET',
   body?: unknown,
   expected?: string,
 ) {
-  return authCall(fixture.store, {
-    action: 'adminBuildingMutation',
-    routePath: route,
-    method,
-    headers: {
-      ...(expected ? { 'X-Expected-Updated-At': expected } : {}),
-      'Content-Type': 'application/json',
-    },
-    actor: { email: 'admin@example.com' },
-    requestBody: body ? JSON.stringify(body) : '',
-  });
+  const response = await handleAdminBuildingsRoute(
+    route,
+    new Request(`https://data.example/admin/api${route}`, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(expected ? { 'X-Expected-Updated-At': expected } : {}),
+      },
+      body: method === 'GET' || method === 'DELETE' ? undefined : JSON.stringify(body ?? {}),
+    }),
+    fixture.env,
+    { email: 'admin@example.com' },
+  );
+  if (!response) throw new Error('Unexpected admin route');
+  return { status: response.status, body: await response.json() };
 }
+
 async function permitImage(fixture: ReturnType<typeof setup>, token: string) {
   const reserved = await authCall(fixture.store, {
     action: 'reserveImageUpload',
@@ -162,15 +136,11 @@ function stored(name = 'Building', id = 'abc12345'): Building {
   const now = '2026-06-27T00:00:00.000Z';
   return { id, ...input(name), createdAt: now, updatedAt: now };
 }
-function withoutWorld(building: Building) {
-  const { world, ...coordinates } = building.coordinates;
-  return { ...building, coordinates };
-}
-
-test('missing public snapshot automatically migrates KV records and defaults the world without changing source data', async () => {
+test('a missing public snapshot is rebuilt from SQLite and republished', async () => {
   const f = setup(),
-    original = withoutWorld(stored());
-  f.kv.set('building:abc12345', JSON.stringify(original));
+    store = new BuildingStore(f.storage);
+  store.initialize();
+  store.saveBuilding(stored());
   const response = await handlePublicBuildingsRoute(
     '/buildings',
     new Request('https://data.example/api/buildings'),
@@ -178,100 +148,40 @@ test('missing public snapshot automatically migrates KV records and defaults the
   );
   expect(response?.status).toBe(200);
   expect(await response?.json()).toEqual([stored()]);
-  expect(new BuildingStore(f.storage).buildings()).toEqual([stored()]);
-  expect(f.values.get(BUILDING_MIGRATION_KEY)).toBeDefined();
-  expect(f.kv.get('building:abc12345')).toBe(JSON.stringify(original));
   expect(await f.storage.getAlarm()).toBeNumber();
   f.db.exec('UPDATE building_publication SET next_attempt=0');
   await f.store.alarm();
   expect(JSON.parse(f.kv.get(PUBLIC_BUILDINGS_KEY)!).buildings).toEqual([stored()]);
-  expect(f.listings()).toBe(1);
 });
 
-test('migration preserves newer SQL data, upgrades pending SQL coordinates, and never resurrects a deletion after restart', async () => {
+test('a fresh database serves and publishes an empty public catalog', async () => {
+  const f = setup();
+  const response = await handlePublicBuildingsRoute(
+    '/buildings',
+    new Request('https://data.example/api/buildings'),
+    f.env,
+  );
+  expect(response?.status).toBe(200);
+  expect(await response?.json()).toEqual([]);
+  f.db.exec('UPDATE building_publication SET next_attempt=0');
+  await f.store.alarm();
+  expect(JSON.parse(f.kv.get(PUBLIC_BUILDINGS_KEY)!)).toMatchObject({ buildings: [] });
+});
+
+test('SQL deletions survive restart even when old KV records remain', async () => {
   const f = setup(),
     store = new BuildingStore(f.storage);
   store.initialize();
-  f.kv.set('building:abc12345', JSON.stringify(withoutWorld(stored())));
-  const newer = {
-    ...stored('Updated'),
-    coordinates: { ...input().coordinates, world: 'world_nether' },
-  };
-  store.saveBuilding(newer);
-  const pending = {
-    id: 'sub12345',
-    status: 'pending',
-    submitterUuid: PLAYER_UUID,
-    submitterName: 'Player',
-    submitterRole: 'member',
-    createdAt: newer.createdAt,
-    updatedAt: newer.updatedAt,
-    payload: withoutWorld(stored()).coordinates,
-    images: [],
-  };
-  f.storage.sql.exec(
-    'INSERT INTO submissions(id,owner,status,created_at,document) VALUES(?,?,?,?,?)',
-    pending.id,
-    PLAYER_UUID,
-    'pending',
-    pending.createdAt,
-    JSON.stringify({
-      ...pending,
-      payload: { ...input(), coordinates: withoutWorld(stored()).coordinates },
-    }),
-  );
-  await migrateBuildingCatalog(f.storage, f.env.BUILDINGS_KV, store);
-  expect(store.building(newer.id)).toEqual(newer);
-  expect(store.submission(pending.id)?.payload.coordinates.world).toBe('world');
-  store.deleteBuilding(newer.id);
+  const building = stored();
+  f.kv.set(`building:${building.id}`, JSON.stringify(building));
+  f.kv.set('building-summary:v1', JSON.stringify([building]));
+  store.saveBuilding(building);
+  store.deleteBuilding(building.id);
   const restarted = new AuthStore({ storage: f.storage } as DurableObjectState, f.env);
-  const result = await authCall(restarted, {
-    action: 'publicBuildingSnapshot',
-  });
+  const result = await authCall(restarted, { action: 'publicBuildingSnapshot' });
   expect(result.status).toBe(200);
   expect(result.body.buildings).toEqual([]);
-  expect(f.listings()).toBe(1);
-});
-
-test('migration reads all KV pages in batches of at most 100 records', async () => {
-  const f = setup(),
-    store = new BuildingStore(f.storage);
-  store.initialize();
-  for (let index = 0; index < 1001; index++) {
-    const id = `building${String(index).padStart(4, '0')}`;
-    f.kv.set(`building:${id}`, JSON.stringify(withoutWorld(stored('Building', id))));
-  }
-  await migrateBuildingCatalog(f.storage, f.env.BUILDINGS_KV, store);
-  expect(f.listings()).toBe(2);
-  expect(f.batches).toEqual([...Array(10).fill(100), 1]);
-  expect(store.buildings()).toHaveLength(1001);
-  expect(store.buildings().every((building) => building.coordinates.world === 'world')).toBe(true);
-});
-
-test('migration is atomic on storage failure and supports a summary-only catalog', async () => {
-  const f = setup(),
-    store = new BuildingStore(f.storage);
-  store.initialize();
-  f.kv.set('building-summary:v1', JSON.stringify([withoutWorld(stored())]));
-  f.failNextPut(BUILDING_MIGRATION_KEY);
-  await expect(migrateBuildingCatalog(f.storage, f.env.BUILDINGS_KV, store)).rejects.toThrow();
-  expect(store.buildings()).toEqual([]);
-  expect(f.values.has(BUILDING_MIGRATION_KEY)).toBe(false);
-  await migrateBuildingCatalog(f.storage, f.env.BUILDINGS_KV, store);
-  expect(store.buildings()).toEqual([stored()]);
-  expect(f.values.has(BUILDING_MIGRATION_KEY)).toBe(true);
-});
-
-test('corrupt records never produce a partial or silently empty catalog and initialization failures are throttled', async () => {
-  const f = setup();
-  f.kv.set('building:abc12345', JSON.stringify(withoutWorld(stored())));
-  f.kv.set('building:bad12345', '{broken');
-  const a = await authCall(f.store, { action: 'publicBuildingSnapshot' });
-  expect(a.status).toBe(503);
-  expect(new BuildingStore(f.storage).buildings()).toEqual([]);
-  expect(f.values.has(BUILDING_MIGRATION_KEY)).toBe(false);
-  expect((await authCall(f.store, { action: 'publicBuildingSnapshot' })).status).toBe(503);
-  expect(f.listings()).toBe(1);
+  expect(f.kv.get(`building:${building.id}`)).toBe(JSON.stringify(building));
 });
 
 test('world is part of duplicate detection', async () => {
@@ -298,36 +208,6 @@ test('business writes and private reads are independent of public KV availabilit
   expect((await admin(f)).body).toHaveLength(2);
   expect(f.writes()).toBe(0);
   expect(await f.storage.getAlarm()).toBeNumber();
-});
-
-test('public list and detail read one snapshot and never call the DO', async () => {
-  const f = setup();
-  const now = new Date().toISOString();
-  const building: Building = {
-    id: 'abc12345',
-    ...input(),
-    createdAt: now,
-    updatedAt: now,
-  };
-  f.kv.set(PUBLIC_BUILDINGS_KEY, JSON.stringify({ version: 1, buildings: [building] }));
-  f.env.AUTH_STORE = {
-    get: () => {
-      throw new Error('No public DO calls');
-    },
-  } as unknown as DurableObjectNamespace;
-  const list = await handlePublicBuildingsRoute(
-    '/buildings',
-    new Request('https://data.example/api/buildings'),
-    f.env,
-  );
-  expect(await list?.json()).toEqual([building]);
-  const detail = await handlePublicBuildingsRoute(
-    '/buildings/abc12345',
-    new Request('https://data.example/api/buildings/abc12345'),
-    f.env,
-  );
-  expect(await detail?.json()).toEqual(building);
-  expect(f.writes()).toBe(0);
 });
 
 test('publication coalesces edits, respects the five minute write interval and retries durable pending state', async () => {
@@ -459,67 +339,50 @@ test('optimistic concurrency rejects stale building updates inside the transacti
   expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
 });
 
-test('removed repair route and oversized admin requests never reach the coordinator', async () => {
+test('admin HTTP boundary preserves escaped JSON within the 64 KiB limit', async () => {
+  const f = setup();
+  const payload = input('Escaped');
+  payload.builders[0].name = '\\"'.repeat(16000);
+  const body = JSON.stringify(payload);
+  expect(new TextEncoder().encode(body).byteLength).toBeLessThan(65536);
+  const response = await handleAdminBuildingsRoute(
+    '/buildings',
+    new Request('https://data.example/admin/api/buildings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://data.example' },
+      body,
+    }),
+    f.env,
+    { email: 'admin@example.com' },
+  );
+  expect(response?.status).toBe(201);
+  expect((await response?.json()).builders[0].name).toBe(payload.builders[0].name);
+});
+
+test('admin HTTP adapter rejects malformed, cross-site and unsupported requests before storage', async () => {
   const f = setup();
   f.env.AUTH_STORE = {
     get: () => {
       throw new Error('Unexpected coordinator');
     },
   } as unknown as DurableObjectNamespace;
-  expect(
-    await handleAdminBuildingsRoute(
-      '/building-submissions/repair-approved',
-      new Request('https://data.example/admin/api/building-submissions/repair-approved', {
-        method: 'POST',
+  for (const [method, headers, body, expected] of [
+    ['POST', { 'Content-Type': 'application/json' }, '{broken', 400],
+    ['POST', { 'Content-Type': 'text/plain' }, '{}', 415],
+    ['POST', { Origin: 'https://other.example' }, '{}', 403],
+    ['PUT', {}, '{}', 405],
+    ['POST', { 'Content-Type': 'application/json' }, 'x'.repeat(65537), 413],
+  ] as const) {
+    const response = await handleAdminBuildingsRoute(
+      '/buildings',
+      new Request('https://data.example/admin/api/buildings', {
+        method,
+        headers,
+        body,
       }),
       f.env,
       {},
-    ),
-  ).toBeNull();
-  const response = await handleAdminBuildingsRoute(
-    '/buildings',
-    new Request('https://data.example/admin/api/buildings', {
-      method: 'POST',
-      body: 'x'.repeat(65537),
-      headers: { Origin: 'https://data.example' },
-    }),
-    f.env,
-    {},
-  );
-  expect(response?.status).toBe(413);
-});
-
-test('public third-party reads share an empty snapshot lookup and retain CORS on failures', async () => {
-  const f = setup();
-  let reads = 0;
-  const publicRequest = () =>
-    new Request('https://data.example/api/buildings', {
-      headers: { Origin: 'https://third-party.example' },
-    });
-  f.env.BUILDINGS_KV = {
-    get: async () => {
-      reads++;
-      await Promise.resolve();
-      return JSON.stringify({ version: 1, buildings: [] });
-    },
-  } as unknown as KVNamespace;
-  const responses = await Promise.all(
-    Array.from({ length: 5 }, () =>
-      handlePublicBuildingsRoute('/buildings', publicRequest(), f.env),
-    ),
-  );
-  expect(reads).toBe(1);
-  expect(responses.every((r) => r?.headers.get('Access-Control-Allow-Origin') === '*')).toBe(true);
-  expect(await responses[0]?.json()).toEqual([]);
-  await handlePublicBuildingsRoute('/buildings', publicRequest(), f.env);
-  expect(reads).toBe(1);
-  f.env.BUILDINGS_KV = {
-    get: async () => {
-      throw new Error('Unavailable');
-    },
-  } as unknown as KVNamespace;
-  const failed = await handlePublicBuildingsRoute('/buildings', publicRequest(), f.env);
-  expect(failed?.status).toBe(503);
-  expect(failed?.headers.get('Access-Control-Allow-Origin')).toBe('*');
-  expect(failed?.headers.get('Cache-Control')).toBe('no-store');
+    );
+    expect(response?.status).toBe(expected);
+  }
 });

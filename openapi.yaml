@@ -43,7 +43,7 @@ paths:
   /buildings:
     get:
       summary: 获取建筑列表
-      description: 从内存、Worker Cache API 和已发布的 KV 建筑快照读取公开目录；公开请求不进入 Durable Object。后台变更合并发布，公开读取受快照发布及缓存时效影响。支持按 tag、type、builder、locale 过滤。
+      description: 从内存、Worker Cache API 和已发布的 KV 建筑快照读取公开目录，快照缺失时从 Durable Object 恢复。后台变更合并发布，活跃 Worker 实例每分钟最多检查一次快照，公开读取受快照发布及缓存时效影响。筛选参数忽略首尾空白，支持按 tag、type、builder、locale 过滤。
       operationId: getBuildings
       parameters:
         - name: tag
@@ -61,6 +61,7 @@ paths:
             type: string
         - name: locale
           in: query
+          description: 不提供或为空时返回双语字段；zh-CN 返回中文，en 及其他非空值返回英文。
           schema:
             type: string
       responses:

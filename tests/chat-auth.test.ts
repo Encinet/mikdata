@@ -77,6 +77,7 @@ test('logout deletes authority before notifying every connection of that exact s
     expect(path).toBe('/api/chat/revoke');
     expect(init?.redirect).toBe('manual');
     expect(values.has(`session:${expectedRef}`)).toBe(false);
+    expect(values.has(`account-session:${PLAYER_UUID}:${expectedRef}`)).toBe(false);
     notifications.push(body.sessionRefs); return Response.json({ ok: true });
   });
   const own = await seedSession(values);
