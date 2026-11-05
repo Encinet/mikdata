@@ -43,7 +43,6 @@ paths:
   /buildings:
     get:
       summary: 获取建筑列表
-      description: 从内存、Worker Cache API 和已发布的 KV 建筑快照读取公开目录，快照缺失时从 Durable Object 恢复。后台变更合并发布，活跃 Worker 实例每分钟最多检查一次快照，公开读取受快照发布及缓存时效影响。筛选参数忽略首尾空白，支持按 tag、type、builder、locale 过滤。
       operationId: getBuildings
       parameters:
         - name: tag
@@ -80,7 +79,7 @@ paths:
         in: path
         required: true
         schema:
-          type: string
+          $ref: "#/components/schemas/BuildingId"
     get:
       summary: 获取单个建筑
       operationId: getBuilding
@@ -249,6 +248,14 @@ components:
         source:
           $ref: "#/components/schemas/BuildingSource"
 
+    BuildingId:
+      type: string
+      minLength: 32
+      maxLength: 32
+      pattern: '^[0-9A-Fa-f]{32}$'
+      description: 服务端分配的固定标识。
+      example: b40cfbaf9cd674ce203b81e7a8f690d2
+
     Building:
       allOf:
         - $ref: "#/components/schemas/BuildingInput"
@@ -256,7 +263,8 @@ components:
           required: [id, createdAt, updatedAt]
           properties:
             id:
-              type: string
+              $ref: "#/components/schemas/BuildingId"
+              readOnly: true
             createdAt:
               type: string
               format: date-time

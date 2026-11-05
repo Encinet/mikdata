@@ -1,6 +1,6 @@
 import type { Building, BuildingInput, BuildingSubmissionImage, Coord, I18n } from './types';
-type Input = BuildingInput;
-export type ValidationResult = { ok: true; value: Input } | { ok: false; message: string };
+import { isBuildingId } from './building-id';
+export type ValidationResult = { ok: true; value: BuildingInput } | { ok: false; message: string };
 const MAX_NAME_LEN = 200;
 const MAX_DESC_LEN = 2000;
 const MAX_URL_LEN = 500;
@@ -9,7 +9,6 @@ const MAX_TAGS = 20;
 const MAX_IMAGES = 15;
 const MAX_BUILDERS = 50;
 const MAX_NOTE_LEN = 500;
-const ID_RE = /^[a-z0-9]{8,24}$/i;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const INPUT_FIELDS = [
@@ -247,12 +246,12 @@ function validateInput(data: unknown, normalize: boolean, stored: boolean): Vali
     }
   }
 
-  return { ok: true, value: normalize ? normalizeInput(building) : (building as unknown as Input) };
+  return { ok: true, value: normalize ? normalizeInput(building) : (building as unknown as BuildingInput) };
 }
 
-function normalizeInput(building: Record<string, unknown>): Input {
+function normalizeInput(building: Record<string, unknown>): BuildingInput {
   const source = building.source as Record<string, unknown> | null | undefined;
-  const normalized: Input = {
+  const normalized: BuildingInput = {
     name: normalizeI18n(building.name as Record<string, unknown>),
     description: normalizeI18n(building.description as Record<string, unknown>),
     coordinates: normalizeCoordinates(building.coordinates as Record<string, unknown>),
@@ -261,7 +260,7 @@ function normalizeInput(building: Record<string, unknown>): Input {
       uuid: (builder.uuid as string).toLowerCase(),
       weight: builder.weight as number,
     })),
-    buildType: building.buildType as Input['buildType'],
+    buildType: building.buildType as BuildingInput['buildType'],
     images: (building.images as string[]).map((image) => image.trim()),
     buildDate: (building.buildDate as string).trim(),
   };
@@ -343,8 +342,7 @@ export function isBuildingDocument(building: unknown): building is Building {
 
   const record = building as Partial<Building>;
   return (
-    typeof record.id === 'string' &&
-    ID_RE.test(record.id) &&
+    isBuildingId(record.id) &&
     typeof record.createdAt === 'string' &&
     !Number.isNaN(Date.parse(record.createdAt)) &&
     typeof record.updatedAt === 'string' &&

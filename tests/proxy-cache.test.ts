@@ -24,7 +24,7 @@ function fixture(path = '/players') {
   });
   const route = matchProxyRoute(path)!;
   const read = () =>
-    serveProxyRoute(route, new Request(`https://data.example/api${path}`), env, {
+    serveProxyRoute(route, env, {
       waitUntil: (promise: Promise<unknown>) => background.push(promise),
     } as any);
   return {

@@ -10,7 +10,7 @@ afterEach(() => {
 });
 function fixture() {
   const building: Building = {
-    id: '12345678',
+    id: 'b40cfbaf9cd674ce203b81e7a8f690d2',
     name: { 'zh-CN': '建筑', en: 'Building' },
     description: { 'zh-CN': '描述', en: 'Description' },
     coordinates: { world: 'world', x: 0, y: 64, z: 0 },
@@ -59,7 +59,9 @@ test('query filtering and cache keys share whitespace normalization', async () =
     const padded = await (await read(f, `?${key}=%20${value}%20`)).text();
     const canonical = await read(f, `?${field}`);
     expect(await canonical.text()).toBe(padded);
-    expect(JSON.parse(padded)).toHaveLength(1);
+    const buildings = JSON.parse(padded);
+    expect(buildings).toHaveLength(1);
+    expect(buildings[0].id).toBe(f.building.id);
   }
   expect(await (await read(f, '?type=%20')).json()).toHaveLength(1);
 });
@@ -98,7 +100,7 @@ test('snapshot refreshes are cached and revision changes invalidate both list an
     }
     expect(f.reads()).toBe(3);
     expect(await (await read(f, '', f.building.id)).json()).toEqual(f.building);
-    expect((await read(f, '', 'missing123')).status).toBe(404);
+    expect((await read(f, '', '0'.repeat(32))).status).toBe(404);
     f.update();
     now += 60_000;
     expect((await (await read(f)).json())[0].name.en).toBe('New');

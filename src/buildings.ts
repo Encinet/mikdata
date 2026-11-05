@@ -1,13 +1,19 @@
 import type { Env } from './env';
 import type { AdminActor } from './types';
 import type { AdminBuildingCommand } from './building-service';
+import { BUILDING_ID_PATTERN } from './building-id';
 import { AUTH_STORE_NAME } from './constants';
 import { json } from './http';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-const error = (message: string, status: number, request: Request, env: Env): Response =>
-  json({ error: message }, status, request, env);
+const BUILDING_ROUTE_RE = new RegExp(`^/buildings/(${BUILDING_ID_PATTERN})$`, 'i');
+const SUBMISSION_ROUTE_RE = new RegExp(
+  `^/building-submissions/(${BUILDING_ID_PATTERN})(?:/(approve|reject))?$`,
+  'i',
+);
+const error = (message: string, status: number): Response =>
+  json({ error: message }, status);
 
 /** Authenticate at the Worker boundary; the DO owns transactions and calls the service directly. */
 export async function handleAdminBuildingsRoute(
@@ -18,21 +24,21 @@ export async function handleAdminBuildingsRoute(
 ): Promise<Response | null> {
   if (!isAdminBuildingsRoute(routePath)) return null;
   if (MUTATING_METHODS.has(request.method) && !isSameOriginBrowserRequest(request))
-    return error('forbidden', 403, request, env);
+    return error('forbidden', 403);
   const target = adminTarget(routePath, request.method);
-  if (!target) return error('method not allowed', 405, request, env);
-  const text = await readLimitedRequestText(request, env);
+  if (!target) return error('method not allowed', 405);
+  const text = await readLimitedRequestText(request);
   if (!text.ok) return text.response;
   let body: unknown = {};
   if (request.method !== 'GET' && request.method !== 'DELETE') {
     const optional = routePath.startsWith('/building-submissions/');
     if (text.text.trim() || !optional) {
       if (!(request.headers.get('Content-Type') ?? '').toLowerCase().includes('application/json'))
-        return error('content-type must be application/json', 415, request, env);
+        return error('content-type must be application/json', 415);
       try {
         body = JSON.parse(text.text);
       } catch {
-        return error('invalid JSON body', 400, request, env);
+        return error('invalid JSON body', 400);
       }
     }
   }
@@ -51,17 +57,16 @@ export async function handleAdminBuildingsRoute(
     }),
   );
   const result = (await response.json()) as { status: number; body: unknown };
-  return json(result.body, result.status, request, env);
+  return json(result.body, result.status);
 }
 
 async function readLimitedRequestText(
   request: Request,
-  env: Env,
 ): Promise<{ ok: true; text: string } | { ok: false; response: Response }> {
   const contentLength = request.headers.get('content-length');
 
   if (contentLength && Number.parseInt(contentLength, 10) > MAX_BODY_BYTES) {
-    return { ok: false, response: error('request body too large', 413, request, env) };
+    return { ok: false, response: error('request body too large', 413) };
   }
 
   if (!request.body) {
@@ -83,7 +88,7 @@ async function readLimitedRequestText(
     size += value.byteLength;
     if (size > MAX_BODY_BYTES) {
       await reader.cancel().catch(() => undefined);
-      return { ok: false, response: error('request body too large', 413, request, env) };
+      return { ok: false, response: error('request body too large', 413) };
     }
 
     text += decoder.decode(value, { stream: true });
@@ -115,8 +120,8 @@ function isAdminBuildingsRoute(routePath: string): boolean {
     routePath === '/buildings' ||
     routePath === '/buildings/import' ||
     routePath === '/building-submissions' ||
-    /^\/buildings\/[a-z0-9]{8,24}$/i.test(routePath) ||
-    /^\/building-submissions\/[a-z0-9]{8,24}(?:\/(?:approve|reject))?$/i.test(routePath)
+    BUILDING_ROUTE_RE.test(routePath) ||
+    SUBMISSION_ROUTE_RE.test(routePath)
   );
 }
 
@@ -135,7 +140,7 @@ function adminTarget(
     return method === 'POST' ? { operation: 'importBuildings' } : null;
   if (route === '/building-submissions')
     return method === 'GET' ? { operation: 'listSubmissions' } : null;
-  const building = route.match(/^\/buildings\/([a-z0-9]{8,24})$/i);
+  const building = route.match(BUILDING_ROUTE_RE);
   if (building) {
     const operation =
       method === 'PUT'
@@ -147,9 +152,7 @@ function adminTarget(
             : null;
     return operation ? { operation, id: building[1] } : null;
   }
-  const submission = route.match(
-    /^\/building-submissions\/([a-z0-9]{8,24})(?:\/(approve|reject))?$/i,
-  );
+  const submission = route.match(SUBMISSION_ROUTE_RE);
   if (!submission || method !== 'PUT') return null;
   const action = submission[2]?.toLowerCase();
   return {

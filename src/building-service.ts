@@ -1,4 +1,5 @@
 import type { BuildingStore } from './building-store';
+import { createBuildingId } from './building-id';
 import type { AdminActor, Building, BuildingInput, BuildingSubmission } from './types';
 import {
   stripStoredBuildingFields,
@@ -49,14 +50,6 @@ function reviewNote(value: unknown): string | undefined {
 }
 function nextUpdatedAt(previous: string): string {
   return new Date(Math.max(Date.now(), Date.parse(previous) + 1)).toISOString();
-}
-function duplicate(left: BuildingInput, right: BuildingInput): boolean {
-  return (
-    (left.name['zh-CN'] === right.name['zh-CN'] || left.name.en === right.name.en) &&
-    left.coordinates.world === right.coordinates.world &&
-    left.buildDate === right.buildDate &&
-    left.builders[0]?.uuid === right.builders[0]?.uuid
-  );
 }
 
 /** The owning Durable Object provides the transaction and authorization boundary. */
@@ -132,7 +125,7 @@ export class BuildingService {
       createdAt: now,
       updatedAt: now,
     };
-    this.store.saveSubmission(submission);
+    this.store.insertSubmission(submission);
     return result({ submission }, 201);
   }
 
@@ -152,7 +145,7 @@ export class BuildingService {
   private create(command: AdminBuildingCommand): BuildingResult {
     const input = validateBuildingInput(command.body);
     if (!input.ok) return error(input.message, 422);
-    const existing = this.findDuplicate(input.value);
+    const existing = this.store.duplicateBuildingId(input.value);
     if (existing) return error(`duplicate building: ${existing}`, 409);
     const now = new Date().toISOString();
     const building = {
@@ -161,7 +154,7 @@ export class BuildingService {
       createdAt: now,
       updatedAt: now,
     };
-    this.store.saveBuilding(building);
+    this.store.insertBuilding(building);
     this.audit('create', building.id, command.actor);
     return result(building, 201);
   }
@@ -200,23 +193,17 @@ export class BuildingService {
       createdAt: previous.createdAt,
       updatedAt: nextUpdatedAt(previous.updatedAt),
     };
-    const existing = this.findDuplicate(building, id);
+    const existing = this.store.duplicateBuildingId(building, id);
     if (existing) return error(`duplicate building: ${existing}`, 409);
-    this.store.saveBuilding(building);
+    this.store.updateBuilding(building);
     this.audit(command.operation === 'patchBuilding' ? 'patch' : 'replace', id, command.actor);
     return result(building);
   }
 
   private delete(id: string, command: AdminBuildingCommand): BuildingResult {
-    const previous = this.store.building(id);
-    if (!previous) return error('building not found', 404);
-    const conflict = this.conflict(
-      command,
-      previous.updatedAt,
-      'building has changed, refresh before deleting',
-    );
-    if (conflict) return conflict;
-    this.store.deleteBuilding(id);
+    const deleted = this.store.deleteBuilding(id, command.expectedUpdatedAt?.trim() || undefined);
+    if (deleted === 'not-found') return error('building not found', 404);
+    if (deleted === 'conflict') return error('building has changed, refresh before deleting', 409);
     this.audit('delete', id, command.actor);
     return result({ deleted: id });
   }
@@ -227,27 +214,38 @@ export class BuildingService {
     if (!values.length) return error('import body must not be empty', 400);
     if (values.length > 100) return error('import exceeds max count 100', 413);
     const inputs: BuildingInput[] = [];
+    const seen = new Map<string, number>();
     for (const [index, value] of values.entries()) {
       const input = validateBuildingInput(stripStoredBuildingFields(value));
       if (!input.ok) return error(`buildings[${index}]: ${input.message}`, 422);
+      for (const locale of ['zh-CN', 'en'] as const) {
+        const key = JSON.stringify([
+          input.value.coordinates.world, input.value.buildDate, input.value.builders[0].uuid,
+          locale, input.value.name[locale],
+        ]);
+        const previous = seen.get(key);
+        if (previous !== undefined) return error(`duplicate import item: import item ${previous + 1}`, 422);
+        seen.set(key, index);
+      }
       inputs.push(input.value);
     }
-    for (let i = 0; i < inputs.length; i++) {
-      if (inputs.slice(i + 1).some((next) => duplicate(inputs[i], next)))
-        return error(`duplicate import item: import item ${i + 1}`, 422);
-    }
-    for (const existing of this.store.buildings()) {
-      if (inputs.some((input) => duplicate(existing, input)))
-        return error(`duplicate building: ${existing.id}`, 409);
+    for (const input of inputs) {
+      const existing = this.store.duplicateBuildingId(input);
+      if (existing) return error(`duplicate building: ${existing}`, 409);
     }
     const now = new Date().toISOString();
-    const buildings = inputs.map((input) => ({
-      id: this.allocateId('building'),
-      ...input,
-      createdAt: now,
-      updatedAt: now,
-    }));
-    for (const building of buildings) this.store.saveBuilding(building);
+    const reserved = new Set<string>();
+    const buildings = inputs.map((input) => {
+      const id = this.allocateId('building', reserved);
+      reserved.add(id);
+      return {
+        id,
+        ...input,
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
+    this.store.insertBuildings(buildings);
     for (const building of buildings) this.audit('import', building.id, command.actor);
     return result({ imported: buildings.length, buildings }, 201);
   }
@@ -282,7 +280,7 @@ export class BuildingService {
         expiresAt: new Date(now.getTime() + RETENTION_MS).toISOString(),
         updatedAt: now.toISOString(),
       });
-      this.store.saveSubmission(submission);
+      this.store.updateSubmission(submission);
       return result({ submission });
     }
     let payload = submission.payload,
@@ -302,14 +300,14 @@ export class BuildingService {
     }
     let building: Building | undefined;
     if (action === 'approve') {
-      const existing = this.findDuplicate(payload);
+      const existing = this.store.duplicateBuildingId(payload);
       if (existing) return error(`duplicate building: ${existing}`, 409);
       const now = new Date().toISOString();
       building = { id: this.allocateId('building'), ...payload, createdAt: now, updatedAt: now };
       submission.status = 'approved';
       submission.buildingId = building.id;
       submission.updatedAt = now;
-      this.store.saveBuilding(building);
+      this.store.insertBuilding(building);
     } else submission.updatedAt = nextUpdatedAt(submission.updatedAt);
     Object.assign(submission, {
       payload,
@@ -317,22 +315,17 @@ export class BuildingService {
       reviewer: this.actor(command.actor),
       reviewNote: reviewNote(data.reviewNote),
     });
-    this.store.saveSubmission(submission);
+    this.store.updateSubmission(submission);
     if (building) this.audit('approve-submission', building.id, command.actor);
     return result(building ? { submission, building } : { submission });
   }
 
-  private findDuplicate(input: BuildingInput, excluding?: string): string | null {
-    return (
-      this.store
-        .buildings()
-        .find((building) => building.id !== excluding && duplicate(building, input))?.id ?? null
-    );
-  }
-  private allocateId(kind: 'building' | 'submission'): string {
+  private allocateId(kind: 'building' | 'submission', reserved?: ReadonlySet<string>): string {
     for (let attempt = 0; attempt < 5; attempt++) {
-      const id = crypto.randomUUID().replaceAll('-', '').slice(0, 16);
-      if (!(kind === 'building' ? this.store.building(id) : this.store.submission(id))) return id;
+      const id = createBuildingId();
+      if (reserved?.has(id)) continue;
+      if (!(kind === 'building' ? this.store.buildingIdExists(id) : this.store.submissionIdExists(id)))
+        return id;
     }
     throw new Error(`Could not allocate ${kind} id`);
   }

@@ -1,4 +1,4 @@
-import type { Building, BuildingSubmission, BuildingSubmissionImage } from './types';
+import type { Building, BuildingInput, BuildingSubmission, BuildingSubmissionImage } from './types';
 
 export const PUBLIC_BUILDINGS_KEY = 'buildings:public:v2';
 export const PUBLISH_INTERVAL_MS = 5 * 60_000;
@@ -11,6 +11,9 @@ export interface PublicBuildingsSnapshot {
 interface DocumentRow extends Record<string, SqlStorageValue> {
   document: string;
 }
+interface IdRow extends Record<string, SqlStorageValue> {
+  id: string;
+}
 interface PublicationRow extends Record<string, SqlStorageValue> {
   revision: number;
   published_revision: number;
@@ -21,30 +24,6 @@ interface PublicationRow extends Record<string, SqlStorageValue> {
 /** All methods are local SQL operations. Call mutations inside the owning DO's transaction. */
 export class BuildingStore {
   constructor(private readonly storage: DurableObjectStorage) {}
-  initialize(): void {
-    this.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS buildings (id TEXT PRIMARY KEY, document TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS submissions (
-        id TEXT PRIMARY KEY, owner TEXT NOT NULL, status TEXT NOT NULL,
-        created_at TEXT NOT NULL, expires_at INTEGER, document TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS submissions_owner ON submissions(owner, created_at DESC);
-      CREATE INDEX IF NOT EXISTS submissions_status ON submissions(status, created_at DESC);
-      CREATE INDEX IF NOT EXISTS submissions_expiry ON submissions(expires_at);
-      CREATE TABLE IF NOT EXISTS building_publication (
-        id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0,
-        published_revision INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0,
-        failures INTEGER NOT NULL DEFAULT 0
-      );
-      INSERT OR IGNORE INTO building_publication(id) VALUES(1);
-      CREATE TABLE IF NOT EXISTS image_uploads (
-        id TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL, image TEXT
-      );
-      CREATE INDEX IF NOT EXISTS uploads_owner ON image_uploads(owner, created_at);
-      CREATE INDEX IF NOT EXISTS uploads_expiry ON image_uploads(expires_at);
-    `);
-  }
   buildings(): Building[] {
     return this.storage.sql
       .exec<DocumentRow>('SELECT document FROM buildings ORDER BY id')
@@ -57,11 +36,49 @@ export class BuildingStore {
       .toArray()[0];
     return row ? (JSON.parse(row.document) as Building) : null;
   }
-  saveBuilding(building: Building): void {
+  buildingIdExists(id: string): boolean {
+    return this.storage.sql.exec<IdRow>('SELECT id FROM buildings WHERE id=?', id).toArray().length > 0;
+  }
+  duplicateBuildingId(input: BuildingInput, excluding = ''): string | null {
+    const common = [input.coordinates.world, input.buildDate, input.builders[0].uuid];
+    const row = this.storage.sql.exec<IdRow>(
+      `SELECT id FROM buildings
+       WHERE json_extract(document, '$.coordinates.world')=?
+         AND json_extract(document, '$.buildDate')=?
+         AND json_extract(document, '$.builders[0].uuid')=?
+         AND json_extract(document, '$.name."zh-CN"')=? AND id<>?
+       UNION ALL
+       SELECT id FROM buildings
+       WHERE json_extract(document, '$.coordinates.world')=?
+         AND json_extract(document, '$.buildDate')=?
+         AND json_extract(document, '$.builders[0].uuid')=?
+         AND json_extract(document, '$.name.en')=? AND id<>?
+       ORDER BY id LIMIT 1`,
+      ...common, input.name['zh-CN'], excluding,
+      ...common, input.name.en, excluding,
+    ).toArray()[0];
+    return row?.id ?? null;
+  }
+  insertBuilding(building: Building): void {
+    this.insertBuildingRow(building);
+    this.markChanged();
+  }
+  insertBuildings(buildings: readonly Building[]): void {
+    for (const building of buildings) this.insertBuildingRow(building);
+    if (buildings.length) this.markChanged();
+  }
+  private insertBuildingRow(building: Building): void {
     this.storage.sql.exec(
-      'INSERT INTO buildings(id,document) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document',
+      'INSERT INTO buildings(id,document) VALUES(?,?)',
       building.id,
       JSON.stringify(building),
+    );
+  }
+  updateBuilding(building: Building): void {
+    this.storage.sql.exec(
+      'UPDATE buildings SET document=? WHERE id=?',
+      JSON.stringify(building),
+      building.id,
     );
     this.markChanged();
   }
@@ -72,15 +89,29 @@ export class BuildingStore {
     const state = this.publication();
     if (state.revision <= state.published_revision) this.markChanged();
   }
-  deleteBuilding(id: string): void {
-    this.storage.sql.exec('DELETE FROM buildings WHERE id=?', id);
-    this.markChanged();
+  deleteBuilding(id: string, expectedUpdatedAt?: string): 'deleted' | 'not-found' | 'conflict' {
+    const expected = expectedUpdatedAt ?? null;
+    const deleted = this.storage.sql.exec<IdRow>(
+      `DELETE FROM buildings WHERE id=?
+       AND (? IS NULL OR json_extract(document, '$.updatedAt')=?) RETURNING id`,
+      id, expected, expected,
+    ).toArray().length > 0;
+    if (deleted) {
+      this.markChanged();
+      return 'deleted';
+    }
+    return this.buildingIdExists(id) ? 'conflict' : 'not-found';
   }
   private markChanged(): void {
     this.storage.sql.exec(
       'UPDATE building_publication SET revision=revision+1, next_attempt=max(next_attempt,?) WHERE id=1',
       Date.now() + 1000,
     );
+  }
+  submissionIdExists(id: string): boolean {
+    return this.storage.sql
+      .exec<{ id: string }>('SELECT id FROM submissions WHERE id=?', id)
+      .toArray().length > 0;
   }
   submission(id: string): BuildingSubmission | null {
     const row = this.storage.sql
@@ -120,7 +151,18 @@ export class BuildingStore {
       )
       .one().count;
   }
-  saveSubmission(submission: BuildingSubmission): void {
+  insertSubmission(submission: BuildingSubmission): void {
+    this.storage.sql.exec(
+      'INSERT INTO submissions(id,owner,status,created_at,expires_at,document) VALUES(?,?,?,?,?,?)',
+      submission.id,
+      submission.submitterUuid,
+      submission.status,
+      submission.createdAt,
+      submission.expiresAt ? Date.parse(submission.expiresAt) : null,
+      JSON.stringify(submission),
+    );
+  }
+  updateSubmission(submission: BuildingSubmission): void {
     // Preserve the review result briefly; a successful approval and its building commit together.
     const expires =
       submission.status === 'pending'
@@ -130,14 +172,11 @@ export class BuildingStore {
           );
     if (expires !== null) submission.expiresAt = new Date(expires).toISOString();
     this.storage.sql.exec(
-      `INSERT INTO submissions(id,owner,status,created_at,expires_at,document) VALUES(?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET status=excluded.status,expires_at=excluded.expires_at,document=excluded.document`,
-      submission.id,
-      submission.submitterUuid,
+      'UPDATE submissions SET status=?,expires_at=?,document=? WHERE id=?',
       submission.status,
-      submission.createdAt,
       expires,
       JSON.stringify(submission),
+      submission.id,
     );
   }
   publication(): PublicationRow {

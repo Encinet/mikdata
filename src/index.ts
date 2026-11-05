@@ -4,8 +4,7 @@ import { adminPage } from './admin';
 import { AuthStore, handleAuthRoute } from './auth';
 import { handleAdminBuildingsRoute } from './buildings';
 import { handlePublicBuildingsRoute } from './public-buildings';
-import { corsHeaders } from './http';
-import { json, proxyJson } from './http';
+import { json, proxyJson, PUBLIC_CORS_HEADERS } from './http';
 import { matchProxyRoute, refreshProxyRoutes, serveProxyRoute } from './proxy';
 
 const ADMIN_API_BASE_PATH = '/admin/api';
@@ -33,15 +32,15 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
       return new Response(null, { status: 204 });
     }
 
-    return new Response(null, { status: 204, headers: corsHeaders(request, env) });
+    return new Response(null, { status: 204, headers: PUBLIC_CORS_HEADERS });
   }
 
   if (url.pathname === '/health') {
-    return proxyJson({ ok: true }, 200, request, env, 'HIT', 'FALLBACK');
+    return proxyJson({ ok: true }, 200, 'HIT', 'FALLBACK');
   }
 
   if (isAuthPath(url.pathname)) {
-    return withoutCors((await handleAuthRoute(url.pathname, request, env)) ?? json({ error: 'Not found' }, 404, request, env));
+    return withoutCors((await handleAuthRoute(url.pathname, request, env)) ?? json({ error: 'Not found' }, 404));
   }
 
   if (url.pathname === '/admin' || url.pathname === '/admin/') {
@@ -68,7 +67,7 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
       return withoutCors(adminResponse);
     }
 
-    return withoutCors(json({ error: 'Not found' }, 404, request, env));
+    return withoutCors(json({ error: 'Not found' }, 404));
   }
 
   if (url.pathname.startsWith('/admin')) {
@@ -78,11 +77,11 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
       return withoutCors(access.response);
     }
 
-    return withoutCors(json({ error: 'Not found' }, 404, request, env));
+    return withoutCors(json({ error: 'Not found' }, 404));
   }
 
   if (!url.pathname.startsWith(`${PUBLIC_BASE_PATH}/`)) {
-    return json({ error: 'Not found' }, 404, request, env);
+    return json({ error: 'Not found' }, 404);
   }
 
   if (request.method === 'GET') {
@@ -103,16 +102,16 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
   }
 
   if (request.method !== 'GET') {
-    return json({ error: 'Method not allowed' }, 405, request, env);
+    return json({ error: 'Method not allowed' }, 405);
   }
 
   const route = matchProxyRoute(routePath);
 
   if (!route) {
-    return json({ error: 'Not found' }, 404, request, env);
+    return json({ error: 'Not found' }, 404);
   }
 
-  return serveProxyRoute(route, request, env, ctx);
+  return serveProxyRoute(route, env, ctx);
 }
 
 /** MikData only forwards public board records; the game server owns all board data. */
@@ -120,23 +119,23 @@ async function serveCommunityBoard(request: Request, env: Env): Promise<Response
   const pathname = new URL(request.url).pathname;
   const headers = { 'Cache-Control': 'no-store' };
   if (request.method !== 'GET')
-    return json({ error: 'method_not_allowed' }, 405, request, env, headers);
+    return json({ error: 'method_not_allowed' }, 405, headers);
   const prefix = '/api/community/notices/';
   if (pathname.startsWith(prefix)
       && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pathname.slice(prefix.length)))
-    return json({ error: 'not_found' }, 404, request, env, headers);
+    return json({ error: 'not_found' }, 404, headers);
   try {
     const response = await env.VPC_SERVICE.fetch(new URL(pathname, env.MINECRAFT_SERVER_URL), {
       method: 'GET', headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(5000),
     });
     if (response.status !== 200 && response.status !== 404)
-      return json({ error: 'upstream_unavailable' }, 502, request, env, headers);
+      return json({ error: 'upstream_unavailable' }, 502, headers);
     if (!(response.headers.get('Content-Type') ?? '').toLowerCase().includes('application/json'))
-      return json({ error: 'upstream_unavailable' }, 502, request, env, headers);
-    return json(await response.json(), response.status, request, env, headers);
+      return json({ error: 'upstream_unavailable' }, 502, headers);
+    return json(await response.json(), response.status, headers);
   } catch (error) {
     console.error('Community board upstream failed', error);
-    return json({ error: 'upstream_unavailable' }, 502, request, env, headers);
+    return json({ error: 'upstream_unavailable' }, 502, headers);
   }
 }
 
@@ -147,8 +146,6 @@ async function enforcePublicRateLimit(request: Request, env: Env): Promise<Respo
     return json(
       { error: 'rate_limited', retryAfterSeconds: PUBLIC_RATE_LIMIT_WINDOW_SECONDS },
       429,
-      request,
-      env,
       {
         'Cache-Control': 'no-store',
         'Retry-After': String(PUBLIC_RATE_LIMIT_WINDOW_SECONDS),
@@ -159,7 +156,7 @@ async function enforcePublicRateLimit(request: Request, env: Env): Promise<Respo
       path: new URL(request.url).pathname,
       error,
     });
-    return json({ error: 'rate_limiter_unavailable' }, 503, request, env, {
+    return json({ error: 'rate_limiter_unavailable' }, 503, {
       'Cache-Control': 'no-store',
       'Retry-After': String(RATE_LIMIT_RETRY_SECONDS),
     });

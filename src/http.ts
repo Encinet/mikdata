@@ -1,7 +1,12 @@
-import type { Env } from './env';
-
 export type CacheStatus = 'MISS' | 'HIT' | 'STALE';
-export type DataSource = 'UPSTREAM' | 'FALLBACK' | 'LOCAL';
+export type DataSource = 'UPSTREAM' | 'FALLBACK';
+
+export const PUBLIC_CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Max-Age': '86400',
+} as const;
 
 const JSON_HEADERS = {
   'Content-Type': 'application/json; charset=utf-8',
@@ -12,26 +17,22 @@ const JSON_HEADERS = {
 export function json(
   body: unknown,
   status: number,
-  request: Request,
-  env: Env,
   extraHeaders: Record<string, string> = {},
 ): Response {
-  return serializedJson(JSON.stringify(body), status, request, env, extraHeaders);
+  return serializedJson(JSON.stringify(body), status, extraHeaders);
 }
 
 /** Respond with an already serialized body without parsing or encoding it again. */
 export function serializedJson(
   body: string,
   status: number,
-  request: Request,
-  env: Env,
   extraHeaders: Record<string, string> = {},
 ): Response {
   return new Response(body, {
     status,
     headers: {
       ...JSON_HEADERS,
-      ...corsHeaders(request, env),
+      ...PUBLIC_CORS_HEADERS,
       ...extraHeaders,
     },
   });
@@ -54,28 +55,14 @@ export function authJson(body: unknown, status = 200, extraHeaders: HeadersInit 
 export function proxyJson(
   body: unknown,
   status: number,
-  request: Request,
-  env: Env,
   cacheStatus: CacheStatus,
   source: DataSource,
   extraHeaders: Record<string, string> = {},
 ): Response {
-  return json(body, status, request, env, {
+  return json(body, status, {
     'Cache-Control': source === 'UPSTREAM' ? 'public, max-age=0, must-revalidate' : 'no-store',
     'X-Proxy-Cache': cacheStatus,
     'X-Proxy-Source': source,
     ...extraHeaders,
   });
-}
-
-export function corsHeaders(request: Request, env: Env): Record<string, string> {
-  void request;
-  void env;
-
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Max-Age': '86400',
-  };
 }

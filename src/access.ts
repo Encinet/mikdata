@@ -23,14 +23,14 @@ export async function requireCloudflareAccess(
   if (!issuer || !audience) {
     return {
       ok: false,
-      response: json({ error: 'Cloudflare Access is not configured' }, 503, request, env),
+      response: json({ error: 'Cloudflare Access is not configured' }, 503),
     };
   }
 
   const token = readAccessToken(request);
 
   if (!token) {
-    return { ok: false, response: json({ error: 'Cloudflare Access required' }, 401, request, env) };
+    return { ok: false, response: json({ error: 'Cloudflare Access required' }, 401) };
   }
 
   try {
@@ -49,7 +49,7 @@ export async function requireCloudflareAccess(
     };
   } catch (error) {
     console.warn('Cloudflare Access JWT validation failed', error);
-    return { ok: false, response: json({ error: 'Cloudflare Access denied' }, 403, request, env) };
+    return { ok: false, response: json({ error: 'Cloudflare Access denied' }, 403) };
   }
 }
 

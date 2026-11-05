@@ -18,7 +18,6 @@ test('public proxy routes survive unavailable KV', async () => {
 
     const response = await serveProxyRoute(
       route!,
-      new Request(`https://data.mcmik.top/api${pathname}`),
       env,
       ctx,
     );

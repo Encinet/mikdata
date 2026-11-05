@@ -1,4 +1,5 @@
 import { BuildingStore } from './building-store';
+import { migrateBuildingStorage } from './building-migrations';
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -29,7 +30,6 @@ const PLAYER_RESOLVE_CACHE_TTL_MS = 60 * 1000;
 const MAX_AUTH_BODY_BYTES = 64 * 1024;
 const AUTH_RATE_LIMIT_WINDOW_SECONDS = 60;
 const AUTH_RATE_LIMIT_RETRY_SECONDS = 10;
-const WEB_LOGIN_CODE_RE = /^[0-9]{6,10}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALLOWED_ROLES = new Set(['default', 'member', 'moderator', 'custodian']);
 const DEFAULT_WEBAUTHN_RP_ID = 'mcmik.top';
@@ -744,7 +744,7 @@ export class AuthStore implements DurableObject {
   private async adminBuildingMutation(
     body: StoreRequest,
   ): Promise<{ status: number; body: unknown }> {
-    return this.storage.transaction(async (txn) => {
+    return this.storage.transaction(async () => {
       const result = this.buildingService.admin({
         operation: asString(body.operation) as AdminBuildingCommand['operation'],
         id: asString(body.id),
@@ -2115,7 +2115,13 @@ export class AuthStore implements DurableObject {
   }
 
   private ensureInitialized(): Promise<void> {
-    this.initialized ??= Promise.resolve().then(() => this.buildings.initialize());
+    this.initialized ??= Promise.resolve().then(async () => {
+      migrateBuildingStorage(this.storage);
+      if (this.buildings.publicationDue() !== null) await this.scheduleMaintenance();
+    }).catch((error) => {
+      this.initialized = null;
+      throw error;
+    });
     return this.initialized;
   }
 

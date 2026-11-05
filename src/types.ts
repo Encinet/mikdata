@@ -24,7 +24,8 @@ export interface Source {
 }
 
 export interface Building {
-  id: string;
+  /** Immutable, server-assigned opaque identifier. */
+  readonly id: string;
   name: I18n;
   description: I18n;
   coordinates: Coord;

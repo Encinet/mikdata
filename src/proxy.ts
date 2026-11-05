@@ -53,26 +53,25 @@ export function refreshProxyRoutes(env: Env, ctx: ExecutionContext): void {
 }
 export async function serveProxyRoute(
   route: RouteConfig,
-  request: Request,
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
   const cached = await readCache(route, env);
   const now = Date.now();
-  if (cached && cached.freshUntil > now) return cachedResponse(route, cached, request, env, 'HIT');
+  if (cached && cached.freshUntil > now) return cachedResponse(route, cached, 'HIT');
   if (cached?.source === 'UPSTREAM' && cached.staleUntil > now) {
     ctx.waitUntil(
       refresh(route, env, cached).catch((error) =>
         console.warn('Background proxy refresh failed', route.id, error),
       ),
     );
-    return cachedResponse(route, cached, request, env, 'STALE');
+    return cachedResponse(route, cached, 'STALE');
   }
   try {
     const record = await refresh(route, env, cached);
-    return cachedResponse(route, record, request, env, record === cached ? 'STALE' : 'MISS');
+    return cachedResponse(route, record, record === cached ? 'STALE' : 'MISS');
   } catch {
-    return proxyJson({ error: 'Upstream unavailable' }, 502, request, env, 'MISS', 'FALLBACK');
+    return proxyJson({ error: 'Upstream unavailable' }, 502, 'MISS', 'FALLBACK');
   }
 }
 
@@ -257,8 +256,6 @@ async function writeCache(route: RouteConfig, env: Env, record: CacheRecord): Pr
 function cachedResponse(
   route: RouteConfig,
   record: CacheRecord,
-  request: Request,
-  env: Env,
   status: CacheStatus,
 ): Response {
   const now = Date.now();
@@ -270,7 +267,7 @@ function cachedResponse(
     0,
     Math.floor((record.staleUntil - Math.max(record.freshUntil, now)) / 1000),
   );
-  return serializedJson(record.body, 200, request, env, {
+  return serializedJson(record.body, 200, {
     'Cache-Control':
       record.source === 'FALLBACK'
         ? 'no-store'

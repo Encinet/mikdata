@@ -1,5 +1,6 @@
 import type { Env } from './env';
 import { AUTH_STORE_NAME } from './constants';
+import { BUILDING_ID_PATTERN } from './building-id';
 import { PUBLIC_BUILDINGS_KEY, type PublicBuildingsSnapshot } from './building-store';
 import { isBuildingDocument } from './building-validation';
 import { json, serializedJson } from './http';
@@ -9,6 +10,7 @@ import type { Building, Source } from './types';
 const SNAPSHOT_TTL_MS = 60_000;
 const RESPONSE_TTL_MS = 300_000;
 const CACHE_HEADERS = { 'Cache-Control': 'public, max-age=300, stale-while-revalidate=600' };
+const BUILDING_ROUTE_RE = new RegExp(`^/buildings/(${BUILDING_ID_PATTERN})$`, 'i');
 interface Catalog {
   raw: string;
   snapshot: PublicBuildingsSnapshot;
@@ -43,17 +45,17 @@ export async function handlePublicBuildingsRoute(
   request: Request,
   env: Env,
 ): Promise<Response | null> {
-  const detail = routePath.match(/^\/buildings\/([a-z0-9]{8,24})$/i);
+  const detail = routePath.match(BUILDING_ROUTE_RE);
   if (routePath !== '/buildings' && !detail) return null;
-  if (request.method !== 'GET') return json({ error: 'method not allowed' }, 405, request, env);
+  if (request.method !== 'GET') return json({ error: 'method not allowed' }, 405);
   try {
     const state = catalogState(env);
     const catalog = await readCatalog(env, state);
     if (detail) {
       const building = catalog.byId.get(detail[1]);
       return building
-        ? json(building, 200, request, env, CACHE_HEADERS)
-        : json({ error: 'building not found' }, 404, request, env);
+        ? json(building, 200, CACHE_HEADERS)
+        : json({ error: 'building not found' }, 404);
     }
     const query = parseQuery(new URL(request.url).searchParams);
     const key = `v4:building-list:${catalog.snapshot.version}:${new URLSearchParams({ ...query })}`;
@@ -69,10 +71,10 @@ export async function handlePublicBuildingsRoute(
       }
       body = await pending;
     }
-    return serializedJson(body, 200, request, env, CACHE_HEADERS);
+    return serializedJson(body, 200, CACHE_HEADERS);
   } catch (error) {
     console.warn('Public buildings snapshot unavailable', error);
-    return json({ error: 'building_data_unavailable' }, 503, request, env, {
+    return json({ error: 'building_data_unavailable' }, 503, {
       'Cache-Control': 'no-store',
     });
   }
@@ -177,12 +179,17 @@ async function loadCatalog(env: Env, state: CatalogState): Promise<Catalog> {
 function isPublicSnapshot(value: unknown): value is PublicBuildingsSnapshot {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const snapshot = value as PublicBuildingsSnapshot;
-  return (
-    Number.isSafeInteger(snapshot.version) &&
-    snapshot.version >= 0 &&
-    Array.isArray(snapshot.buildings) &&
-    snapshot.buildings.every(isBuildingDocument)
-  );
+  if (
+    !Number.isSafeInteger(snapshot.version) ||
+    snapshot.version < 0 ||
+    !Array.isArray(snapshot.buildings)
+  ) return false;
+  const ids = new Set<string>();
+  for (const building of snapshot.buildings) {
+    if (!isBuildingDocument(building) || ids.has(building.id)) return false;
+    ids.add(building.id);
+  }
+  return true;
 }
 function localizeBuilding(
   building: Building,

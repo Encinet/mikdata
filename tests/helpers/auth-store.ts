@@ -83,6 +83,7 @@ export function memoryAuthStorage() {
         },
       ]),
     ),
+    transactionSync: (task: () => unknown) => db.transaction(task)(),
     transaction: (task: (txn: DurableObjectTransaction) => Promise<unknown>) => {
       const result = queue
         .catch(() => undefined)
