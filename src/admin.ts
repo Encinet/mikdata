@@ -1,3 +1,5 @@
+import { ADMIN_STYLES } from './admin-styles';
+
 export function adminPage(): Response {
   const nonce = createNonce();
 
@@ -24,502 +26,184 @@ function createNonce(): string {
   return btoa(String.fromCharCode(...bytes));
 }
 
+function icon(name: string): string {
+  const paths: Record<string, string> = {
+    shield: '<path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"/><path d="m9 12 2 2 4-4"/>',
+    theme: '<path d="M12 3a9 9 0 1 0 9 9c0-.4 0-.8-.1-1.2A6 6 0 0 1 12 3Z"/>',
+    refresh: '<path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-2L20 8M4 16l2.3 3A7 7 0 0 0 17.9 17"/>',
+    search: '<circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/>',
+    close: '<path d="m6 6 12 12M6 18 18 6"/>',
+    import: '<path d="M12 3v12m-5-5 5 5 5-5M5 16v5h14v-5"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    building: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 21v-4h6v4M8 7h1m6 0h1M8 11h1m6 0h1"/>',
+    check: '<path d="m5 12 4 4L19 6"/>',
+  };
+  return '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (paths[name] || '') + '</svg>';
+}
+
 const ADMIN_HTML = /* html */ `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MikData Admin</title>
-<style nonce="__NONCE__">
-  *, *::before, *::after { box-sizing: border-box; }
-  :root {
-    color-scheme: light;
-    --bg: #f6f6f4;
-    --surface: #ffffff;
-    --surface-strong: #ffffff;
-    --surface-muted: #f1f2ef;
-    --input: #ffffff;
-    --line: #dadfd6;
-    --line-strong: #b9c0b4;
-    --text: #1f2a23;
-    --heading: #101814;
-    --muted: #68736b;
-    --muted-strong: #4f5a52;
-    --topbar: #ffffff;
-    --thead: #f4f5f2;
-    --hover: #f8faf6;
-    --overlay-bg: rgba(18, 24, 20, .42);
-    --accent: #2f7d4a;
-    --blue: #2563eb;
-    --red: #b42318;
-    --green: #207a4a;
-    --amber: #9a5a06;
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
-  }
-  :root[data-theme="dark"] {
-    color-scheme: dark;
-    --bg: #111512;
-    --surface: #171c18;
-    --surface-strong: #1b211d;
-    --surface-muted: #202720;
-    --input: #111612;
-    --line: #2c352d;
-    --line-strong: #435045;
-    --text: #dbe2dc;
-    --heading: #fff;
-    --muted: #879188;
-    --muted-strong: #a9b3aa;
-    --topbar: #171c18;
-    --thead: #202720;
-    --hover: #1c231e;
-    --overlay-bg: rgba(0, 0, 0, .62);
-    --accent: #5dbb76;
-    --blue: #8ab4ff;
-    --red: #f87171;
-    --green: #7bd89a;
-    --amber: #f2c15a;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      color-scheme: dark;
-      --bg: #111512;
-      --surface: #171c18;
-      --surface-strong: #1b211d;
-      --surface-muted: #202720;
-      --input: #111612;
-      --line: #2c352d;
-      --line-strong: #435045;
-      --text: #dbe2dc;
-      --heading: #fff;
-      --muted: #879188;
-      --muted-strong: #a9b3aa;
-      --topbar: #171c18;
-      --thead: #202720;
-      --hover: #1c231e;
-      --overlay-bg: rgba(0, 0, 0, .62);
-      --accent: #5dbb76;
-      --blue: #8ab4ff;
-      --red: #f87171;
-      --green: #7bd89a;
-      --amber: #f2c15a;
-    }
-  }
-  body {
-    margin: 0;
-    min-height: 100vh;
-    background: var(--bg);
-    color: var(--text);
-  }
-  button, input, select, textarea { font: inherit; letter-spacing: 0; }
-  button { border: 0; cursor: pointer; }
-  button:disabled { cursor: not-allowed; opacity: .48; }
-  input, select, textarea {
-    width: 100%;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--input);
-    color: var(--text);
-    outline: none;
-    padding: 8px 10px;
-    transition: border-color .16s ease, background .16s ease, box-shadow .16s ease;
-  }
-  input:focus, select:focus, textarea:focus {
-    border-color: color-mix(in srgb, var(--accent), white 18%);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 82%);
-  }
-  textarea { min-height: 74px; resize: vertical; line-height: 1.5; }
-  .app { min-height: 100vh; padding-bottom: 24px; }
-  .topbar {
-    position: sticky;
-    top: 0;
-    z-index: 20;
-    display: flex;
-    min-height: 52px;
-    align-items: center;
-    gap: 10px;
-    padding: 8px max(16px, calc((100vw - 1240px) / 2));
-    border-bottom: 1px solid var(--line);
-    background: var(--topbar);
-  }
-  .brand {
-    display: inline-flex;
-    align-items: center;
-    color: var(--heading);
-    font-size: 15px;
-    font-weight: 760;
-    white-space: nowrap;
-  }
-  .identity {
-    display: inline-flex;
-    min-height: 28px;
-    align-items: center;
-    color: var(--muted-strong);
-    font-size: 12px;
-    font-weight: 720;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 0 9px;
-    background: var(--surface);
-    white-space: nowrap;
-  }
-  .grow { flex: 1; }
-  .btn {
-    min-height: 32px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-    border-radius: 6px;
-    padding: 0 11px;
-    font-size: 12px;
-    font-weight: 700;
-    white-space: nowrap;
-    transition: background .16s ease, border-color .16s ease, color .16s ease;
-  }
-  .primary {
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #fff;
-  }
-  .primary:hover { filter: brightness(1.04); }
-  .quiet { background: var(--surface); color: var(--text); border: 1px solid var(--line); }
-  .quiet:hover { border-color: var(--line-strong); background: var(--surface-muted); }
-  .danger {
-    background: color-mix(in srgb, var(--red), transparent 92%);
-    color: var(--red);
-    border: 1px solid color-mix(in srgb, var(--red), transparent 68%);
-  }
-  .danger:hover { background: color-mix(in srgb, var(--red), transparent 86%); }
-  .sm { min-height: 28px; padding: 0 9px; font-size: 12px; }
-  .app.is-busy .row-actions .btn { pointer-events: none; opacity: .48; }
-  main { width: min(1240px, calc(100vw - 28px)); margin: 18px auto 0; }
-  .admin-hero {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 12px;
-  }
-  .admin-hero p {
-    margin: 0;
-    color: var(--muted);
-    font-size: 12px;
-  }
-  .admin-hero h1 {
-    margin: 0;
-    color: var(--heading);
-    font-size: 22px;
-    font-weight: 760;
-    line-height: 1.2;
-  }
-  .summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-  .stat {
-    min-height: 0;
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 6px 10px;
-  }
-  .stat span { color: var(--muted); font-size: 12px; font-weight: 650; }
-  .stat strong { color: var(--heading); font-size: 16px; line-height: 1; font-weight: 760; letter-spacing: 0; }
-  .tools {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 180px;
-    gap: 10px;
-    margin-bottom: 10px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--surface);
-    padding: 8px;
-  }
-  .table {
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    overflow: auto;
-  }
-  table { width: 100%; min-width: 940px; border-collapse: collapse; }
-  th {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    background: var(--thead);
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 780;
-    text-align: left;
-    text-transform: uppercase;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--line);
-  }
-  td { padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; font-size: 13px; }
-  tbody tr:last-child td { border-bottom: 0; }
-  tbody tr:hover td { background: var(--hover); }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); }
-  .title { color: var(--heading); font-weight: 780; }
-  .meta { color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.45; }
-  .badge { display: inline-flex; border-radius: 6px; padding: 3px 7px; font-size: 12px; font-weight: 700; }
-  .original { background: color-mix(in srgb, var(--green), transparent 88%); color: var(--green); }
-  .derivative { background: color-mix(in srgb, var(--blue), transparent 88%); color: var(--blue); }
-  .replica { background: color-mix(in srgb, var(--amber), transparent 88%); color: var(--amber); }
-  .row-actions { display: flex; flex-wrap: wrap; gap: 7px; }
-  .empty { color: var(--muted); text-align: center; padding: 28px 12px; }
-  .review-board {
-    margin-top: 16px;
-    display: grid;
-    gap: 8px;
-  }
-  .review-board__head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-  .review-board__head h2 {
-    margin: 0;
-    color: var(--heading);
-    font-size: 16px;
-    line-height: 1.1;
-  }
-  .review-board__head p { display: none; }
-  .review-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-  .review-list {
-    display: grid;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--surface);
-  }
-  .review-item {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 10px;
-    align-items: center;
-    border-bottom: 1px solid var(--line);
-    padding: 11px 12px;
-  }
-  .review-item:last-child { border-bottom: 0; }
-  .review-item__meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 6px;
-  }
-  .status-pending { background: color-mix(in srgb, var(--amber), transparent 88%); color: var(--amber); }
-  .status-approved { background: color-mix(in srgb, var(--green), transparent 88%); color: var(--green); }
-  .status-rejected { background: color-mix(in srgb, var(--red), transparent 88%); color: var(--red); }
-  .overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    z-index: 50;
-    padding: 18px;
-    align-items: center;
-    justify-content: center;
-    background: var(--overlay-bg);
-    backdrop-filter: blur(6px);
-  }
-  .overlay.open { display: flex; }
-  .modal {
-    width: min(820px, 100%);
-    max-height: calc(100vh - 36px);
-    display: grid;
-    grid-template-rows: auto 1fr auto;
-    background: var(--surface-strong);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    box-shadow: 0 22px 70px rgba(0, 0, 0, .28);
-    overflow: hidden;
-  }
-  .modal-head, .modal-foot { display: flex; align-items: center; gap: 8px; padding: 12px 14px; }
-  .modal-head { border-bottom: 1px solid var(--line); background: var(--surface-muted); }
-  .modal-foot { border-top: 1px solid var(--line); justify-content: flex-end; background: var(--surface-muted); }
-  .modal-title { color: var(--heading); font-weight: 820; }
-  .modal-body { overflow: auto; padding: 14px; }
-  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
-  .field { display: grid; gap: 5px; }
-  .full { grid-column: 1 / -1; }
-  label { color: var(--muted-strong); font-size: 12px; font-weight: 760; }
-  .section {
-    grid-column: 1 / -1;
-    padding-top: 10px;
-    border-top: 1px solid var(--line);
-    color: var(--heading);
-    font-weight: 740;
-    font-size: 13px;
-  }
-  .section:first-child { padding-top: 0; border-top: 0; }
-  .preview {
-    grid-column: 1 / -1;
-    min-height: 40px;
-    display: flex;
-    align-items: center;
-    color: var(--muted-strong);
-    font-size: 13px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--surface-muted);
-    padding: 9px 11px;
-  }
-  #toast {
-    position: fixed;
-    right: 18px;
-    bottom: 18px;
-    z-index: 80;
-    width: min(380px, calc(100vw - 36px));
-    transform: translateY(140%);
-    transition: transform .2s ease;
-    border-radius: 8px;
-    padding: 13px 14px;
-    background: var(--surface-strong);
-    border: 1px solid var(--line);
-    box-shadow: 0 14px 42px rgba(0, 0, 0, .2);
-    color: var(--text);
-    font-size: 14px;
-  }
-  #toast.show { transform: translateY(0); }
-  #toast.ok { border-left: 4px solid var(--green); }
-  #toast.err { border-left: 4px solid var(--red); }
-  @media (max-width: 760px) {
-    .topbar { padding: 10px 12px; flex-wrap: wrap; }
-    .brand { width: 100%; }
-    .identity { flex: 1; }
-    main { width: calc(100vw - 20px); margin-top: 16px; }
-    .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .tools { grid-template-columns: 1fr; }
-    .grid { grid-template-columns: 1fr; }
-    .modal-head, .modal-foot { padding: 12px; }
-    .modal-body { padding: 14px; }
-  }
-</style>
+<title>建筑管理 · MIK</title>
+<script nonce="__NONCE__">
+try {
+  const theme = localStorage.getItem('mikdata-admin-theme');
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+} catch {}
+</script>
+<style nonce="__NONCE__">${ADMIN_STYLES}</style>
 </head>
 <body>
+<a class="skip-link" href="#main">跳转到内容</a>
 <div class="app">
   <header class="topbar">
-    <div class="brand">MikData</div>
-    <div class="identity">Cloudflare Access</div>
-    <div class="grow"></div>
-    <button class="btn quiet sm" id="theme-btn" type="button">系统</button>
-    <button class="btn quiet" id="refresh-btn" type="button">刷新</button>
-    <button class="btn quiet" id="import-btn" type="button">导入</button>
-    <button class="btn primary" id="create-btn" type="button">新增</button>
-  </header>
-  <main>
-    <section class="admin-hero">
-      <h1>建筑收录管理</h1>
-      <p id="admin-status">建筑 0 · 申请 0</p>
-    </section>
-    <section class="summary">
-      <div class="stat"><span>总数</span><strong id="s-total">0</strong></div>
-      <div class="stat"><span>原创</span><strong id="s-original">0</strong></div>
-      <div class="stat"><span>二创</span><strong id="s-derivative">0</strong></div>
-      <div class="stat"><span>复刻</span><strong id="s-replica">0</strong></div>
-    </section>
-    <div class="tools">
-      <input id="search" placeholder="搜索建筑、建造者、标签" autocomplete="off">
-      <select id="type-filter">
-        <option value="">全部类型</option>
-        <option value="original">原创</option>
-        <option value="derivative">二创</option>
-        <option value="replica">复刻</option>
-      </select>
-    </div>
-    <div class="table">
-      <table>
-        <thead>
-          <tr><th>ID</th><th>建筑</th><th>坐标</th><th>类型</th><th>建造者</th><th>日期</th><th>操作</th></tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
-    </div>
-    <section class="review-board">
-      <div class="review-board__head">
-        <div>
-          <h2>玩家建筑申请</h2>
-        </div>
-        <div class="review-actions">
-          <button class="btn quiet sm" id="submissions-refresh-btn" type="button">刷新申请</button>
-        </div>
+    <div class="topbar-inner">
+      <div class="brand"><strong>MIK</strong><span>管理</span></div>
+      <div class="grow"></div>
+      <span class="identity">${icon('shield')}管理员</span>
+      <div class="header-actions">
+        <button class="btn ghost" id="theme-btn" type="button" aria-label="配色：跟随系统，点击切换浅色">${icon('theme')}<span id="theme-label">跟随系统</span></button>
+        <button class="btn ghost icon-btn" id="refresh-btn" type="button" aria-label="刷新全部数据" title="刷新全部数据">${icon('refresh')}</button>
       </div>
-      <div class="review-list" id="submission-list"></div>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    <section class="admin-hero" aria-labelledby="page-title">
+      <div>
+        <h1 id="page-title">建筑管理</h1>
+        <p id="admin-status">管理建筑收录与玩家申请。</p>
+      </div>
+      <div class="search-field" id="search-field">
+        ${icon('search')}
+        <label class="sr-only" for="search">搜索建筑、建造者、标签或 ID</label>
+        <input id="search" type="search" placeholder="搜索建筑、建造者、标签…" autocomplete="off">
+        <button class="btn ghost icon-btn search-clear" id="search-clear" type="button" aria-label="清除搜索" hidden>${icon('close')}</button>
+      </div>
+    </section>
+    <div class="workspace-bar">
+      <div class="view-tabs" role="tablist" aria-label="管理视图">
+        <button class="view-tab" id="buildings-tab" type="button" role="tab" aria-selected="true" aria-controls="buildings-panel">建筑收录</button>
+        <button class="view-tab" id="submissions-tab" type="button" role="tab" aria-selected="false" aria-controls="submissions-panel" tabindex="-1">待审申请<span class="tab-count" id="pending-count">0</span></button>
+      </div>
+      <div class="page-actions" id="building-actions">
+        <button class="btn quiet" id="import-btn" type="button">${icon('import')}导入</button>
+        <button class="btn primary" id="create-btn" type="button">${icon('plus')}新增建筑</button>
+      </div>
+    </div>
+    <section id="buildings-panel" role="tabpanel" aria-labelledby="buildings-tab" tabindex="0">
+      <div class="tools">
+        <div class="summary" role="group" aria-label="建筑类型筛选">
+          <button class="filter-chip" type="button" data-type="" aria-pressed="true">全部<strong id="s-total">0</strong></button>
+          <button class="filter-chip" type="button" data-type="original" aria-pressed="false">原创<strong id="s-original">0</strong></button>
+          <button class="filter-chip" type="button" data-type="derivative" aria-pressed="false">二创<strong id="s-derivative">0</strong></button>
+          <button class="filter-chip" type="button" data-type="replica" aria-pressed="false">复刻<strong id="s-replica">0</strong></button>
+        </div>
+        <p class="result-count" id="result-count" role="status" aria-live="polite">正在加载建筑…</p>
+      </div>
+      <div class="table">
+        <table aria-label="已收录建筑">
+          <colgroup><col class="col-building"><col class="col-location"><col class="col-type"><col class="col-builders"><col class="col-date"><col class="col-actions"></colgroup>
+          <thead><tr><th scope="col">建筑</th><th scope="col">所在位置</th><th scope="col">类型</th><th scope="col">建造者</th><th scope="col">建造日期</th><th scope="col">操作</th></tr></thead>
+          <tbody id="rows"><tr><td colspan="6" class="empty-cell"><div class="empty">正在加载建筑…</div></td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="review-board" id="submissions-panel" role="tabpanel" aria-labelledby="submissions-tab" tabindex="0" hidden>
+      <div class="review-board__head">
+        <div><h2>玩家建筑申请</h2><p>核对信息后批准收录，或填写原因退回申请。</p></div>
+        <button class="btn ghost icon-btn" id="submissions-refresh-btn" type="button" aria-label="刷新申请" title="刷新申请">${icon('refresh')}</button>
+      </div>
+      <div class="review-list" id="submission-list" aria-busy="true"><div class="empty">正在加载申请…</div></div>
     </section>
   </main>
 </div>
-<div class="overlay" id="overlay">
+<dialog class="overlay" id="overlay" aria-labelledby="modal-title" aria-describedby="modal-hint">
   <form class="modal" id="building-form">
     <div class="modal-head">
-      <div class="modal-title" id="modal-title">新增建筑</div>
+      <div><h2 class="modal-title" id="modal-title">新增建筑</h2><p class="modal-subtitle" id="modal-hint">带 * 的项目为必填，保存后公开页面稍后同步。</p></div>
       <div class="grow"></div>
-      <button class="btn quiet sm" id="close-btn" type="button">关闭</button>
+      <button class="btn ghost icon-btn" id="close-btn" type="button" aria-label="关闭编辑">${icon('close')}</button>
     </div>
     <div class="modal-body">
       <div class="grid">
-        <div class="section">基本信息</div>
-        <div class="field"><label for="name-zh">名称 zh-CN</label><input id="name-zh" maxlength="200" required></div>
-        <div class="field"><label for="name-en">名称 en</label><input id="name-en" maxlength="200" required></div>
-        <div class="field full"><label for="desc-zh">描述 zh-CN</label><textarea id="desc-zh" maxlength="2000" required></textarea></div>
-        <div class="field full"><label for="desc-en">描述 en</label><textarea id="desc-en" maxlength="2000" required></textarea></div>
-        <div class="section">坐标</div>
-        <div class="field"><label for="coord-world">世界</label><input id="coord-world" value="world" maxlength="128" required></div>
-        <div class="field"><label for="coord-x">X</label><input id="coord-x" type="number" value="0" required></div>
-        <div class="field"><label for="coord-y">Y</label><input id="coord-y" type="number" value="64" required></div>
-        <div class="field"><label for="coord-z">Z</label><input id="coord-z" type="number" value="0" required></div>
-        <div class="field"><label for="build-type">类型</label><select id="build-type"><option value="original">original</option><option value="derivative">derivative</option><option value="replica">replica</option></select></div>
-        <div class="section">内容</div>
-        <div class="field full"><label for="builders">建造者，每行 name,uuid,weight</label><textarea id="builders" required></textarea></div>
-        <div class="field full"><label for="images">图片，每行一个 /path 或 https:// URL</label><textarea id="images" required></textarea></div>
-        <div class="field"><label for="build-date">建造日期</label><input id="build-date" type="date" required></div>
-        <div class="field full"><label for="tags">标签，每行 zh-CN,en</label><textarea id="tags"></textarea></div>
-        <div class="section">来源</div>
-        <div class="field"><label for="source-author">原作者</label><input id="source-author" maxlength="200"></div>
-        <div class="field"><label for="source-link">原作链接</label><input id="source-link" maxlength="500"></div>
-        <div class="field full"><label for="source-note-zh">备注 zh-CN</label><input id="source-note-zh" maxlength="500"></div>
-        <div class="field full"><label for="source-note-en">备注 en</label><input id="source-note-en" maxlength="500"></div>
+        <h3 class="section">基本信息</h3>
+        <div class="field"><label for="name-zh">中文名称 *</label><input id="name-zh" lang="zh-CN" maxlength="200" required></div>
+        <div class="field"><label for="name-en">英文名称 *</label><input id="name-en" lang="en" maxlength="200" required></div>
+        <div class="field"><label for="desc-zh">中文描述 *</label><textarea id="desc-zh" lang="zh-CN" maxlength="2000" required></textarea></div>
+        <div class="field"><label for="desc-en">英文描述 *</label><textarea id="desc-en" lang="en" maxlength="2000" required></textarea></div>
+        <div class="field"><label for="build-type">建筑类型</label><select id="build-type"><option value="original">原创</option><option value="derivative">二创</option><option value="replica">复刻</option></select></div>
+        <div class="field"><label for="build-date">建造日期 *</label><input id="build-date" type="date" required></div>
+        <h3 class="section">所在位置</h3>
+        <div class="coordinate-grid full">
+          <div class="field"><label for="coord-world">世界 *</label><input id="coord-world" value="world" maxlength="128" required></div>
+          <div class="field"><label for="coord-x">X *</label><input id="coord-x" type="number" value="0" required></div>
+          <div class="field"><label for="coord-y">Y *</label><input id="coord-y" type="number" value="64" required></div>
+          <div class="field"><label for="coord-z">Z *</label><input id="coord-z" type="number" value="0" required></div>
+        </div>
+        <h3 class="section">建造者与内容</h3>
+        <div class="field full"><label for="builders">建造者 *</label><textarea id="builders" aria-describedby="builders-hint" spellcheck="false" required></textarea><p class="hint" id="builders-hint">每行一位，依次填写名称、UUID、贡献权重，用英文逗号分隔。</p></div>
+        <div class="field full"><label for="images">图片链接 *</label><textarea id="images" aria-describedby="images-hint" spellcheck="false" required></textarea><p class="hint" id="images-hint">每行一个链接，支持 / 开头的路径或 HTTPS 地址。</p></div>
+        <div class="field full"><label for="tags">标签<span>选填</span></label><textarea id="tags" aria-describedby="tags-hint"></textarea><p class="hint" id="tags-hint">每行一个标签，中文和英文用英文逗号分隔。</p></div>
+        <details class="source-fields full" id="source-fields">
+          <summary>来源与备注<span>选填</span></summary>
+          <div class="grid">
+            <div class="field"><label for="source-author">原作者</label><input id="source-author" maxlength="200"></div>
+            <div class="field"><label for="source-link">原作链接</label><input id="source-link" type="url" maxlength="500"></div>
+            <div class="field full"><label for="source-note-zh">中文备注</label><input id="source-note-zh" maxlength="500"></div>
+            <div class="field full"><label for="source-note-en">英文备注</label><input id="source-note-en" maxlength="500"></div>
+          </div>
+        </details>
       </div>
     </div>
     <div class="modal-foot">
-      <button class="btn quiet" id="cancel-btn" type="button">取消</button>
-      <button class="btn quiet" id="review-save-btn" type="button">保存修改</button>
-      <button class="btn danger" id="review-reject-btn" type="button">拒绝</button>
-      <button class="btn primary" id="review-approve-btn" type="button">批准收入</button>
-      <button class="btn primary" id="save-btn" type="submit">保存</button>
+      <button class="btn ghost" id="cancel-btn" type="button">取消</button>
+      <button class="btn quiet" id="review-save-btn" type="button" hidden>保存修改</button>
+      <button class="btn danger" id="review-reject-btn" type="button" hidden>退回申请</button>
+      <button class="btn primary" id="review-approve-btn" type="button" hidden>批准收录</button>
+      <button class="btn primary" id="save-btn" type="submit">保存建筑</button>
     </div>
   </form>
-</div>
-<div class="overlay" id="import-overlay">
-  <form class="modal" id="import-form">
+</dialog>
+<dialog class="overlay" id="import-overlay" aria-labelledby="import-title" aria-describedby="import-hint">
+  <form class="modal modal--import" id="import-form">
     <div class="modal-head">
-      <div class="modal-title">导入 JSON</div>
+      <div><h2 class="modal-title" id="import-title">导入建筑</h2><p class="modal-subtitle" id="import-hint">选择 JSON 文件，或直接粘贴建筑数据。</p></div>
       <div class="grow"></div>
-      <button class="btn quiet sm" id="import-close-btn" type="button">关闭</button>
+      <button class="btn ghost icon-btn" id="import-close-btn" type="button" aria-label="关闭导入">${icon('close')}</button>
     </div>
     <div class="modal-body">
       <div class="grid">
-        <div class="field full"><label for="import-file">JSON 文件</label><input id="import-file" type="file" accept="application/json,.json"></div>
-        <div class="field full"><label for="import-json">JSON</label><textarea id="import-json" class="mono" spellcheck="false"></textarea></div>
-        <div class="preview" id="import-preview">等待 JSON</div>
+        <div class="field full"><label for="import-file">选择文件</label><input id="import-file" type="file" accept="application/json,.json"></div>
+        <div class="field full"><label for="import-json">JSON 内容</label><textarea id="import-json" class="mono" spellcheck="false" placeholder="粘贴一个建筑对象或建筑数组" required></textarea></div>
+        <div class="preview full" id="import-preview" role="status" aria-live="polite">选择文件或粘贴 JSON 后预览导入数量。</div>
       </div>
     </div>
     <div class="modal-foot">
-      <button class="btn quiet" id="import-cancel-btn" type="button">取消</button>
-      <button class="btn primary" id="import-save-btn" type="submit">导入</button>
+      <button class="btn ghost" id="import-cancel-btn" type="button">取消</button>
+      <button class="btn primary" id="import-save-btn" type="submit" disabled>确认导入</button>
     </div>
   </form>
-</div>
-<div id="toast"></div>
+</dialog>
+<div id="toast" role="status" aria-live="polite" hidden></div>
 <script nonce="__NONCE__">
 const THEME_KEY = 'mikdata-admin-theme';
 const THEMES = ['system', 'light', 'dark'];
-const themeLabel = { system: '系统', light: '浅色', dark: '深色' };
+const themeLabel = { system: '跟随系统', light: '浅色模式', dark: '深色模式' };
 const state = {
   buildings: [],
   submissions: [],
   editId: null,
   reviewId: null,
   busy: false,
+  view: 'buildings',
+  typeFilter: '',
+  loadingBuildings: true,
   loadingSubmissions: false,
+  buildingError: '',
+  submissionError: '',
+  importValid: false,
   theme: readTheme(),
 };
 const typeLabel = { original: '原创', derivative: '二创', replica: '复刻' };
@@ -528,11 +212,30 @@ const $ = (id) => document.getElementById(id);
 applyTheme();
 $('theme-btn').addEventListener('click', cycleTheme);
 $('refresh-btn').addEventListener('click', () => loadAll());
-$('submissions-refresh-btn').addEventListener('click', loadSubmissions);
+$('submissions-refresh-btn').addEventListener('click', () => loadSubmissions());
 $('import-btn').addEventListener('click', openImport);
 $('create-btn').addEventListener('click', openCreate);
 $('search').addEventListener('input', render);
-$('type-filter').addEventListener('change', render);
+$('search-clear').addEventListener('click', clearSearch);
+document.querySelectorAll('.filter-chip').forEach((button) => {
+  button.addEventListener('click', () => {
+    state.typeFilter = button.dataset.type;
+    document.querySelectorAll('.filter-chip').forEach((chip) => {
+      chip.setAttribute('aria-pressed', String(chip === button));
+    });
+    render();
+  });
+});
+document.querySelectorAll('[role="tab"]').forEach((tab) => {
+  tab.addEventListener('click', () => switchView(tab.id === 'buildings-tab' ? 'buildings' : 'submissions'));
+  tab.addEventListener('keydown', (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const view = event.key === 'Home' ? 'buildings' : event.key === 'End' ? 'submissions' : tab.id === 'buildings-tab' ? 'submissions' : 'buildings';
+    switchView(view);
+    $(view + '-tab').focus();
+  });
+});
 $('rows').addEventListener('click', handleBuildingTableClick);
 $('submission-list').addEventListener('click', handleSubmissionListClick);
 $('close-btn').addEventListener('click', closeModal);
@@ -540,6 +243,7 @@ $('cancel-btn').addEventListener('click', closeModal);
 $('overlay').addEventListener('click', (event) => {
   if (event.target === event.currentTarget) closeModal();
 });
+$('overlay').addEventListener('cancel', (event) => { event.preventDefault(); closeModal(); });
 $('building-form').addEventListener('submit', saveBuilding);
 $('review-save-btn').addEventListener('click', saveSubmissionEdit);
 $('review-approve-btn').addEventListener('click', approveSubmission);
@@ -549,13 +253,32 @@ $('import-cancel-btn').addEventListener('click', closeImport);
 $('import-overlay').addEventListener('click', (event) => {
   if (event.target === event.currentTarget) closeImport();
 });
+$('import-overlay').addEventListener('cancel', (event) => { event.preventDefault(); closeImport(); });
 $('import-form').addEventListener('submit', importBuildings);
 $('import-file').addEventListener('change', readImportFile);
 $('import-json').addEventListener('input', updateImportPreview);
 
 updateAuthState();
 setReviewMode(false);
-loadInitial();
+loadAll();
+
+function switchView(view) {
+  state.view = view;
+  for (const name of ['buildings', 'submissions']) {
+    const selected = name === view;
+    $(name + '-tab').setAttribute('aria-selected', String(selected));
+    $(name + '-tab').tabIndex = selected ? 0 : -1;
+    $(name + '-panel').hidden = !selected;
+  }
+  $('search-field').hidden = view !== 'buildings';
+  $('building-actions').hidden = view !== 'buildings';
+}
+
+function clearSearch() {
+  $('search').value = '';
+  render();
+  $('search').focus();
+}
 
 function readTheme() {
   try {
@@ -573,7 +296,10 @@ function applyTheme() {
     document.documentElement.dataset.theme = state.theme;
   }
 
-  $('theme-btn').textContent = themeLabel[state.theme];
+  $('theme-label').textContent = themeLabel[state.theme];
+  const next = THEMES[(THEMES.indexOf(state.theme) + 1) % THEMES.length];
+  $('theme-btn').setAttribute('aria-label', '配色：' + themeLabel[state.theme] + '，点击切换' + themeLabel[next]);
+  $('theme-btn').title = '配色：' + themeLabel[state.theme];
 }
 
 function cycleTheme() {
@@ -588,19 +314,11 @@ function cycleTheme() {
 }
 
 function updateAuthState() {
-  document.querySelector('.app').classList.toggle('is-busy', state.busy);
   $('create-btn').disabled = state.busy;
   $('import-btn').disabled = state.busy;
-}
-
-async function loadInitial() {
-  setBusy(true);
-  try {
-    await loadBuildings(false);
-  } finally {
-    setBusy(false);
-  }
-  await loadSubmissions(false);
+  document.querySelectorAll('.row-actions button').forEach((button) => {
+    button.disabled = state.busy || (button.dataset.action === 'review' && !state.submissions.some((item) => item.id === button.dataset.id && item.status === 'pending'));
+  });
 }
 
 async function loadAll(manageBusy = true) {
@@ -614,16 +332,21 @@ async function loadAll(manageBusy = true) {
 
 async function loadBuildings(manageBusy = true) {
   if (manageBusy) setBusy(true);
+  state.loadingBuildings = true;
+  state.buildingError = '';
+  render();
   try {
     const res = await fetch('/admin/api/buildings', { cache: 'no-store' });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
     state.buildings = Array.isArray(data) ? data : [];
     updateStats();
-    render();
   } catch (error) {
+    state.buildingError = error.message || '加载失败';
     toast(error.message || '加载失败', false);
   } finally {
+    state.loadingBuildings = false;
+    render();
     if (manageBusy) setBusy(false);
   }
 }
@@ -631,6 +354,7 @@ async function loadBuildings(manageBusy = true) {
 async function loadSubmissions(manageBusy = true) {
   if (manageBusy) setBusy(true);
   state.loadingSubmissions = true;
+  state.submissionError = '';
   renderSubmissions();
   try {
     const res = await fetch('/admin/api/building-submissions?status=pending', { cache: 'no-store' });
@@ -639,6 +363,7 @@ async function loadSubmissions(manageBusy = true) {
     state.submissions = Array.isArray(data.submissions) ? data.submissions : [];
     updateAdminStatus();
   } catch (error) {
+    state.submissionError = error.message || '申请加载失败';
     toast(error.message || '申请加载失败', false);
   } finally {
     state.loadingSubmissions = false;
@@ -661,38 +386,53 @@ function countType(type) {
 
 function updateAdminStatus() {
   const pending = state.submissions.filter((submission) => submission.status === 'pending').length;
-  $('admin-status').textContent = '建筑 ' + state.buildings.length + ' · 待审 ' + pending;
+  $('pending-count').textContent = pending;
+  $('submissions-tab').setAttribute('aria-label', '待审申请，' + pending + ' 条');
+  $('admin-status').textContent = '已收录 ' + state.buildings.length + ' 座建筑，' + (pending ? pending + ' 份申请待审核。' : '当前没有待审申请。');
 }
 
 function render() {
   const query = $('search').value.trim().toLowerCase();
-  const type = $('type-filter').value;
+  const type = state.typeFilter;
   const rows = state.buildings.filter((building) => {
     if (type && building.buildType !== type) return false;
     return !query || searchableText(building).includes(query);
   });
   const body = $('rows');
+  $('search-clear').hidden = !$('search').value;
+  $('buildings-panel').setAttribute('aria-busy', String(state.loadingBuildings));
+  $('result-count').textContent = state.loadingBuildings ? '正在加载建筑…' : state.buildingError ? '加载失败，请重试' : (query || type ? '找到 ' + rows.length + ' 座建筑' : '共 ' + rows.length + ' 座建筑');
+  if (state.loadingBuildings && !state.buildings.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty-cell"><div class="empty">正在加载建筑…</div></td></tr>';
+    return;
+  }
+  if (state.buildingError && !state.buildings.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty-cell"><div class="empty"><strong>建筑加载失败</strong><p>' + esc(state.buildingError) + '</p><button class="btn quiet" type="button" data-action="retry">重新加载</button></div></td></tr>';
+    return;
+  }
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="7"><div class="empty">暂无数据</div></td></tr>';
+    const filtered = query || type;
+    body.innerHTML = '<tr><td colspan="6" class="empty-cell"><div class="empty">${icon('building')}<strong>' + (filtered ? '没有找到匹配的建筑' : '还没有收录建筑') + '</strong><p>' + (filtered ? '试试其他名称、建造者或标签，或清除筛选。' : '新增一座建筑，或导入已有的建筑数据。') + '</p><button class="btn quiet" type="button" data-action="' + (filtered ? 'reset' : 'create') + '">' + (filtered ? '清除筛选' : '新增建筑') + '</button></div></td></tr>';
     return;
   }
   body.innerHTML = rows.map((building) => {
     const builders = [...(building.builders || [])].sort((a, b) => b.weight - a.weight).map((item) => item.name).join('、');
     const tags = (building.tags || []).map((tag) => tag['zh-CN'] || tag.en).filter(Boolean).join('、');
     return '<tr>' +
-      '<td><span class="mono">' + esc(building.id) + '</span></td>' +
-      '<td><div class="title">' + esc(building.name && building.name['zh-CN']) + '</div><div class="meta">' + esc(building.name && building.name.en) + '</div>' + (tags ? '<div class="meta">' + esc(tags) + '</div>' : '') + '</td>' +
-      '<td><span class="mono">' + esc(building.coordinates && building.coordinates.world) + ' · (' + num(building.coordinates && building.coordinates.x) + ', ' + num(building.coordinates && building.coordinates.y) + ', ' + num(building.coordinates && building.coordinates.z) + ')</span></td>' +
-      '<td><span class="badge ' + esc(building.buildType) + '">' + esc(typeLabel[building.buildType] || building.buildType) + '</span></td>' +
-      '<td>' + esc(builders) + '</td>' +
-      '<td><span class="mono">' + esc(building.buildDate) + '</span></td>' +
-      '<td><div class="row-actions"><button class="btn quiet sm" type="button" data-action="edit" data-id="' + esc(building.id) + '">编辑</button><button class="btn danger sm" type="button" data-action="delete" data-id="' + esc(building.id) + '">删除</button></div></td>' +
+      '<td class="building-cell"><div class="title">' + esc(building.name && building.name['zh-CN']) + '</div><div class="meta">' + esc(building.name && building.name.en) + '</div>' + (tags ? '<div class="meta">' + esc(tags) + '</div>' : '') + '<div class="mono meta record-id">' + esc(building.id) + '</div></td>' +
+      '<td data-label="所在位置"><div class="mono">' + esc(building.coordinates && building.coordinates.world) + '</div><div class="mono">' + num(building.coordinates && building.coordinates.x) + ', ' + num(building.coordinates && building.coordinates.y) + ', ' + num(building.coordinates && building.coordinates.z) + '</div></td>' +
+      '<td data-label="类型"><span class="badge ' + esc(building.buildType) + '">' + esc(typeLabel[building.buildType] || building.buildType) + '</span></td>' +
+      '<td data-label="建造者">' + esc(builders) + '</td>' +
+      '<td data-label="建造日期"><span class="date">' + esc(building.buildDate) + '</span></td>' +
+      '<td class="actions-cell"><div class="row-actions"><button class="btn quiet sm" type="button" data-action="edit" data-id="' + esc(building.id) + '" aria-label="编辑' + esc(building.name && building.name['zh-CN']) + '">编辑</button><button class="btn danger sm" type="button" data-action="delete" data-id="' + esc(building.id) + '" aria-label="删除' + esc(building.name && building.name['zh-CN']) + '">删除</button></div></td>' +
       '</tr>';
   }).join('');
+  updateAuthState();
 }
 
 function renderSubmissions() {
   const list = $('submission-list');
+  list.setAttribute('aria-busy', String(state.loadingSubmissions));
   if (state.loadingSubmissions && !state.submissions.length) {
     list.innerHTML = '<div class="empty">正在加载申请</div>';
     return;
@@ -702,7 +442,9 @@ function renderSubmissions() {
     return String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
   });
   if (!pendingFirst.length) {
-    list.innerHTML = '<div class="empty">暂无玩家申请</div>';
+    list.innerHTML = state.submissionError
+      ? '<div class="empty"><strong>申请加载失败</strong><p>' + esc(state.submissionError) + '</p><button class="btn quiet" type="button" data-action="retry">重新加载</button></div>'
+      : '<div class="empty">${icon('check')}<strong>所有申请已处理</strong><p>新的玩家建筑申请会显示在这里。</p></div>';
     return;
   }
   list.innerHTML = pendingFirst.map((submission) => {
@@ -720,15 +462,24 @@ function renderSubmissions() {
       note +
       expires +
       '<div class="review-item__meta"><span class="badge status-' + esc(submission.status) + '">' + esc(statusLabel(submission.status)) + '</span><span class="badge ' + esc(payload.buildType || '') + '">' + esc(typeLabel[payload.buildType] || payload.buildType || '-') + '</span></div></div>' +
-      '<div class="row-actions"><button class="btn quiet sm" type="button" data-action="review" data-id="' + esc(submission.id) + '"' + disabled + '>编辑审核</button></div>' +
+      '<div class="row-actions"><button class="btn quiet sm" type="button" data-action="review" data-id="' + esc(submission.id) + '" aria-label="查看申请：' + esc(title) + '"' + disabled + '>查看申请</button></div>' +
       '</article>';
   }).join('');
+  updateAuthState();
 }
 
 function handleBuildingTableClick(event) {
   if (!(event.target instanceof Element)) return;
   const button = event.target.closest('button[data-action]');
   if (!button || state.busy) return;
+  if (button.dataset.action === 'retry') { loadBuildings(); return; }
+  if (button.dataset.action === 'create') { openCreate(); return; }
+  if (button.dataset.action === 'reset') {
+    state.typeFilter = '';
+    document.querySelectorAll('.filter-chip').forEach((chip) => chip.setAttribute('aria-pressed', String(chip.dataset.type === '')));
+    clearSearch();
+    return;
+  }
   const id = button.dataset.id;
   if (button.dataset.action === 'edit') openEdit(id);
   if (button.dataset.action === 'delete') deleteBuilding(id);
@@ -736,8 +487,9 @@ function handleBuildingTableClick(event) {
 
 function handleSubmissionListClick(event) {
   if (!(event.target instanceof Element)) return;
-  const button = event.target.closest('button[data-action="review"]');
+  const button = event.target.closest('button[data-action]');
   if (!button || state.busy || button.disabled) return;
+  if (button.dataset.action === 'retry') { loadSubmissions(); return; }
   openSubmissionReview(button.dataset.id);
 }
 
@@ -753,13 +505,15 @@ function openCreate() {
   state.reviewId = null;
   $('modal-title').textContent = '新增建筑';
   $('building-form').reset();
+  $('source-fields').open = false;
   $('coord-x').value = '0';
   $('coord-y').value = '64';
   $('coord-z').value = '0';
   $('build-type').value = 'original';
   $('build-date').value = new Date().toISOString().slice(0, 10);
   setReviewMode(false);
-  $('overlay').classList.add('open');
+  $('overlay').showModal();
+  $('overlay').querySelector('.modal-body').scrollTop = 0;
   $('name-zh').focus();
 }
 
@@ -771,7 +525,8 @@ function openEdit(id) {
   $('modal-title').textContent = '编辑建筑';
   fillForm(building);
   setReviewMode(false);
-  $('overlay').classList.add('open');
+  $('overlay').showModal();
+  $('overlay').querySelector('.modal-body').scrollTop = 0;
   $('name-zh').focus();
 }
 
@@ -783,34 +538,37 @@ function openSubmissionReview(id) {
   $('modal-title').textContent = '审核申请 · ' + (submission.submitterName || submission.id);
   fillForm(submission.payload || {});
   setReviewMode(true);
-  $('overlay').classList.add('open');
+  $('overlay').showModal();
+  $('overlay').querySelector('.modal-body').scrollTop = 0;
   $('name-zh').focus();
 }
 
 function closeModal() {
-  $('overlay').classList.remove('open');
+  document.body.append($('toast'));
+  $('overlay').close();
   state.editId = null;
   state.reviewId = null;
   setReviewMode(false);
 }
 
 function setReviewMode(isReview) {
-  $('save-btn').style.display = isReview ? 'none' : '';
-  $('review-save-btn').style.display = isReview ? '' : 'none';
-  $('review-reject-btn').style.display = isReview ? '' : 'none';
-  $('review-approve-btn').style.display = isReview ? '' : 'none';
+  $('save-btn').hidden = isReview;
+  $('review-save-btn').hidden = !isReview;
+  $('review-reject-btn').hidden = !isReview;
+  $('review-approve-btn').hidden = !isReview;
 }
 
 function openImport() {
   $('import-form').reset();
   $('import-json').value = '';
   updateImportPreview();
-  $('import-overlay').classList.add('open');
+  $('import-overlay').showModal();
   $('import-json').focus();
 }
 
 function closeImport() {
-  $('import-overlay').classList.remove('open');
+  document.body.append($('toast'));
+  $('import-overlay').close();
 }
 
 function fillForm(building) {
@@ -832,6 +590,7 @@ function fillForm(building) {
   $('source-link').value = source.originalLink || '';
   $('source-note-zh').value = source.notes && source.notes['zh-CN'] || '';
   $('source-note-en').value = source.notes && source.notes.en || '';
+  $('source-fields').open = Boolean(source.originalAuthor || source.originalLink || source.notes && (source.notes['zh-CN'] || source.notes.en));
 }
 
 async function saveBuilding(event) {
@@ -863,6 +622,7 @@ async function saveBuilding(event) {
 async function saveSubmissionEdit() {
   const submission = currentReviewSubmission();
   if (!submission) return;
+  if (!$('building-form').reportValidity()) return;
   setBusy(true);
   try {
     const payload = toPayload();
@@ -888,6 +648,7 @@ async function saveSubmissionEdit() {
 async function approveSubmission() {
   const submission = currentReviewSubmission();
   if (!submission) return;
+  if (!$('building-form').reportValidity()) return;
   setBusy(true);
   try {
     const payload = toPayload();
@@ -914,7 +675,7 @@ async function approveSubmission() {
 async function rejectSubmission() {
   const submission = currentReviewSubmission();
   if (!submission) return;
-  const reviewNote = prompt('拒绝原因');
+  const reviewNote = prompt('填写退回原因，帮助玩家修改申请');
   if (!reviewNote || !reviewNote.trim()) return;
   setBusy(true);
   try {
@@ -925,7 +686,7 @@ async function rejectSubmission() {
     });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
-    toast('已拒绝', true);
+    toast('申请已退回', true);
     closeModal();
     await loadSubmissions(false);
   } catch (error) {
@@ -970,18 +731,26 @@ async function readImportFile() {
 
 function updateImportPreview() {
   const value = $('import-json').value.trim();
+  state.importValid = false;
+  $('import-save-btn').disabled = true;
 
   if (!value) {
-    $('import-preview').textContent = '等待 JSON';
+    $('import-preview').textContent = '选择文件或粘贴 JSON 后预览导入数量。';
     return;
   }
 
   try {
     const parsed = JSON.parse(value);
     const items = Array.isArray(parsed) ? parsed : [parsed];
-    $('import-preview').textContent = '将导入 ' + items.length + ' 条';
+    if (!items.length || items.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) {
+      $('import-preview').textContent = '请填写一个建筑对象，或包含建筑对象的非空数组。';
+      return;
+    }
+    state.importValid = true;
+    $('import-save-btn').disabled = state.busy;
+    $('import-preview').textContent = '准备导入 ' + items.length + ' 座建筑，确认后写入收录。';
   } catch {
-    $('import-preview').textContent = 'JSON 格式错误';
+    $('import-preview').textContent = 'JSON 格式有误，请检查括号、引号和逗号。';
   }
 }
 
@@ -1129,19 +898,24 @@ function setBusy(busy) {
   $('review-save-btn').disabled = busy;
   $('review-reject-btn').disabled = busy;
   $('review-approve-btn').disabled = busy;
-  $('import-save-btn').disabled = busy;
+  $('import-save-btn').disabled = busy || !state.importValid;
   $('refresh-btn').disabled = busy;
   $('submissions-refresh-btn').disabled = busy;
+  $('refresh-btn').classList.toggle('is-loading', busy);
+  $('save-btn').textContent = busy ? '正在保存…' : '保存建筑';
+  $('import-save-btn').textContent = busy ? '正在处理…' : '确认导入';
   updateAuthState();
 }
 
 let toastTimer;
 function toast(message, ok) {
   const el = $('toast');
+  (document.querySelector('dialog[open]') || document.body).append(el);
+  el.hidden = false;
   el.textContent = message;
-  el.className = 'show ' + (ok ? 'ok' : 'err');
+  el.className = ok ? 'ok' : 'err';
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.className = ''; }, 2600);
+  toastTimer = setTimeout(() => { el.hidden = true; }, ok ? 3500 : 6000);
 }
 
 function esc(value) {
