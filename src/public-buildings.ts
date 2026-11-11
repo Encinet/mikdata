@@ -9,6 +9,7 @@ import type { Building, Source } from './types';
 
 const SNAPSHOT_TTL_MS = 60_000;
 const RESPONSE_TTL_MS = 300_000;
+const MAX_LIST_LIMIT = 100;
 const CACHE_HEADERS = { 'Cache-Control': 'public, max-age=300, stale-while-revalidate=600' };
 const BUILDING_ROUTE_RE = new RegExp(`^/buildings/(${BUILDING_ID_PATTERN})$`, 'i');
 interface Catalog {
@@ -25,6 +26,7 @@ interface CatalogState {
 }
 interface Query {
   builder: string;
+  limit: number | null;
   locale: '' | 'zh-CN' | 'en';
   tag: string;
   type: string;
@@ -50,15 +52,23 @@ export async function handlePublicBuildingsRoute(
   if (request.method !== 'GET') return json({ error: 'method not allowed' }, 405);
   try {
     const state = catalogState(env);
-    const catalog = await readCatalog(env, state);
     if (detail) {
+      const catalog = await readCatalog(env, state);
       const building = catalog.byId.get(detail[1]);
       return building
         ? json(building, 200, CACHE_HEADERS)
         : json({ error: 'building not found' }, 404);
     }
     const query = parseQuery(new URL(request.url).searchParams);
-    const key = `v4:building-list:${catalog.snapshot.version}:${new URLSearchParams({ ...query })}`;
+    if (query === null) {
+      return json({ error: 'invalid_limit' }, 400, { 'Cache-Control': 'no-store' });
+    }
+    const catalog = await readCatalog(env, state);
+    const params = new URLSearchParams({
+      ...query,
+      limit: query.limit === null ? '' : String(query.limit),
+    });
+    const key = `v5:building-list:${catalog.snapshot.version}:${params}`;
     const memoryKey = `${state.scope}:${key}`;
     let body = responses.get(memoryKey);
     if (body === null) {
@@ -88,16 +98,22 @@ async function loadList(
 ): Promise<string> {
   let body = await readResponseCache(key);
   if (body === null) {
-    const filtered = catalog.sorted.filter(
-      (building) =>
-        (!query.type || building.buildType === query.type) &&
-        (!query.tag ||
-          building.tags?.some((tag) => tag['zh-CN'] === query.tag || tag.en === query.tag)) &&
-        (!query.builder ||
-          building.builders.some(
-            (builder) => builder.name === query.builder || builder.uuid === query.builder,
-          )),
-    );
+    const filtered: Building[] = [];
+    for (const building of catalog.sorted) {
+      if (query.type && building.buildType !== query.type) continue;
+      if (
+        query.tag &&
+        !building.tags?.some((tag) => tag['zh-CN'] === query.tag || tag.en === query.tag)
+      ) continue;
+      if (
+        query.builder &&
+        !building.builders.some(
+          (builder) => builder.name === query.builder || builder.uuid === query.builder,
+        )
+      ) continue;
+      filtered.push(building);
+      if (query.limit !== null && filtered.length === query.limit) break;
+    }
     const locale = query.locale;
     body = JSON.stringify(
       locale ? filtered.map((building) => localizeBuilding(building, locale)) : filtered,
@@ -108,10 +124,19 @@ async function loadList(
   return body;
 }
 
-function parseQuery(params: URLSearchParams): Query {
+function parseQuery(params: URLSearchParams): Query | null {
+  const limits = params.getAll('limit');
+  let limit: number | null = null;
+  if (limits.length > 0) {
+    const value = limits[0].trim();
+    if (limits.length !== 1 || !/^\d+$/.test(value)) return null;
+    limit = Number(value);
+    if (limit < 1 || limit > MAX_LIST_LIMIT) return null;
+  }
   const locale = params.get('locale')?.trim() ?? '';
   return {
     builder: params.get('builder')?.trim() ?? '',
+    limit,
     tag: params.get('tag')?.trim() ?? '',
     type: params.get('type')?.trim() ?? '',
     locale: locale ? (locale === 'zh-CN' ? 'zh-CN' : 'en') : '',

@@ -43,6 +43,9 @@ paths:
   /buildings:
     get:
       summary: 获取建筑列表
+      description: |
+        按 buildDate（建造日期）倒序返回建筑。先应用筛选，再取 limit 指定的数量。
+        不提供 limit 时返回全部匹配建筑；例如 /buildings?limit=2 返回最新两项。
       operationId: getBuildings
       parameters:
         - name: tag
@@ -63,6 +66,16 @@ paths:
           description: 不提供或为空时返回双语字段；zh-CN 返回中文，en 及其他非空值返回英文。
           schema:
             type: string
+        - name: limit
+          in: query
+          description: |
+            最多返回的建筑数量，只能提供一次，取值为 1–100 的十进制整数。
+            首尾空白和前导零会被归一化；空值、重复参数或非法数值返回 400。
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          example: 2
       responses:
         "200":
           description: 成功
@@ -72,6 +85,28 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Building"
+        "400":
+          description: limit 参数无效，返回 {"error":"invalid_limit"}。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                    const: invalid_limit
+        "503":
+          description: 建筑快照暂时不可用。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                    const: building_data_unavailable
 
   /buildings/{id}:
     parameters:

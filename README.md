@@ -63,6 +63,8 @@ bun run deploy
 
 `AUTH_STORE` uses SQLite for accounts, sessions, buildings, submissions and upload receipts. Public buildings are served from KV snapshots and caches. Publication attempts are spaced at least five minutes apart; KV propagation and cache expiry add visibility delay. A missing public snapshot is rebuilt from SQLite.
 
+`GET /api/buildings?limit=2` returns up to two buildings in descending `buildDate` order (the construction date, not the publication date). The optional `limit` accepts one decimal integer from 1 to 100; surrounding whitespace and leading zeroes are normalized. Empty, repeated or invalid values return HTTP 400 with `invalid_limit`. Without `limit`, all matching buildings are returned. Filters (`tag`, `type`, `builder`) apply before the limit, and `locale` keeps its existing behavior. Limited and full responses use separate cache entries for each snapshot revision.
+
 A five-minute cron refreshes players, bans and announcements. Community board data stays in the Minecraft plugin. Chat WebSocket traffic goes directly to the plugin through Cloudflare Tunnel; its setup is documented in the plugin's `docs/web-chat.md`.
 
 Building submissions require membership and ImgBB WebP uploads. Accounts may have up to 10 pending submissions; completed reviews remain visible for 14 days. Record expiry does not delete hosted images.
