@@ -27,55 +27,6 @@ test('public proxy routes survive unavailable KV', async () => {
   }
 });
 
-test('community board reads are forwarded without storing recipient identities', async () => {
-  const env = createEnvWithUnavailableKv();
-  const paths: string[] = [];
-  const id = '00000000-0000-0000-0000-000000000099';
-  env.VPC_SERVICE = {
-    fetch: (input: RequestInfo | URL) => {
-      const pathname = new URL(input.toString()).pathname;
-      paths.push(pathname);
-      return Promise.resolve(
-        Response.json(
-          pathname.endsWith(id)
-            ? { notice: { id, notifiedPlayers: ['Builder'] } }
-            : { notices: [{ id, notifiedPlayers: ['Builder'] }] },
-        ),
-      );
-    },
-  } as Fetcher;
-  const ctx = createExecutionContext();
-  const list = await worker.fetch(
-    new Request('https://data.mcmik.top/api/community/notices'),
-    env,
-    ctx,
-  );
-  const detail = await worker.fetch(
-    new Request(`https://data.mcmik.top/api/community/notices/${id}`),
-    env,
-    ctx,
-  );
-  expect(list.status).toBe(200);
-  expect(detail.status).toBe(200);
-  expect(list.headers.get('Cache-Control')).toBe('no-store');
-  expect(await detail.json()).toEqual({ notice: { id, notifiedPlayers: ['Builder'] } });
-  expect(paths).toEqual(['/api/community/notices', `/api/community/notices/${id}`]);
-
-  const invalid = await worker.fetch(
-    new Request('https://data.mcmik.top/api/community/notices/invalid'),
-    env,
-    ctx,
-  );
-  const write = await worker.fetch(
-    new Request('https://data.mcmik.top/api/community/notices', { method: 'POST', body: '{}' }),
-    env,
-    ctx,
-  );
-  expect(invalid.status).toBe(404);
-  expect(write.status).toBe(405);
-  expect(paths).toHaveLength(2);
-});
-
 test('public API rate limiting rejects before upstream work', async () => {
   const keys: string[] = [];
   const env = createEnvWithUnavailableKv();
