@@ -2,6 +2,7 @@ export interface Env {
   BUILDINGS_KV: KVNamespace;
   AUTH_STORE: DurableObjectNamespace;
   AUTH_CLIENT_RATE_LIMITER: RateLimit;
+  AUTH_SESSION_CHECK_IP_RATE_LIMITER: RateLimit;
   AUTH_CHALLENGE_CREATE_RATE_LIMITER: RateLimit;
   AUTH_SENSITIVE_RATE_LIMITER: RateLimit;
   PUBLIC_API_RATE_LIMITER: RateLimit;

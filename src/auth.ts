@@ -30,6 +30,8 @@ const PLAYER_RESOLVE_CACHE_TTL_MS = 60 * 1000;
 const MAX_AUTH_BODY_BYTES = 64 * 1024;
 const AUTH_RATE_LIMIT_WINDOW_SECONDS = 60;
 const AUTH_RATE_LIMIT_RETRY_SECONDS = 10;
+const SESSION_CHECK_GUEST_RATE_LIMIT = 20;
+const SESSION_CHECK_ACCOUNT_RATE_LIMIT = 120;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALLOWED_ROLES = new Set(['default', 'member', 'moderator', 'custodian']);
 const DEFAULT_WEBAUTHN_RP_ID = 'mcmik.top';
@@ -325,12 +327,12 @@ export async function handleAuthRoute(
   if (routePath === '/auth/me' && request.method === 'POST') {
     const payload = await readJsonObject(request);
     if (!payload.ok) return payload.response;
-    const response = await callStore(store, { action: 'me', sessionId });
-    return authJson(
-      stripInternalAuthFields(response.body),
-      response.status,
-      sessionHeaders(response.body),
-    );
+    const { status, body } = await callStore(store, { action: 'me', sessionId, clientKey });
+    const headers = sessionHeaders(body);
+    if (status === 429 && typeof body.retryAfterSeconds === 'number') {
+      headers.set('Retry-After', String(body.retryAfterSeconds));
+    }
+    return authJson(stripInternalAuthFields(body), status, headers);
   }
 
   if (routePath === '/me/chat/authorize' && request.method === 'POST') {
@@ -546,7 +548,11 @@ async function enforceAuthRateLimits(
     checks.push({ limiter: env.AUTH_SENSITIVE_RATE_LIMITER, key: `${action}:${clientKey}` });
   }
 
-  checks.push({ limiter: env.AUTH_CLIENT_RATE_LIMITER, key: clientKey });
+  checks.push({
+    limiter:
+      routePath === '/auth/me' ? env.AUTH_SESSION_CHECK_IP_RATE_LIMITER : env.AUTH_CLIENT_RATE_LIMITER,
+    key: clientKey,
+  });
 
   try {
     for (const check of checks) {
@@ -589,6 +595,14 @@ export class AuthStore implements DurableObject {
   private readonly state: DurableObjectState;
   private readonly env: Env;
   private readonly rateLimits = new TtlMemoryCache<RateLimitRecord>({
+    defaultTtlMs: AUTH_RATE_LIMIT_WINDOW_SECONDS * 1000,
+    maxEntries: 2048,
+  });
+  private readonly sessionCheckGuestRateLimits = new TtlMemoryCache<RateLimitRecord>({
+    defaultTtlMs: AUTH_RATE_LIMIT_WINDOW_SECONDS * 1000,
+    maxEntries: 2048,
+  });
+  private readonly sessionCheckAccountRateLimits = new TtlMemoryCache<RateLimitRecord>({
     defaultTtlMs: AUTH_RATE_LIMIT_WINDOW_SECONDS * 1000,
     maxEntries: 2048,
   });
@@ -676,7 +690,7 @@ export class AuthStore implements DurableObject {
           asString(body.sessionId),
         );
       case 'me':
-        return this.me(asString(body.sessionId));
+        return this.me(asString(body.sessionId), asString(body.clientKey));
       case 'logout':
         return this.logout(asString(body.sessionId));
       case 'passkeyRegistrationOptions':
@@ -1040,8 +1054,15 @@ export class AuthStore implements DurableObject {
     return result;
   }
 
-  private async me(sessionId: string): Promise<{ status: number; body: unknown }> {
+  private async me(sessionId: string, clientKey: string): Promise<StoreResult> {
     const session = await this.readValidSession(sessionId);
+    const limited = this.consumeRateLimit(
+      session?.playerUuid ?? sanitizeRateLimitPart(clientKey),
+      session ? SESSION_CHECK_ACCOUNT_RATE_LIMIT : SESSION_CHECK_GUEST_RATE_LIMIT,
+      AUTH_RATE_LIMIT_WINDOW_SECONDS,
+      session ? this.sessionCheckAccountRateLimits : this.sessionCheckGuestRateLimits,
+    );
+    if (limited) return limited;
     if (!session) return { status: 200, body: { authenticated: false, clearSession: true } };
     const account = await this.readAccount(session.playerUuid);
     if (!account) return { status: 200, body: { authenticated: false, clearSession: true } };
@@ -2187,12 +2208,13 @@ export class AuthStore implements DurableObject {
     key: string,
     limit: number,
     windowSeconds: number,
+    rateLimits = this.rateLimits,
   ): { status: number; body: Record<string, unknown> } | null {
     const now = Date.now();
-    const existing = this.rateLimits.get(key, now);
+    const existing = rateLimits.get(key, now);
 
     if (!existing) {
-      this.rateLimits.set(
+      rateLimits.set(
         key,
         { count: 1, resetAt: now + windowSeconds * 1000 },
         windowSeconds * 1000,
@@ -2385,7 +2407,7 @@ function setLoginCookie(body: Record<string, unknown>): HeadersInit {
   };
 }
 
-function sessionHeaders(body: Record<string, unknown>): HeadersInit {
+function sessionHeaders(body: Record<string, unknown>): Headers {
   const headers = new Headers();
   const sessionId = optionalString(body.sessionId);
   if (sessionId) {

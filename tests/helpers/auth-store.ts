@@ -132,6 +132,7 @@ export function testAuthEnv(overrides: Partial<Env> = {}): Env {
     } as unknown as KVNamespace,
     AUTH_STORE: {} as DurableObjectNamespace,
     AUTH_CLIENT_RATE_LIMITER: limiter,
+    AUTH_SESSION_CHECK_IP_RATE_LIMITER: limiter,
     AUTH_CHALLENGE_CREATE_RATE_LIMITER: limiter,
     AUTH_SENSITIVE_RATE_LIMITER: limiter,
     PUBLIC_API_RATE_LIMITER: limiter,

@@ -1,7 +1,9 @@
 import { expect, test } from 'bun:test';
+import type { Env } from '../src/env';
 import worker from '../src/index';
 import {
   authCall,
+  OTHER_UUID,
   PLAYER_UUID,
   seedSession,
   testAuthEnv,
@@ -226,6 +228,72 @@ test('worker fails closed when an auth rate limiter is unavailable', async () =>
   expect(await response.json()).toEqual({ error: 'rate_limiter_unavailable' });
 });
 
+test('session checks enforce a dedicated pre-store IP limit', async () => {
+  const keys: string[] = [];
+  const response = await checkSession(
+    testAuthEnv({
+      AUTH_SESSION_CHECK_IP_RATE_LIMITER: createRateLimit(false, keys),
+      AUTH_STORE: {
+        idFromName: () => {
+          throw new Error('auth store should not be called');
+        },
+      } as unknown as DurableObjectNamespace,
+    }),
+    'x'.repeat(43),
+  );
+  expect(response.status).toBe(429);
+  expect(response.headers.get('Retry-After')).toBe('60');
+  expect(response.headers.get('Cache-Control')).toBe('no-store');
+  expect(keys).toEqual(['ip:203.0.113.14']);
+});
+
+test('invalid sessions spend the guest IP allowance without limiting a valid session on that IP', async () => {
+  const { store, env, values } = testSessionWorker();
+  const valid = await seedSession(values);
+  const revoked = await seedSession(values);
+  const expired = await seedSession(values);
+  values.set(`session:${expired.record.sidHash}`, {
+    ...expired.record,
+    idleExpiresAt: new Date(0).toISOString(),
+  });
+  expect((await checkSession(env, revoked.token)).status).toBe(200);
+  expect((await authCall(store, { action: 'logout', sessionId: revoked.token })).status).toBe(200);
+
+  for (let index = 0; index < 20; index += 1) {
+    const response = await checkSession(env, 'x'.repeat(43));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ authenticated: false });
+  }
+  for (const token of [expired.token, revoked.token, 'y'.repeat(43)]) {
+    const response = await checkSession(env, token);
+    expect(response.status).toBe(429);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    const body = await response.json() as { error: string; retryAfterSeconds: number };
+    expect(body.error).toBe('rate_limited');
+    expect(body.retryAfterSeconds).toBeGreaterThan(0);
+    expect(response.headers.get('Retry-After')).toBe(String(body.retryAfterSeconds));
+  }
+  const authorized = await checkSession(env, valid.token);
+  expect(authorized.status).toBe(200);
+  expect(await authorized.json()).toMatchObject({ authenticated: true });
+  expect((await checkSession(env, '', 'ip:203.0.113.15')).status).toBe(200);
+});
+
+test('verified session checks share the account allowance across sessions and IPs', async () => {
+  const { env, values } = testSessionWorker({ AUTH_CLIENT_RATE_LIMITER: createRateLimit(false) });
+  const first = await seedSession(values);
+  const second = await seedSession(values);
+  const other = await seedSession(values, 0, OTHER_UUID);
+
+  for (let index = 0; index < 120; index += 1) {
+    expect((await checkSession(env, first.token)).status).toBe(200);
+  }
+  const limited = await checkSession(env, second.token, 'ip:203.0.113.15');
+  expect(limited.status).toBe(429);
+  expect(limited.headers.has('Retry-After')).toBe(true);
+  expect((await checkSession(env, other.token)).status).toBe(200);
+});
+
 test('auth preflight does not return wildcard cors headers', async () => {
   const response = await worker.fetch(
     new Request('https://data.mcmik.top/auth/me', { method: 'OPTIONS' }),
@@ -312,6 +380,33 @@ test('account security lists own sessions and revokes one without signing out th
   ).toBe(401);
   expect(values.has(`account-session:${PLAYER_UUID}:${second.record.sidHash}`)).toBe(false);
 });
+
+function testSessionWorker(overrides: Partial<Env> = {}) {
+  const fixture = testAuthStore(overrides);
+  fixture.env.AUTH_STORE = {
+    idFromName: () => ({}),
+    get: () => ({
+      fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+        fixture.store.fetch(new Request(input, init)),
+    }),
+  } as unknown as DurableObjectNamespace;
+  return fixture;
+}
+
+function checkSession(env: Env, token: string, clientKey = 'ip:203.0.113.14'): Promise<Response> {
+  return worker.fetch(
+    new Request('https://data.mcmik.top/auth/me', {
+      method: 'POST',
+      headers: {
+        'X-Mik-Client-Key': clientKey,
+        'X-Mik-Session': token,
+        'X-Mikweb-Auth': 'test-secret',
+      },
+    }),
+    env,
+    createExecutionContext(),
+  );
+}
 
 function createRateLimit(success = true, keys?: string[]): RateLimit {
   return {

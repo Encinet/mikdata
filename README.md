@@ -44,7 +44,7 @@ bun run check
 
 ## Deployment
 
-Configure the KV namespace, VPC service, domain and rate-limit namespace IDs in [wrangler.jsonc](./wrangler.jsonc). Keep the four rate-limit namespace IDs distinct and preserve the Durable Object migration history.
+Configure the KV namespace, VPC service, domain and rate-limit namespace IDs in [wrangler.jsonc](./wrangler.jsonc). Keep the rate-limit namespace IDs distinct and preserve the Durable Object migration history.
 
 To create the building KV namespace, run this command and copy its ID into the configuration:
 
@@ -60,6 +60,8 @@ bun run deploy
 ```
 
 ## Data behavior
+
+`POST /auth/me` has a dedicated Worker limit of 300 requests per minute per trusted client IP. Inside `AuthStore`, verified sessions share 120 requests per minute per account across browsers and IPs; missing or invalid sessions share 20 per minute per IP. Excess requests return `429` with `Retry-After` and `Cache-Control: no-store`. The store counters are in memory, and this route does not consume the IP allowance used by login and other auth routes. MikWeb still responds locally when the session cookie is absent.
 
 `AUTH_STORE` uses SQLite for accounts, sessions, buildings, submissions and upload receipts. Public buildings are served from KV snapshots and caches. Publication attempts are spaced at least five minutes apart; KV propagation and cache expiry add visibility delay. A missing public snapshot is rebuilt from SQLite.
 
