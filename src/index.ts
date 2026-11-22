@@ -1,10 +1,12 @@
 import type { Env } from './env';
-import { requireCloudflareAccess } from './access';
-import { adminPage } from './admin';
-import { AuthStore, handleAuthRoute } from './auth';
-import { handleAdminBuildingsRoute } from './buildings';
-import { handlePublicBuildingsRoute } from './public-buildings';
-import { json, proxyJson, PUBLIC_CORS_HEADERS } from './http';
+import { requireCloudflareAccess } from './auth/access';
+import { adminPage } from './admin/page';
+import { imagePublicBaseUrl } from './buildings/images/storage';
+import { handleAuthRoute } from './auth/route';
+import { AuthStore } from './auth/store';
+import { handleAdminBuildingsRoute } from './buildings/admin-route';
+import { handlePublicBuildingsRoute } from './buildings/public-route';
+import { json, proxyJson, PUBLIC_CORS_HEADERS } from './shared/http';
 import { matchProxyRoute, refreshProxyRoutes, serveProxyRoute } from './proxy';
 
 const ADMIN_API_BASE_PATH = '/admin/api';
@@ -50,7 +52,7 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
       return withoutCors(access.response);
     }
 
-    return adminPage();
+    return adminPage(imagePublicBaseUrl(env));
   }
 
   if (url.pathname === ADMIN_API_BASE_PATH || url.pathname.startsWith(`${ADMIN_API_BASE_PATH}/`)) {

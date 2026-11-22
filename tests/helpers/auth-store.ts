@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { AuthStore } from '../../src/auth';
+import { AuthStore } from '../../src/auth/store';
 import type { Env } from '../../src/env';
 
 export const PLAYER_UUID = '00000000-0000-4000-8000-000000000001';

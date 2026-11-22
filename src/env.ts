@@ -1,4 +1,9 @@
 export interface Env {
+  BUILDING_IMAGE_S3_BUCKET_URL?: string;
+  BUILDING_IMAGE_S3_REGION?: string;
+  BUILDING_IMAGE_ACCESS_KEY_ID?: string;
+  BUILDING_IMAGE_SECRET_ACCESS_KEY?: string;
+  BUILDING_IMAGE_PUBLIC_BASE_URL?: string;
   BUILDINGS_KV: KVNamespace;
   AUTH_STORE: DurableObjectNamespace;
   AUTH_CLIENT_RATE_LIMITER: RateLimit;

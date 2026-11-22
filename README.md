@@ -2,26 +2,9 @@
 
 Cloudflare Worker for public Minecraft data, building administration and MikWeb authentication.
 
-- Public API: `https://data.mcmik.top/api` — routes and schemas are in [openapi.yaml](./openapi.yaml). Public reads allow any browser origin; `/health` provides a health check.
-- Administration: `/admin` and `/admin/api/*`, protected by Cloudflare Access.
-- MikWeb: private `/auth/*` and `/me/*` endpoints called by the BFF. Session identity comes from `X-Mik-Session`; login binding uses `X-Mik-Browser-Nonce`.
-
-## Configuration
-
-All variables are required except the WebAuthn settings, which default to production values.
-
-| Variable | Purpose / default |
-|----------|-------------------|
-| `MINECRAFT_SERVER_URL` | Upstream base URL reachable through `VPC_SERVICE` |
-| `MINECRAFT_SERVER_ADDRESS` | Minecraft status fallback host |
-| `MINECRAFT_SERVER_PORT` | Minecraft status fallback port |
-| `CLOUDFLARE_ACCESS_ISSUER` | Access issuer, such as `https://your-team.cloudflareaccess.com` |
-| `CLOUDFLARE_ACCESS_AUD` | Access application audience for `/admin*` |
-| `MIKWEB_AUTH_CLIENT_SECRET` | Shared server-side secret with the MikWeb BFF |
-| `WEBAUTHN_RP_ID` | Passkey RP ID; defaults to `mcmik.top` |
-| `WEBAUTHN_ORIGIN` | Allowed origins, comma-separated; defaults to `https://mcmik.top` |
-
-The Passkey RP ID must match the MikWeb hostname or a registrable parent domain. For local development, use `WEBAUTHN_RP_ID=localhost` and `WEBAUTHN_ORIGIN=http://localhost:3000`, and run MikData locally alongside MikWeb.
+- Public API at `https://data.mcmik.top/api` ([OpenAPI](./openapi.yaml)) and health check at `/health`.
+- Building administration at `/admin` and `/admin/api/*` behind Cloudflare Access.
+- Private `/auth/*` and `/me/*` routes for the MikWeb BFF.
 
 ## Development
 
@@ -30,43 +13,22 @@ bun install
 cp .dev.vars.example .dev.vars
 ```
 
-Fill in `.dev.vars` with the configuration above, then run:
+Fill in `.dev.vars`, then run `bun run dev`. For local MikWeb passkeys, set `WEBAUTHN_RP_ID=localhost` and `WEBAUTHN_ORIGIN=http://localhost:3000`.
 
-```sh
-bun run dev
-```
-
-Run tests, type checking and a deployment dry-run:
-
-```sh
-bun run check
-```
+Run `bun run check` for tests, type checking and a deployment dry run.
 
 ## Deployment
 
-Configure the KV namespace, VPC service, domain and rate-limit namespace IDs in [wrangler.jsonc](./wrangler.jsonc). Keep the rate-limit namespace IDs distinct and preserve the Durable Object migration history.
+1. Set the KV namespace, VPC service, domain and distinct rate-limit namespace IDs in [wrangler.jsonc](./wrangler.jsonc). Keep the existing Durable Object migrations.
+2. Create a Cloudflare Access application for `data.mcmik.top/admin*`. Set Worker variables from [.dev.vars.example](./.dev.vars.example) and use `bunx wrangler secret put VARIABLE_NAME` for secrets.
+3. Run `bun run deploy`.
 
-To create the building KV namespace, run this command and copy its ID into the configuration:
+## Buildings
 
-```sh
-bunx wrangler kv namespace create BUILDINGS_KV
-```
+The S3 credentials need read, write and delete access under `buildings/`. The public image base URL defaults to the bucket URL.
 
-Create a Cloudflare Access application for `data.mcmik.top/admin*`. Set each required variable as a Wrangler secret, then deploy:
+Upload and reorder images in the admin editor. The first image is the cover. For JSON imports, use `"images": []` and add files in the editor afterward.
 
-```sh
-bunx wrangler secret put VARIABLE_NAME
-bun run deploy
-```
+Each member account can have 10 pending submissions. Completed reviews stay visible for 14 days. Unused uploads expire after 24 hours. Unreferenced images become eligible for deletion 14 days after the public catalog is current and the last reference is gone.
 
-## Data behavior
-
-`POST /auth/me` has a dedicated Worker limit of 300 requests per minute per trusted client IP. Inside `AuthStore`, verified sessions share 120 requests per minute per account across browsers and IPs; missing or invalid sessions share 20 per minute per IP. Excess requests return `429` with `Retry-After` and `Cache-Control: no-store`. The store counters are in memory, and this route does not consume the IP allowance used by login and other auth routes. MikWeb still responds locally when the session cookie is absent.
-
-`AUTH_STORE` uses SQLite for accounts, sessions, buildings, submissions and upload receipts. Public buildings are served from KV snapshots and caches. Publication attempts are spaced at least five minutes apart; KV propagation and cache expiry add visibility delay. A missing public snapshot is rebuilt from SQLite.
-
-`GET /api/buildings?limit=2` returns up to two buildings in descending `buildDate` order (the construction date, not the publication date). The optional `limit` accepts one decimal integer from 1 to 100; surrounding whitespace and leading zeroes are normalized. Empty, repeated or invalid values return HTTP 400 with `invalid_limit`. Without `limit`, all matching buildings are returned. Filters (`tag`, `type`, `builder`) apply before the limit, and `locale` keeps its existing behavior. Limited and full responses use separate cache entries for each snapshot revision.
-
-A five-minute cron refreshes players, bans and announcements. Chat WebSocket traffic goes directly to the plugin through Cloudflare Tunnel; its setup is documented in the plugin's `docs/web-chat.md`.
-
-Building submissions require membership and ImgBB WebP uploads. Accounts may have up to 10 pending submissions; completed reviews remain visible for 14 days. Record expiry does not delete hosted images.
+Public buildings are served from KV snapshots. Publication runs at most once every five minutes, and KV propagation and cache expiry may add delay.

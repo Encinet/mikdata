@@ -270,7 +270,7 @@ components:
           enum: [original, derivative, replica]
         images:
           type: array
-          description: 图片路径列表。每项必须是相对路径或 https URL。
+          description: 按展示顺序排列的 WebP 原图 HTTPS 地址。图册只使用对象存储中当前建筑 ID 下的原图，可为空。
           items:
             type: string
         buildDate:
