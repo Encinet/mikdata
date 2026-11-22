@@ -17,7 +17,7 @@ const state = {
   submissionError: '',
   importValid: false,
 };
-const typeLabel = { original: '原创', derivative: '二创', replica: '复刻' };
+const typeLabel = { original: '原创', derivative: '二创', replica: '搬运' };
 
 ${BUILDINGS_LIST_SCRIPT}
 ${BUILDING_EDITOR_SCRIPT}

@@ -16,7 +16,7 @@ export const BUILDING_EDITOR_HTML = /* html */ `
         <div class="field"><label for="name-en">英文名称 *</label><input id="name-en" lang="en" maxlength="200" required></div>
         <div class="field"><label for="desc-zh">中文描述 *</label><textarea id="desc-zh" lang="zh-CN" maxlength="2000" required></textarea></div>
         <div class="field"><label for="desc-en">英文描述 *</label><textarea id="desc-en" lang="en" maxlength="2000" required></textarea></div>
-        <div class="field"><label for="build-type">建筑类型</label><select id="build-type"><option value="original">原创</option><option value="derivative">二创</option><option value="replica">复刻</option></select></div>
+        <div class="field"><label for="build-type">建筑类型</label><select id="build-type"><option value="original">原创</option><option value="derivative">二创</option><option value="replica">搬运</option></select></div>
         <div class="field"><label for="build-date">建造日期 *</label><input id="build-date" type="date" required></div>
         <h3 class="section">坐标</h3>
         <div class="coordinate-grid full">
