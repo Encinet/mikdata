@@ -27,7 +27,7 @@ export const BUILDINGS_LIST_HTML = /* html */ `
           <button class="filter" type="button" data-type="" aria-pressed="true">全部</button>
           <button class="filter" type="button" data-type="original" aria-pressed="false">原创</button>
           <button class="filter" type="button" data-type="derivative" aria-pressed="false">二创</button>
-          <button class="filter" type="button" data-type="replica" aria-pressed="false">复刻</button>
+          <button class="filter" type="button" data-type="replica" aria-pressed="false">搬运</button>
         </div>
         <p class="result-count" id="result-count" role="status"></p>
       </div>
