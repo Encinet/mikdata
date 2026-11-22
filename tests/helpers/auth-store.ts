@@ -131,6 +131,7 @@ export function testAuthEnv(overrides: Partial<Env> = {}): Env {
       list: async () => ({ keys: [], list_complete: true, cacheStatus: null }),
     } as unknown as KVNamespace,
     AUTH_STORE: {} as DurableObjectNamespace,
+    SPONSOR_STORE: {} as DurableObjectNamespace,
     AUTH_CLIENT_RATE_LIMITER: limiter,
     AUTH_SESSION_CHECK_IP_RATE_LIMITER: limiter,
     AUTH_CHALLENGE_CREATE_RATE_LIMITER: limiter,

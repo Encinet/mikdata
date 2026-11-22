@@ -5,7 +5,7 @@ import { adminImageOwner } from './images/keys';
 import type { AdminBuildingCommand } from './service';
 import { BUILDING_ID_PATTERN } from './id';
 import { authStore } from '../auth/binding';
-import { json } from '../shared/http';
+import { isSameOriginBrowserRequest, json } from '../shared/http';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -122,23 +122,6 @@ async function readLimitedRequestText(
 
   text += decoder.decode();
   return { ok: true, text };
-}
-
-function isSameOriginBrowserRequest(request: Request): boolean {
-  const requestOrigin = new URL(request.url).origin;
-  const origin = request.headers.get('Origin');
-
-  if (origin && origin !== requestOrigin) {
-    return false;
-  }
-
-  const fetchSite = request.headers.get('Sec-Fetch-Site');
-
-  if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
-    return false;
-  }
-
-  return true;
 }
 
 function isAdminBuildingsRoute(routePath: string): boolean {

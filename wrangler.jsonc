@@ -68,6 +68,10 @@
 			{
 				"name": "AUTH_STORE",
 				"class_name": "AuthStore"
+			},
+			{
+				"name": "SPONSOR_STORE",
+				"class_name": "SponsorStore"
 			}
 		]
 	},
@@ -88,6 +92,12 @@
 			"tag": "v3",
 			"deleted_classes": [
 				"BuildingsWriter"
+			]
+		},
+		{
+			"tag": "v4",
+			"new_sqlite_classes": [
+				"SponsorStore"
 			]
 		}
 	],

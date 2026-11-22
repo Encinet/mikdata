@@ -14,8 +14,8 @@ MIKWEB_AUTH_CLIENT_SECRET=replace-with-the-same-server-secret-as-mikweb
 
 # Optional: Afdian open API credentials for the public sponsor catalog.
 # Leave unset to serve sponsors from manual records only.
-AFDIAN_USER_ID=your-afdian-user-id
-AFDIAN_API_TOKEN=your-afdian-api-token
+AFDIAN_USER_ID=
+AFDIAN_API_TOKEN=
 
 # Optional: WebAuthn Passkey relying party settings. Defaults to production.
 # For local MikWeb development, use WEBAUTHN_RP_ID=localhost and WEBAUTHN_ORIGIN=http://localhost:3000.

@@ -35,6 +35,6 @@ Public buildings are served from KV snapshots. Publication runs at most once eve
 
 ## Sponsors
 
-`GET /api/sponsors` lists manual sponsors and Afdian sponsors mapped to Minecraft UUIDs. Set `AFDIAN_USER_ID` and `AFDIAN_API_TOKEN` to enable Afdian.
+`GET /api/sponsors` lists sponsors by Minecraft UUID. Set `AFDIAN_USER_ID` and `AFDIAN_API_TOKEN` to enable Afdian.
 
-Manage Afdian mappings and manual entries through `/admin/api/sponsor-catalog`, `/admin/api/sponsor-mappings` and `/admin/api/sponsors`.
+Use `/admin/sponsors` to view orders, manage manual payments, and bind Afdian accounts to Minecraft UUIDs.

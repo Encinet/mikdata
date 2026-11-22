@@ -1,6 +1,15 @@
 export type CacheStatus = 'MISS' | 'HIT' | 'STALE';
 export type DataSource = 'UPSTREAM' | 'FALLBACK';
 
+export function isSameOriginBrowserRequest(request: Request): boolean {
+  const origin = request.headers.get('Origin');
+  const fetchSite = request.headers.get('Sec-Fetch-Site');
+  return (
+    (!origin || origin === new URL(request.url).origin) &&
+    (!fetchSite || fetchSite === 'same-origin' || fetchSite === 'none')
+  );
+}
+
 export const PUBLIC_CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
