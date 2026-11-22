@@ -21,3 +21,10 @@ AFDIAN_API_TOKEN=your-afdian-api-token
 # For local MikWeb development, use WEBAUTHN_RP_ID=localhost and WEBAUTHN_ORIGIN=http://localhost:3000.
 WEBAUTHN_RP_ID=mcmik.top
 WEBAUTHN_ORIGIN=https://mcmik.top
+
+# HTTPS URL including the bucket name. The public base defaults to this URL.
+BUILDING_IMAGE_S3_BUCKET_URL=
+BUILDING_IMAGE_S3_REGION=
+BUILDING_IMAGE_PUBLIC_BASE_URL=
+BUILDING_IMAGE_ACCESS_KEY_ID=
+BUILDING_IMAGE_SECRET_ACCESS_KEY=

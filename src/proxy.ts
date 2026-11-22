@@ -1,6 +1,6 @@
 import type { Env } from './env';
-import { proxyJson, serializedJson, type CacheStatus } from './http';
-import { TtlMemoryCache } from './memory-cache';
+import { proxyJson, serializedJson, type CacheStatus } from './shared/http';
+import { TtlMemoryCache } from './shared/memory-cache';
 
 interface RouteConfig {
   id: string;

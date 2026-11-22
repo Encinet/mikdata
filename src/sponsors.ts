@@ -6,8 +6,8 @@ import {
   type AfdianSponsor,
 } from './afdian';
 import type { Env } from './env';
-import { json } from './http';
-import type { AdminActor } from './types';
+import { json } from './shared/http';
+import type { AdminActor } from './auth/access';
 
 export const SPONSOR_MAPPING_PREFIX = 'sponsor-mapping:';
 export const SPONSOR_MANUAL_PREFIX = 'sponsor-manual:';

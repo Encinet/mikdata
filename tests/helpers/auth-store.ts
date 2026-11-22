@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { AuthStore } from '../../src/auth';
+import { AuthStore } from '../../src/auth/store';
 import type { Env } from '../../src/env';
 
 export const PLAYER_UUID = '00000000-0000-4000-8000-000000000001';
@@ -132,6 +132,7 @@ export function testAuthEnv(overrides: Partial<Env> = {}): Env {
     } as unknown as KVNamespace,
     AUTH_STORE: {} as DurableObjectNamespace,
     AUTH_CLIENT_RATE_LIMITER: limiter,
+    AUTH_SESSION_CHECK_IP_RATE_LIMITER: limiter,
     AUTH_CHALLENGE_CREATE_RATE_LIMITER: limiter,
     AUTH_SENSITIVE_RATE_LIMITER: limiter,
     PUBLIC_API_RATE_LIMITER: limiter,
