@@ -128,6 +128,44 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
 
+  /sponsors:
+    get:
+      summary: 获取赞助名单
+      description: |
+        按 Minecraft UUID 返回赞助者，每位玩家一条。爱发电和手动赞助按同一套实付订单规则归集。
+
+        数据来自爱发电开放 API 与手动录入记录。爱发电数据每 15 分钟刷新一次，最多读取订单接口的前 50 页。
+        上游不可用时可使用最多七天内的缓存。没有可用缓存时可继续返回手动赞助。
+        完整名单在边缘缓存 30 秒，后台修改可能在缓存到期后才反映到公开名单。
+      operationId: getSponsors
+      responses:
+        "200":
+          description: 成功
+          headers:
+            X-Sponsor-Data:
+              description: 爱发电订单状态。complete 为当前完整订单或未启用爱发电，stale 为可用的旧快照，partial 为订单缺失或历史未取全。
+              schema:
+                type: string
+                enum: [complete, stale, partial]
+          content:
+            application/json:
+              schema:
+                type: array
+                description: 赞助者名单。累计金额已确认的记录按金额降序排列，其余记录在后。
+                items:
+                  $ref: "#/components/schemas/Sponsor"
+        "503":
+          description: 赞助数据暂时不可用。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                    const: sponsor_data_unavailable
+
   /bans:
     get:
       summary: 获取封禁列表
@@ -396,3 +434,18 @@ components:
         timestamp:
           type: string
           format: date-time
+
+    Sponsor:
+      type: object
+      required: [uuid, name]
+      properties:
+        uuid:
+          type: string
+          format: uuid
+          description: 赞助者的 Minecraft UUID。未绑定 UUID 的记录仅供后台查看。
+        name:
+          type: string
+          description: 赞助者昵称或名称
+        totalAmount:
+          type: string
+          description: 实付订单累计金额，单位为元。爱发电使用订单的 total_amount。订单历史未取全时省略。

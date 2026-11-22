@@ -6,6 +6,7 @@ export interface Env {
   BUILDING_IMAGE_PUBLIC_BASE_URL?: string;
   BUILDINGS_KV: KVNamespace;
   AUTH_STORE: DurableObjectNamespace;
+  SPONSOR_STORE: DurableObjectNamespace;
   AUTH_CLIENT_RATE_LIMITER: RateLimit;
   AUTH_SESSION_CHECK_IP_RATE_LIMITER: RateLimit;
   AUTH_CHALLENGE_CREATE_RATE_LIMITER: RateLimit;
@@ -20,4 +21,6 @@ export interface Env {
   MIKWEB_AUTH_CLIENT_SECRET?: string;
   WEBAUTHN_RP_ID?: string;
   WEBAUTHN_ORIGIN?: string;
+  AFDIAN_USER_ID?: string;
+  AFDIAN_API_TOKEN?: string;
 }

@@ -14,3 +14,13 @@ test('admin CSP scopes storage previews to the image origin and scripts to nonce
     expect(() => new Function(script[1])).not.toThrow();
   }
 });
+
+test('the sponsor workspace has its own navigation state and compilable script', async () => {
+  const html = await adminPage(undefined, 'sponsors').text();
+  expect(html).toContain('href="/admin/sponsors" aria-current="page"');
+  expect(html).toContain('id="sponsor-dialog"');
+  expect(html).not.toContain('id="buildings-panel"');
+  for (const script of html.matchAll(/<script nonce="[^"]+">([\s\S]*?)<\/script>/g)) {
+    expect(() => new Function(script[1])).not.toThrow();
+  }
+});

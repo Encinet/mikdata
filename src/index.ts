@@ -8,6 +8,11 @@ import { handleAdminBuildingsRoute } from './buildings/admin-route';
 import { handlePublicBuildingsRoute } from './buildings/public-route';
 import { json, proxyJson, PUBLIC_CORS_HEADERS } from './shared/http';
 import { matchProxyRoute, refreshProxyRoutes, serveProxyRoute } from './proxy';
+import {
+  handleAdminSponsorsRoute,
+  handlePublicSponsorsRoute,
+  refreshSponsorCatalog,
+} from './sponsors';
 
 const ADMIN_API_BASE_PATH = '/admin/api';
 const PUBLIC_BASE_PATH = '/api';
@@ -15,6 +20,7 @@ const PUBLIC_RATE_LIMIT_WINDOW_SECONDS = 60;
 const RATE_LIMIT_RETRY_SECONDS = 10;
 
 export { AuthStore };
+export { SponsorStore } from './sponsors/store';
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -23,6 +29,7 @@ export default {
 
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     refreshProxyRoutes(env, ctx);
+    refreshSponsorCatalog(env, ctx);
   },
 };
 
@@ -45,14 +52,15 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
     return withoutCors((await handleAuthRoute(url.pathname, request, env)) ?? json({ error: 'Not found' }, 404));
   }
 
-  if (url.pathname === '/admin' || url.pathname === '/admin/') {
+  const sponsorAdminPage = url.pathname === '/admin/sponsors' || url.pathname === '/admin/sponsors/';
+  if (url.pathname === '/admin' || url.pathname === '/admin/' || sponsorAdminPage) {
     const access = await requireCloudflareAccess(request, env);
 
     if (!access.ok) {
       return withoutCors(access.response);
     }
 
-    return adminPage(imagePublicBaseUrl(env));
+    return sponsorAdminPage ? adminPage(undefined, 'sponsors') : adminPage(imagePublicBaseUrl(env));
   }
 
   if (url.pathname === ADMIN_API_BASE_PATH || url.pathname.startsWith(`${ADMIN_API_BASE_PATH}/`)) {
@@ -67,6 +75,12 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
 
     if (adminResponse) {
       return withoutCors(adminResponse);
+    }
+
+    const sponsorResponse = await handleAdminSponsorsRoute(adminRoutePath, request, env, access.user);
+
+    if (sponsorResponse) {
+      return withoutCors(sponsorResponse);
     }
 
     return withoutCors(json({ error: 'Not found' }, 404));
@@ -96,6 +110,12 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
 
   if (buildingsResponse) {
     return buildingsResponse;
+  }
+
+  const sponsorsResponse = await handlePublicSponsorsRoute(routePath, request, env, ctx);
+
+  if (sponsorsResponse) {
+    return sponsorsResponse;
   }
 
   if (request.method !== 'GET') {

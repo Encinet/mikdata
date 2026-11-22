@@ -6,11 +6,13 @@ import { BUILDINGS_LIST_HTML } from './buildings/list';
 import { BUILDINGS_SCRIPT } from './buildings/script';
 import { icon } from './icons';
 import { WORKSPACE_SCRIPT } from './script';
+import { SPONSORS_HTML } from './sponsors/page';
+import { SPONSORS_SCRIPT } from './sponsors/script';
 
-export function adminPage(imageBaseUrl?: string): Response {
+export function adminPage(imageBaseUrl?: string, view: 'buildings' | 'sponsors' = 'buildings'): Response {
   const nonce = createNonce();
 
-  return new Response(ADMIN_HTML.replaceAll('__NONCE__', nonce), {
+  return new Response(workspaceHtml(view).replaceAll('__NONCE__', nonce), {
     headers: htmlHeaders(nonce, imageBaseUrl ? new URL(imageBaseUrl).origin : undefined),
   });
 }
@@ -33,12 +35,14 @@ function createNonce(): string {
   return btoa(String.fromCharCode(...bytes));
 }
 
-const ADMIN_HTML = /* html */ `<!doctype html>
+function workspaceHtml(view: 'buildings' | 'sponsors'): string {
+  const sponsors = view === 'sponsors';
+  return /* html */ `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MIK 管理工作台</title>
+<title>${sponsors ? '赞助管理 | ' : ''}MIK 管理工作台</title>
 <script nonce="__NONCE__">
 try {
   const theme = localStorage.getItem('mikdata-admin-theme');
@@ -61,17 +65,17 @@ try {
     </div>
   </header>
   <nav class="module-nav" aria-label="管理模块">
-    <a class="module-link" href="/admin" aria-current="page">${icon('building')}建筑管理</a>
+    <a class="module-link" href="/admin"${sponsors ? '' : ' aria-current="page"'}>${icon('building')}建筑管理</a>
+    <a class="module-link" href="/admin/sponsors"${sponsors ? ' aria-current="page"' : ''}>${icon('heart')}赞助管理</a>
   </nav>
-  ${BUILDINGS_LIST_HTML}
+  ${sponsors ? SPONSORS_HTML : BUILDINGS_LIST_HTML}
 </div>
-${BUILDING_EDITOR_HTML}
-${BUILDING_IMPORT_HTML}
-${ADMIN_IMAGE_PREVIEW}
+${sponsors ? '' : BUILDING_EDITOR_HTML + BUILDING_IMPORT_HTML + ADMIN_IMAGE_PREVIEW}
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <script nonce="__NONCE__">
 ${WORKSPACE_SCRIPT}
-${BUILDINGS_SCRIPT}
+${sponsors ? SPONSORS_SCRIPT : BUILDINGS_SCRIPT}
 </script>
 </body>
 </html>`;
+}
