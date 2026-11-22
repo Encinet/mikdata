@@ -14,4 +14,6 @@ export interface Env {
   MIKWEB_AUTH_CLIENT_SECRET?: string;
   WEBAUTHN_RP_ID?: string;
   WEBAUTHN_ORIGIN?: string;
+  AFDIAN_USER_ID?: string;
+  AFDIAN_API_TOKEN?: string;
 }

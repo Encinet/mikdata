@@ -128,6 +128,37 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
 
+  /sponsors:
+    get:
+      summary: 获取赞助名单
+      description: |
+        返回赞助者名单，包含累计赞助金额与每笔带留言的订单（金额、留言、赞助时间）。
+
+        数据来自爱发电开放 API 与手动录入记录，不持久化爱发电数据，仅在内存与 Worker Cache
+        中缓存；后台每 15 分钟重新同步一次。上游不可用且无缓存时返回 503。
+      operationId: getSponsors
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                description: 赞助者名单，按累计赞助金额降序。
+                items:
+                  $ref: "#/components/schemas/Sponsor"
+        "503":
+          description: 赞助数据暂时不可用。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                    const: sponsor_data_unavailable
+
   /bans:
     get:
       summary: 获取封禁列表
@@ -396,3 +427,41 @@ components:
         timestamp:
           type: string
           format: date-time
+
+    Sponsor:
+      type: object
+      required: [uuid, name, orders]
+      properties:
+        uuid:
+          type: string
+          format: uuid
+          description: 赞助者的 Minecraft UUID，作为公示标识。未建立映射的爱发电赞助者不会出现在列表中。玩家头像不在此接口返回，读取方按现有玩家头像约定自行渲染（mineskin.eu / minotar.net / mc-heads.net，以去连字符 UUID 为标识，与封禁列表一致）。
+        name:
+          type: string
+          description: 赞助者昵称或名称
+        totalAmount:
+          type: string
+          description: 累计赞助金额。爱发电取官方 all_sum_amount 口径（折前累计）；手动记录可空。
+        orders:
+          type: array
+          description: 该赞助者所有带留言的订单，按赞助时间倒序。
+          items:
+            $ref: "#/components/schemas/SponsorOrder"
+
+    SponsorOrder:
+      type: object
+      required: [id, amount, remark, at]
+      properties:
+        id:
+          type: string
+          description: 稳定的订单标识。爱发电订单为 `af:<out_trade_no>`，手动录入为 `mn:<自定义键>`。
+        amount:
+          type: string
+          description: 该笔实付金额
+        remark:
+          type: string
+          description: 该笔留言
+        at:
+          type: integer
+          format: int64
+          description: 赞助时间，秒级时间戳；无法解析时为 0

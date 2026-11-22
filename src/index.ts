@@ -6,6 +6,11 @@ import { handleAdminBuildingsRoute } from './buildings';
 import { handlePublicBuildingsRoute } from './public-buildings';
 import { json, proxyJson, PUBLIC_CORS_HEADERS } from './http';
 import { matchProxyRoute, refreshProxyRoutes, serveProxyRoute } from './proxy';
+import {
+  handleAdminSponsorsRoute,
+  handlePublicSponsorsRoute,
+  refreshSponsorCatalog,
+} from './sponsors';
 
 const ADMIN_API_BASE_PATH = '/admin/api';
 const PUBLIC_BASE_PATH = '/api';
@@ -21,6 +26,7 @@ export default {
 
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     refreshProxyRoutes(env, ctx);
+    refreshSponsorCatalog(env, ctx);
   },
 };
 
@@ -67,6 +73,12 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
       return withoutCors(adminResponse);
     }
 
+    const sponsorResponse = await handleAdminSponsorsRoute(adminRoutePath, request, env, access.user);
+
+    if (sponsorResponse) {
+      return withoutCors(sponsorResponse);
+    }
+
     return withoutCors(json({ error: 'Not found' }, 404));
   }
 
@@ -94,6 +106,12 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
 
   if (buildingsResponse) {
     return buildingsResponse;
+  }
+
+  const sponsorsResponse = await handlePublicSponsorsRoute(routePath, request, env, ctx);
+
+  if (sponsorsResponse) {
+    return sponsorsResponse;
   }
 
   if (request.method !== 'GET') {
