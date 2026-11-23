@@ -17,8 +17,8 @@ export async function handlePublicSponsorsRoute(
   if (request.method !== 'GET') return json({ error: 'method not allowed' }, 405);
   if (typeof caches === 'undefined') return forwardToStore('/public', request, env);
 
-  // Version the shared cache key when the public response shape changes.
-  const key = new Request(new URL('/.mikdata-cache/sponsors/v3', request.url));
+  // Version the shared cache key when the public response contract changes.
+  const key = new Request(new URL('/.mikdata-cache/sponsors/v4', request.url));
   try {
     const cached = await caches.default.match(key);
     if (cached) {

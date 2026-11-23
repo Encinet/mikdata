@@ -31,7 +31,7 @@ function publicList(env: Env) {
   } as unknown as ExecutionContext);
 }
 
-test('the public list includes bound orders in payment order and admin details include their IDs', async () => {
+test('the public list sorts sponsors by their latest payment and orders by payment time', async () => {
   const message = '感谢维护服务器！\n下次见。';
   const pendingMessage = '支持一下 <3';
   const firstOrder = { at: AFDIAN_AT_UTC, amount: '20.00', message };
@@ -87,8 +87,8 @@ test('the public list includes bound orders in payment order and admin details i
 
     await admin(env, '/sponsor-mappings', 'PUT', { afdianUserId: 'u-2', uuid: OTHER_UUID });
     expect(await (await publicList(env))!.json()).toEqual([
-      { uuid: UUID, name: 'Player', totalAmount: '20.10', orders: [firstOrder, manualOrder] },
       { uuid: OTHER_UUID, name: 'Second account', totalAmount: '0.20', orders: [secondOrder] },
+      { uuid: UUID, name: 'Player', totalAmount: '20.10', orders: [firstOrder, manualOrder] },
     ]);
   } finally {
     restore();
@@ -233,10 +233,10 @@ test('an unavailable Afdian feed keeps manual data and flags any incomplete play
     await admin(env, '/sponsor-mappings', 'PUT', { afdianUserId: 'u-1', uuid: UUID });
     const zeroOrderPath = manualPath(OTHER_UUID, 'ab111111-2222-4333-8444-555566667777');
     expect((await admin(env, zeroOrderPath, 'PUT', { amount: '0', at: MANUAL_AT }))!.status).toBe(204);
-    const [manualSponsor, boundSponsor] = await (await publicList(env))!.json();
-    expect(manualSponsor).toMatchObject({ uuid: OTHER_UUID, totalAmount: '0.00', orders: [{ amount: '0.00' }] });
+    const [boundSponsor, manualSponsor] = await (await publicList(env))!.json();
     expect(boundSponsor).toMatchObject({ uuid: UUID, orders: [{ amount: '8.00' }] });
     expect(boundSponsor).not.toHaveProperty('totalAmount');
+    expect(manualSponsor).toMatchObject({ uuid: OTHER_UUID, totalAmount: '0.00', orders: [{ amount: '0.00' }] });
     const catalog = await (await admin(env, '/sponsor-catalog'))!.json();
     expect(catalog.afdianStatus).toBe('unavailable');
     const bound = catalog.players.find((player: { uuid: string }) => player.uuid === UUID);
@@ -253,7 +253,7 @@ test('truncated order history omits incomplete totals and includes purchasers ab
   Date.now = () => now;
   let orderPages = 1;
   const restore = mockAfdian((endpoint, page) => endpoint === 'query-sponsor'
-    ? { total_page: 0, list: [] }
+    ? { total_page: 1, list: [{ user: { user_id: 'u-2', name: 'Second account' } }] }
     : { total_page: orderPages, list: page === 1 ? [afdianOrder()] : [] });
   try {
     const env = sponsorEnv(afdianEnv);
@@ -265,9 +265,12 @@ test('truncated order history omits incomplete totals and includes purchasers ab
     expect(pending).not.toHaveProperty('totalAmount');
     expect(pending).not.toHaveProperty('ordersComplete');
     await admin(env, '/sponsor-mappings', 'PUT', { afdianUserId: 'u-1', uuid: UUID });
+    await admin(env, '/sponsor-mappings', 'PUT', { afdianUserId: 'u-2', uuid: OTHER_UUID });
     const response = (await publicList(env))!;
     expect(response.headers.get('X-Sponsor-Data')).toBe('partial');
-    const [sponsor] = await response.json();
+    const sponsors = await response.json();
+    expect(sponsors).toHaveLength(1);
+    const [sponsor] = sponsors;
     expect(sponsor).toMatchObject({ uuid: UUID, orders: [{ amount: '20.00' }] });
     expect(sponsor).not.toHaveProperty('totalAmount');
   } finally {

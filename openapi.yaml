@@ -132,12 +132,12 @@ paths:
     get:
       summary: 获取赞助名单
       description: |
-        按 Minecraft UUID 汇总实付订单，每位玩家一条记录。
+        只列出有可用实付订单的玩家，每个 Minecraft UUID 一条记录。
         只有 `X-Sponsor-Data` 为 `complete` 的响应会写入 30 秒边缘缓存。
       operationId: getSponsors
       responses:
         "200":
-          description: 赞助名单按累计金额降序排列。缺少累计金额的记录排在末尾，金额相同的记录按 UUID 升序排列。
+          description: 赞助名单按每位玩家最新一笔订单的付款时间从新到旧排列。付款时间相同时按 UUID 升序排列。
           headers:
             X-Sponsor-Data:
               description: |
@@ -479,6 +479,7 @@ components:
           description: 累计实付金额，单位为元，保留两位小数。无法确认该玩家的订单历史完整时省略。
         orders:
           type: array
+          minItems: 1
           description: 可用的实付订单，按付款时间从新到旧排列。
           items:
             $ref: "#/components/schemas/SponsorOrder"

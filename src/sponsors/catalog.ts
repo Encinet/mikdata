@@ -93,15 +93,10 @@ function publicOrder(order: CatalogOrder): SponsorOrder {
 
 export function publicSponsors(groups: Iterable<Group>): Sponsor[] {
   return [...groups]
-    .filter((group): group is Group & { uuid: string } =>
-      Boolean(group.uuid && (group.orders.length || (group.totalMinor === undefined && group.accounts.some(({ name }) => name)))))
-    .sort((a, b) => {
-      if (a.totalMinor === b.totalMinor) return a.uuid.localeCompare(b.uuid);
-      if (a.totalMinor === undefined) return 1;
-      if (b.totalMinor === undefined) return -1;
-      return a.totalMinor > b.totalMinor ? -1 : 1;
-    })
-    .map((group) => ({ ...summary(group), uuid: group.uuid, orders: sortedOrders(group).map(publicOrder) }));
+    .filter((group): group is Group & { uuid: string } => Boolean(group.uuid && group.orders.length))
+    .map((group) => ({ group, orders: sortedOrders(group) }))
+    .sort((a, b) => b.orders[0].at - a.orders[0].at || a.group.uuid.localeCompare(b.group.uuid))
+    .map(({ group, orders }) => ({ ...summary(group), uuid: group.uuid, orders: orders.map(publicOrder) }));
 }
 
 export function adminSponsorSummary(group: Group) {
