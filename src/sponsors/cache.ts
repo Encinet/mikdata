@@ -5,6 +5,7 @@ import {
   type AfdianOrder,
   type AfdianSponsor,
 } from './afdian';
+import { parseOrderTime } from './model';
 
 export const AFDIAN_FRESH_MS = 15 * 60_000;
 const RETRY_MS = 5 * 60_000;
@@ -96,6 +97,7 @@ async function readCache(key: Request): Promise<AfdianPayload | undefined> {
       value.fetchedAt > 0 &&
       Array.isArray(value.sponsors) &&
       Array.isArray(value.orders) &&
+      value.orders.every((order) => parseOrderTime(order?.at) !== undefined) &&
       typeof value.ordersComplete === 'boolean'
     ) {
       return value;

@@ -1,6 +1,6 @@
 import { afdianSign } from './md5';
 import type { Env } from '../env';
-import { AFDIAN_ID_RE, parseAmount, type Payment } from './model';
+import { AFDIAN_ID_RE, parseAmount, parseOrderTime, type Payment } from './model';
 
 const AFDIAN_API_BASE = 'https://afdian.com/api/open';
 /** Bound page scans so one bad upstream response cannot stall the sync. */
@@ -107,12 +107,14 @@ export async function fetchAfdianOrders(
       const outTradeNo = string(row?.out_trade_no);
       const userId = string(row?.user_id);
       const amountMinor = parseAmount(row?.total_amount);
-      if (!AFDIAN_ID_RE.test(outTradeNo) || !AFDIAN_ID_RE.test(userId) || amountMinor === undefined) {
+      const at = afdianOrderTime(outTradeNo);
+      if (!AFDIAN_ID_RE.test(outTradeNo) || !AFDIAN_ID_RE.test(userId) || amountMinor === undefined || at === undefined) {
         incomplete = true;
         continue;
       }
       if (!orders.has(outTradeNo)) {
-        orders.set(outTradeNo, { outTradeNo, userId, amountMinor, at: afdianOrderTime(outTradeNo) });
+        const message = string(row.remark) || undefined;
+        orders.set(outTradeNo, { outTradeNo, userId, amountMinor, at, message });
       }
     }
   }
@@ -133,10 +135,10 @@ function string(value: unknown): string {
 /**
  * Second-precision UTC timestamp of the order moment, parsed from the
  * YYYYMMDDHHMMSS head of out_trade_no, interpreted as China wall-clock time
- * (UTC+8). Returns 0 when the head is not a plausible date.
+ * (UTC+8).
  */
-export function afdianOrderTime(outTradeNo: string): number {
-  if (!/^\d{14}/.test(outTradeNo)) return 0;
+export function afdianOrderTime(outTradeNo: string): number | undefined {
+  if (!/^\d{14}/.test(outTradeNo)) return undefined;
   const year = Number(outTradeNo.slice(0, 4));
   const month = Number(outTradeNo.slice(4, 6));
   const day = Number(outTradeNo.slice(6, 8));
@@ -154,10 +156,10 @@ export function afdianOrderTime(outTradeNo: string): number {
     minute > 59 ||
     second > 59
   )
-    return 0;
+    return undefined;
   const ms = Date.UTC(year, month - 1, day, hour, minute, second);
   const date = new Date(ms);
-  if (date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return 0;
+  if (date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return undefined;
   // The wall-clock head is China time: shift 8 hours back to the UTC instant.
-  return Math.floor((ms - CNA_TZ_OFFSET_SECONDS * 1000) / 1000);
+  return parseOrderTime(ms / 1000 - CNA_TZ_OFFSET_SECONDS);
 }

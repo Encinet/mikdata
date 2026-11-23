@@ -1,3 +1,6 @@
+import { MAX_MANUAL_MESSAGE_LENGTH } from '../../sponsors/model';
+import { SPONSOR_TIME_EDITOR_SCRIPT } from './time-editor';
+
 export const SPONSOR_EDITOR_SCRIPT = /* js */ String.raw`
 const sponsorDialog = $('sponsor-dialog');
 const sponsorForm = $('sponsor-form');
@@ -13,6 +16,8 @@ function sponsorField(label, id, attributes, value = '', hint = '') {
     (hint ? ' aria-describedby="' + id + '-hint"' : '') + '>' +
     (hint ? '<p class="hint" id="' + id + '-hint">' + hint + '</p>' : '') + '</div>';
 }
+
+${SPONSOR_TIME_EDITOR_SCRIPT}
 
 function sponsorPlayerTarget(uuid, hint, singleField = false) {
   const searchAttributes = 'type="search" autocomplete="off" spellcheck="false" placeholder="搜索名称、爱发电账号或 UUID" aria-controls="sponsor-player-options"';
@@ -86,9 +91,12 @@ function openSponsorEditor({ kind, uuid, order, account, name } = { kind: 'order
       ? '<div class="full sponsor-editor-account"><strong>' + esc(name || uuid) + '</strong>' +
         (name && name !== uuid ? '<div class="mono">' + esc(uuid) + '</div>' : '') + '</div>'
       : sponsorPlayerTarget(uuid, '可更换该订单所属的玩家。', !order);
-    fields = target +
+    fields = target + '<div class="full sponsor-order-payment">' +
       sponsorField('实付金额（元）', 'sponsor-amount', 'required inputmode="decimal" pattern="[0-9]{1,12}(\\.[0-9]{1,2})?"', order?.amount) +
-      sponsorField('付款时间（本地，选填）', 'sponsor-order-date', 'type="datetime-local" step="1"', localSponsorDate(order?.at));
+      sponsorTimeFields() + '</div>' +
+      '<div class="field full"><label for="sponsor-order-message">公开留言（选填）</label>' +
+      '<textarea id="sponsor-order-message" rows="3" maxlength="${MAX_MANUAL_MESSAGE_LENGTH}">' +
+      esc(order?.message) + '</textarea></div>';
     if (fixedPlayer) field = 'sponsor-amount';
   } else if (kind === 'account') {
     $('sponsor-editor-title').textContent = uuid ? '编辑爱发电绑定' : '绑定爱发电账号';
@@ -101,18 +109,10 @@ function openSponsorEditor({ kind, uuid, order, account, name } = { kind: 'order
       '留空时使用爱发电昵称或 Minecraft UUID。');
   }
   $('sponsor-fields').innerHTML = fields;
-  const date = $('sponsor-order-date');
-  sponsorEditing.originalDate = date?.value;
+  if (kind === 'order') sponsorEditing.readTime = initSponsorTime(order?.at);
   sponsorDialog.showModal();
   renderSponsorPlayerOptions();
   $(field).focus();
-}
-
-function localSponsorDate(at) {
-  if (!at) return '';
-  const date = new Date(at * 1000);
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 19);
 }
 
 function setSponsorError(message) {
@@ -130,14 +130,14 @@ function setConfirmSponsorRemoval(confirm) {
 function setSponsorSaving(saving) {
   sponsorSaving = saving;
   sponsorForm.setAttribute('aria-busy', String(saving));
-  for (const control of sponsorForm.querySelectorAll('button, input')) control.disabled = saving;
+  for (const control of sponsorForm.querySelectorAll('button, input, select, textarea')) control.disabled = saving;
   $('sponsor-save').textContent = saving ? '正在保存…'
     : sponsorEditing.kind === 'account' && !sponsorEditing.uuid ? '确认绑定' : '保存';
 }
 
 async function saveSponsor(remove) {
   if (sponsorSaving || !sponsorEditing) return;
-  const { kind, uuid, order, orderId, account, originalDate } = sponsorEditing;
+  const { kind, uuid, order, orderId, account } = sponsorEditing;
   const input = $('sponsor-uuid') || $('sponsor-player-search');
   const target = sponsorEditing.selectedPlayer?.uuid || (input ? canonicalSponsorUuid(input.value) : uuid);
   const route = sponsorRoute;
@@ -145,14 +145,21 @@ async function saveSponsor(remove) {
   let body;
   if (kind === 'order') {
     path = '/sponsors/' + encodeURIComponent(order ? uuid : target) + '/orders/' + orderId;
-    const date = $('sponsor-order-date').value;
     const amount = $('sponsor-amount').value.trim();
-    const at = date ? Math.floor(new Date(date).getTime() / 1000) : 0;
+    const message = $('sponsor-order-message').value.trim();
+    const at = sponsorEditing.readTime();
+    if (!remove && at === undefined) {
+      sponsorForm.reportValidity();
+      return;
+    }
     body = order ? {} : { amount, at };
+    if (!order && message) body.message = message;
     if (order && !remove) {
       if (target !== uuid) body.uuid = target;
       if (Number(amount) !== Number(order.amount)) body.amount = { from: order.amount, to: amount };
-      if (date !== originalDate && at !== order.at) body.at = { from: order.at, to: at };
+      if (at !== order.at) body.at = { from: order.at, to: at };
+      const originalMessage = order.message ?? '';
+      if (message !== originalMessage) body.message = { from: originalMessage, to: message };
       if (!Object.keys(body).length) {
         sponsorDialog.close();
         return;

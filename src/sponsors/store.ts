@@ -125,18 +125,19 @@ export class SponsorStore implements DurableObject {
     const existing = this.records.get<ManualOrder>(key);
     if (!existing) return notFound();
 
-    const { uuid, amount, time } = edit;
-    const order = { ...existing, uuid, amountMinor: amount?.to ?? existing.amountMinor };
-    if (time) {
-      if (time.to) order.at = time.to;
-      else delete order.at;
+    const { uuid, amount, time, message } = edit;
+    const order = { ...existing, uuid, amountMinor: amount?.to ?? existing.amountMinor, at: time?.to ?? existing.at };
+    if (message) {
+      if (message.to) order.message = message.to;
+      else delete order.message;
     }
     if (sameOrder(existing, order)) return new Response(null, { status: 204 });
-    const at = existing.at ?? 0;
+    const currentMessage = existing.message ?? '';
     if (
       existing.uuid !== owner ||
       (amount && existing.amountMinor !== amount.from && existing.amountMinor !== amount.to) ||
-      (time && at !== time.from && at !== time.to)
+      (time && existing.at !== time.from && existing.at !== time.to) ||
+      (message && currentMessage !== message.from && currentMessage !== message.to)
     ) return json({ error: 'that order has changed' }, 409);
     this.records.put(key, order);
     return this.changed();
@@ -166,7 +167,7 @@ export class SponsorStore implements DurableObject {
 }
 
 function sameOrder(a: ManualOrder, b: ManualOrder): boolean {
-  return a.uuid === b.uuid && a.amountMinor === b.amountMinor && a.at === b.at;
+  return a.uuid === b.uuid && a.amountMinor === b.amountMinor && a.at === b.at && a.message === b.message;
 }
 
 function afdianStatus(payload: AfdianPayload | undefined) {

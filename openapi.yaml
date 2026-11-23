@@ -1,17 +1,14 @@
 openapi: 3.1.0
 info:
   title: MikCasual API
-  description: |
-    MikCasual 服务器数据 API，提供玩家在线状态、建筑列表、封禁列表和公告等数据。
-
-    所有公共 `/api/*` 路由均启用 CORS，并允许任意来源读取。
+  description: 公共接口无需认证，允许任意来源跨域读取。
   version: 1.0.0
 
 servers:
   - url: https://data.mcmik.top/api
     description: 公共实例
   - url: /api
-    description: 相对路径（本地开发）
+    description: 本地开发
 
 security: []
 
@@ -19,15 +16,11 @@ paths:
   /players:
     get:
       summary: 获取在线玩家
-      description: |
-        返回当前在线玩家快照。后端响应来自内存里的预生成 JSON 缓存，适合高频轮询。
-
-        `players` 数组当前不保证排序。当上游服务不可用时可能降级到第三方查询服务；
-        降级响应只包含在线人数，`peak_online` 为 -1，`players` 为空数组。
+      description: 上游不可用时优先使用缓存的在线快照，无可用快照时通过第三方服务查询在线人数。
       operationId: getPlayers
       responses:
         "200":
-          description: 成功
+          description: 在线状态快照
           headers:
             X-Proxy-Cache:
               $ref: "#/components/headers/X-Proxy-Cache"
@@ -43,13 +36,12 @@ paths:
   /buildings:
     get:
       summary: 获取建筑列表
-      description: |
-        按 buildDate（建造日期）倒序返回建筑。先应用筛选，再取 limit 指定的数量。
-        不提供 limit 时返回全部匹配建筑；例如 /buildings?limit=2 返回最新两项。
+      description: 按建造日期从新到旧返回匹配的建筑。
       operationId: getBuildings
       parameters:
         - name: tag
           in: query
+          description: 精确匹配中文或英文标签。
           schema:
             type: string
         - name: type
@@ -59,18 +51,22 @@ paths:
             enum: [original, derivative, replica]
         - name: builder
           in: query
+          description: 精确匹配建造者名称或 UUID。
           schema:
             type: string
         - name: locale
           in: query
-          description: 不提供或为空时返回双语字段；zh-CN 返回中文，en 及其他非空值返回英文。
+          description: >-
+            省略或为空时，返回按语言代码索引的文本对象。
+            指定 `zh-CN` 选择中文，其他非空值选择英文。
+            单语响应中的 `name`、`description`、`tags` 元素和 `source.notes` 为字符串。
           schema:
             type: string
         - name: limit
           in: query
-          description: |
-            最多返回的建筑数量，只能提供一次，取值为 1–100 的十进制整数。
-            首尾空白和前导零会被归一化；空值、重复参数或非法数值返回 400。
+          description: >-
+            筛选后的返回上限。省略时返回全部匹配项。
+            使用十进制整数，允许首尾空白和前导零。
           schema:
             type: integer
             minimum: 1
@@ -78,15 +74,19 @@ paths:
           example: 2
       responses:
         "200":
-          description: 成功
+          description: 匹配的建筑
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Building"
+                anyOf:
+                  - type: array
+                    items:
+                      $ref: "#/components/schemas/Building"
+                  - type: array
+                    items:
+                      $ref: "#/components/schemas/LocalizedBuilding"
         "400":
-          description: limit 参数无效，返回 {"error":"invalid_limit"}。
+          description: '`limit` 为空、重复、格式无效或超出取值范围。'
           content:
             application/json:
               schema:
@@ -97,7 +97,7 @@ paths:
                     type: string
                     const: invalid_limit
         "503":
-          description: 建筑快照暂时不可用。
+          description: 建筑数据暂时不可用。
           content:
             application/json:
               schema:
@@ -116,11 +116,11 @@ paths:
         schema:
           $ref: "#/components/schemas/BuildingId"
     get:
-      summary: 获取单个建筑
+      summary: 获取建筑详情
       operationId: getBuilding
       responses:
         "200":
-          description: 成功
+          description: 建筑详情
           content:
             application/json:
               schema:
@@ -132,18 +132,20 @@ paths:
     get:
       summary: 获取赞助名单
       description: |
-        按 Minecraft UUID 返回赞助者，每位玩家一条。爱发电和手动赞助按同一套实付订单规则归集。
-
-        数据来自爱发电开放 API 与手动录入记录。爱发电数据每 15 分钟刷新一次，最多读取订单接口的前 50 页。
-        上游不可用时可使用最多七天内的缓存。没有可用缓存时可继续返回手动赞助。
-        完整名单在边缘缓存 30 秒，后台修改可能在缓存到期后才反映到公开名单。
+        按 Minecraft UUID 汇总实付订单，每位玩家一条记录。
+        只有 `X-Sponsor-Data` 为 `complete` 的响应会写入 30 秒边缘缓存。
       operationId: getSponsors
       responses:
         "200":
-          description: 成功
+          description: 赞助名单按累计金额降序排列。缺少累计金额的记录排在末尾，金额相同的记录按 UUID 升序排列。
           headers:
             X-Sponsor-Data:
-              description: 爱发电订单状态。complete 为当前完整订单或未启用爱发电，stale 为可用的旧快照，partial 为订单缺失或历史未取全。
+              description: |
+                表示订单数据的完整性和新鲜度。
+
+                - `complete`：订单数据已确认完整，且仍在刷新周期内。
+                - `stale`：返回已超过刷新周期的完整订单快照。
+                - `partial`：无法确认订单数据完整。返回当前可用的记录，结果可能为空。
               schema:
                 type: string
                 enum: [complete, stale, partial]
@@ -151,11 +153,10 @@ paths:
             application/json:
               schema:
                 type: array
-                description: 赞助者名单。累计金额已确认的记录按金额降序排列，其余记录在后。
                 items:
                   $ref: "#/components/schemas/Sponsor"
         "503":
-          description: 赞助数据暂时不可用。
+          description: 赞助服务暂时无法返回名单。
           content:
             application/json:
               schema:
@@ -168,12 +169,11 @@ paths:
 
   /bans:
     get:
-      summary: 获取封禁列表
-      description: 返回当前所有被封禁玩家的记录。
+      summary: 获取当前封禁名单
       operationId: getBans
       responses:
         "200":
-          description: 成功
+          description: 封禁记录
           headers:
             X-Proxy-Cache:
               $ref: "#/components/headers/X-Proxy-Cache"
@@ -190,12 +190,11 @@ paths:
 
   /announcements:
     get:
-      summary: 获取公告列表
-      description: 返回服务器公告。
+      summary: 获取服务器公告
       operationId: getAnnouncements
       responses:
         "200":
-          description: 成功
+          description: 公告记录
           headers:
             X-Proxy-Cache:
               $ref: "#/components/headers/X-Proxy-Cache"
@@ -213,18 +212,18 @@ paths:
 components:
   headers:
     X-Proxy-Cache:
-      description: 代理缓存状态
+      description: '`HIT` 为命中新鲜缓存，`MISS` 为重新获取的数据，`STALE` 为已到刷新时间的缓存。'
       schema:
         type: string
         enum: [MISS, HIT, STALE]
     X-Proxy-Source:
-      description: 数据来源
+      description: '`UPSTREAM` 为 Minecraft 服务器数据，`FALLBACK` 为第三方查询结果。'
       schema:
         type: string
         enum: [UPSTREAM, FALLBACK]
   responses:
     Error:
-      description: 请求失败
+      description: 未找到建筑。
       content:
         application/json:
           schema:
@@ -234,7 +233,7 @@ components:
               error:
                 type: string
     UpstreamError:
-      description: 上游服务不可用
+      description: 上游不可用，代理无法提供数据。
       content:
         application/json:
           schema:
@@ -249,7 +248,7 @@ components:
       type: object
       required: [online, peak_online, players]
       example:
-        online: 2
+        online: 1
         peak_online: 8
         players:
           - uuid: 00000000-0000-0000-0000-000000000000
@@ -258,13 +257,13 @@ components:
       properties:
         online:
           type: integer
-          description: 当前在线人数。降级查询失败时为 -1。
+          description: 当前在线人数。第三方服务报告服务器离线时为 `-1`。
         peak_online:
           type: integer
-          description: 持久化历史最高在线人数，来自 plugins/mik/api-state.yml 的 peak-online。降级响应中为 -1。
+          description: 历史最高在线人数。使用第三方查询时为 `-1`。
         players:
           type: array
-          description: 当前在线玩家列表，当前不保证排序。
+          description: 顺序未定义。使用第三方查询时为空数组。
           items:
             $ref: "#/components/schemas/OnlinePlayer"
 
@@ -280,23 +279,12 @@ components:
         joined_at:
           type: string
           format: date-time
-          description: 本次登录时间
+          description: 本次登录时间。
 
-    BuildingInput:
+    BuildingFields:
       type: object
-      required:
-        - name
-        - description
-        - coordinates
-        - builders
-        - buildType
-        - images
-        - buildDate
+      required: [coordinates, builders, buildType, images, buildDate]
       properties:
-        name:
-          $ref: "#/components/schemas/LocalizedText"
-        description:
-          $ref: "#/components/schemas/LocalizedText"
         coordinates:
           $ref: "#/components/schemas/Coordinates"
         builders:
@@ -308,18 +296,29 @@ components:
           enum: [original, derivative, replica]
         images:
           type: array
-          description: 按展示顺序排列的 WebP 原图 HTTPS 地址。图册只使用对象存储中当前建筑 ID 下的原图，可为空。
+          description: 按展示顺序排列的 WebP 原图 HTTPS 地址，可为空数组。
           items:
             type: string
         buildDate:
           type: string
-          description: 建造日期
-        tags:
-          type: array
-          items:
-            $ref: "#/components/schemas/LocalizedText"
-        source:
-          $ref: "#/components/schemas/BuildingSource"
+          description: 建造日期（YYYY-MM-DD）。
+
+    BuildingInput:
+      allOf:
+        - $ref: "#/components/schemas/BuildingFields"
+        - type: object
+          required: [name, description]
+          properties:
+            name:
+              $ref: "#/components/schemas/LocalizedText"
+            description:
+              $ref: "#/components/schemas/LocalizedText"
+            tags:
+              type: array
+              items:
+                $ref: "#/components/schemas/LocalizedText"
+            source:
+              $ref: "#/components/schemas/BuildingSource"
 
     BuildingId:
       type: string
@@ -329,27 +328,52 @@ components:
       description: 服务端分配的固定标识。
       example: b40cfbaf9cd674ce203b81e7a8f690d2
 
+    BuildingMetadata:
+      type: object
+      required: [id, createdAt, updatedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/BuildingId"
+          readOnly: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
     Building:
       allOf:
         - $ref: "#/components/schemas/BuildingInput"
+        - $ref: "#/components/schemas/BuildingMetadata"
+
+    LocalizedBuilding:
+      allOf:
+        - $ref: "#/components/schemas/BuildingFields"
+        - $ref: "#/components/schemas/BuildingMetadata"
         - type: object
-          required: [id, createdAt, updatedAt]
+          required: [name, description]
           properties:
-            id:
-              $ref: "#/components/schemas/BuildingId"
-              readOnly: true
-            createdAt:
+            name:
               type: string
-              format: date-time
-            updatedAt:
+            description:
               type: string
-              format: date-time
+            tags:
+              type: array
+              items:
+                type: string
+            source:
+              allOf:
+                - $ref: "#/components/schemas/BuildingSourceFields"
+                - properties:
+                    notes:
+                      type: string
 
     LocalizedText:
       type: object
       additionalProperties:
         type: string
-      description: "键为 locale（如 zh-CN、en），值为对应语言的文本"
+      description: 键为语言代码，值为对应语言的文本。
       example:
         zh-CN: 示例文本
         en: Example text
@@ -370,7 +394,7 @@ components:
           type: number
         z:
           type: number
-      description: Minecraft 世界坐标
+      description: Minecraft 世界坐标。
 
     Builder:
       type: object
@@ -383,9 +407,9 @@ components:
           format: uuid
         weight:
           type: number
-          description: 贡献权重，用于计算贡献百分比
+          description: 用于计算该建造者的贡献比例。
 
-    BuildingSource:
+    BuildingSourceFields:
       type: ["object", "null"]
       properties:
         originalAuthor:
@@ -393,8 +417,13 @@ components:
         originalLink:
           type: string
           format: uri
-        notes:
-          $ref: "#/components/schemas/LocalizedText"
+
+    BuildingSource:
+      allOf:
+        - $ref: "#/components/schemas/BuildingSourceFields"
+        - properties:
+            notes:
+              $ref: "#/components/schemas/LocalizedText"
 
     BanItem:
       type: object
@@ -437,15 +466,35 @@ components:
 
     Sponsor:
       type: object
-      required: [uuid, name]
+      required: [uuid, name, orders]
       properties:
         uuid:
           type: string
           format: uuid
-          description: 赞助者的 Minecraft UUID。未绑定 UUID 的记录仅供后台查看。
         name:
           type: string
-          description: 赞助者昵称或名称
+          description: 依次使用手动设置的名称、赞助平台昵称或 Minecraft UUID。
         totalAmount:
           type: string
-          description: 实付订单累计金额，单位为元。爱发电使用订单的 total_amount。订单历史未取全时省略。
+          description: 累计实付金额，单位为元，保留两位小数。无法确认该玩家的订单历史完整时省略。
+        orders:
+          type: array
+          description: 可用的实付订单，按付款时间从新到旧排列。
+          items:
+            $ref: "#/components/schemas/SponsorOrder"
+
+    SponsorOrder:
+      type: object
+      required: [amount, at]
+      properties:
+        amount:
+          type: string
+          description: 实付金额，单位为元，保留两位小数。
+        at:
+          type: string
+          format: date-time
+          description: 付款时间（UTC，以 `Z` 结尾）。
+          example: '2026-11-22T01:12:23.000Z'
+        message:
+          type: string
+          description: 公开赞助留言。无留言时省略。

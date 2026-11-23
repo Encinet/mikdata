@@ -207,6 +207,21 @@ export const ADMIN_STYLES = /* css */ `
   #sponsor-player-match { color: var(--accent-strong); overflow-wrap: anywhere; }
   .sponsor-confirm, .sponsor-form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .sponsor-editor-account { margin: 0; overflow-wrap: anywhere; }
+  .sponsor-order-payment { display: grid; grid-template-columns: minmax(120px, .68fr) minmax(0, 2fr); align-items: start; gap: 12px; }
+  .sponsor-payment-time { display: grid; min-inline-size: 0; gap: 8px; margin: 0; padding: 6px 12px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-muted); }
+  .sponsor-payment-time legend { padding-inline: 4px; color: var(--heading); font-size: 13px; font-weight: 600; }
+  .sponsor-time-inputs, .sponsor-time-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .sponsor-time-tools { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+  .sponsor-time-tools .btn { min-height: 38px; color: var(--accent-strong); }
+  .sponsor-time-actions { align-items: center; }
+  .sponsor-zone-keep { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 12px; cursor: pointer; }
+  .sponsor-zone-keep input { flex: 0 0 auto; width: 16px; min-height: 0; height: 16px; margin: 0; accent-color: var(--accent-strong); }
+  .sponsor-zone-results { max-height: 137px; margin: 0; padding: 0; overflow: auto; border: 1px solid var(--line); border-radius: 5px; list-style: none; }
+  .sponsor-zone-results li + li { border-top: 1px solid var(--line-soft); }
+  .sponsor-zone-results button { width: 100%; overflow-wrap: anywhere; }
+  .sponsor-time-feedback { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+  .sponsor-time-feedback:empty { margin-block-start: -8px; }
+  .sponsor-time-error { color: var(--red); }
   .sponsor-confirm, .sponsor-form-actions { width: 100%; }
   .sponsor-confirm { justify-content: flex-end; }
   .sponsor-confirm p { margin: 0 auto 0 0; color: var(--text); }
@@ -229,9 +244,13 @@ export const ADMIN_STYLES = /* css */ `
   .sponsor-accounts li, .sponsor-payments li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; min-height: 52px; padding: 4px 8px; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
   .sponsor-accounts .btn, .sponsor-payments .btn { min-height: 44px; }
   .sponsor-payments .btn { margin-inline-start: auto; }
+  .sponsor-payment-content { flex: 1 1 0; min-width: 0; }
   .sponsor-payment-info { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
   .sponsor-payment-info strong { color: var(--heading); font-variant-numeric: tabular-nums; }
   .sponsor-payment-info :is(time, span) { color: var(--muted); font-size: 12px; }
+  .sponsor-payment-message { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 8px; margin: 4px 0; }
+  .sponsor-payment-message strong { color: var(--muted); font-size: 12px; }
+  .sponsor-payment-message span { white-space: pre-wrap; }
   .sponsor-payment-selected { background: var(--surface-muted); box-shadow: inset 2px 0 var(--accent-strong); scroll-margin-block-start: 64px; }
   @media (max-width: 1020px) {
     .editor-body { gap: 14px; }
@@ -288,12 +307,17 @@ export const ADMIN_STYLES = /* css */ `
     .sponsors-workspace .search-field { margin-bottom: 8px; }
     .sponsor-views { width: 100%; gap: 14px; }
     .modal--sponsor .grid { grid-template-columns: minmax(0, 1fr); }
+    .sponsor-time-tools .btn, .sponsor-zone-keep { min-height: 44px; }
     #sponsor-uuid { font-size: 16px; }
   }
   @media (max-width: 390px) {
     .grid { grid-template-columns: minmax(0, 1fr); }
     .coordinate-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .coordinate-grid .field:first-child { grid-column: 1 / -1; }
+    .sponsor-time-inputs { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 540px) {
+    .sponsor-order-payment { grid-template-columns: minmax(0, 1fr); }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }

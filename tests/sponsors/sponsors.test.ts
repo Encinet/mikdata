@@ -10,7 +10,7 @@ test('Afdian signatures match the reference vector and dates use Unix seconds', 
   expect(md5Hex('abc')).toBe('900150983cd24fb0d6963f7d28e17f72');
   expect(afdianSign('123', 'abc', '{"a":333}', 1624339905)).toBe('a4acc28b81598b7e5d84ebdc3e91710c');
   expect(afdianOrderTime('202106232138371083454010626')).toBe(1624455517);
-  expect(afdianOrderTime('202602300930591234567890123')).toBe(0);
+  expect(afdianOrderTime('202602300930591234567890123')).toBeUndefined();
 });
 
 test('Afdian adapters deduplicate by source IDs and flag malformed paid orders', async () => {
@@ -23,7 +23,8 @@ test('Afdian adapters deduplicate by source IDs and flag malformed paid orders',
     return { total_page: 2, list: [
       afdianOrder(),
       afdianOrder({ status: 3, out_trade_no: 'refunded' }),
-      afdianOrder({ out_trade_no: 'broken', total_amount: 'NaN' }),
+      afdianOrder({ out_trade_no: '202611220912241234567', total_amount: 'NaN' }),
+      afdianOrder({ out_trade_no: '202602300930591234567890123' }),
     ] };
   });
   try {

@@ -1,5 +1,5 @@
 import type { AfdianPayload } from './cache';
-import { formatAmount, type ManualOrder, type Payment, type Sponsor } from './model';
+import { formatAmount, type ManualOrder, type Payment, type Sponsor, type SponsorOrder } from './model';
 
 interface CatalogOrder extends Payment {
   id: string;
@@ -53,11 +53,11 @@ export function buildCatalog(payload: AfdianPayload | undefined, data: CatalogDa
     if (!uuid) pending.set(afdianUserId, group);
   }
 
-  for (const [orderId, { uuid, amountMinor, at }] of data.manualOrders) {
-    addOrder(player(uuid), { id: 'mn:' + orderId, source: 'manual', amountMinor, at: at ?? 0 });
+  for (const [orderId, { uuid, amountMinor, at, message }] of data.manualOrders) {
+    addOrder(player(uuid), { id: 'mn:' + orderId, source: 'manual', amountMinor, at, message });
   }
-  for (const { outTradeNo, userId, amountMinor, at } of payload?.orders ?? []) {
-    addOrder(accounts.get(userId)!, { id: 'af:' + outTradeNo, source: 'afdian', amountMinor, at });
+  for (const { outTradeNo, userId, amountMinor, at, message } of payload?.orders ?? []) {
+    addOrder(accounts.get(userId)!, { id: 'af:' + outTradeNo, source: 'afdian', amountMinor, at, message });
   }
   return { players, pending };
 }
@@ -79,6 +79,18 @@ function summary(group: Group) {
   };
 }
 
+function sortedOrders(group: Group): CatalogOrder[] {
+  return [...group.orders].sort((a, b) => b.at - a.at || a.id.localeCompare(b.id));
+}
+
+function orderDetails({ amountMinor, at, message }: CatalogOrder) {
+  return { amount: formatAmount(amountMinor), at, message };
+}
+
+function publicOrder(order: CatalogOrder): SponsorOrder {
+  return { ...orderDetails(order), at: new Date(order.at * 1000).toISOString() };
+}
+
 export function publicSponsors(groups: Iterable<Group>): Sponsor[] {
   return [...groups]
     .filter((group): group is Group & { uuid: string } =>
@@ -89,7 +101,7 @@ export function publicSponsors(groups: Iterable<Group>): Sponsor[] {
       if (b.totalMinor === undefined) return -1;
       return a.totalMinor > b.totalMinor ? -1 : 1;
     })
-    .map((group) => ({ ...summary(group), uuid: group.uuid }));
+    .map((group) => ({ ...summary(group), uuid: group.uuid, orders: sortedOrders(group).map(publicOrder) }));
 }
 
 export function adminSponsorSummary(group: Group) {
@@ -102,8 +114,6 @@ export function adminSponsorSummary(group: Group) {
 export function adminSponsorDetail(group: Group) {
   return {
     ...summary(group), accounts: group.accounts, customName: group.customName,
-    orders: [...group.orders]
-      .sort((a, b) => b.at - a.at || a.id.localeCompare(b.id))
-      .map(({ id, amountMinor, at, source }) => ({ id, amount: formatAmount(amountMinor), at, source })),
+    orders: sortedOrders(group).map((order) => ({ id: order.id, source: order.source, ...orderDetails(order) })),
   };
 }

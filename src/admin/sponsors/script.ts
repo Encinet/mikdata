@@ -5,7 +5,10 @@ const sponsorBase = '/admin/sponsors';
 const sponsorSearch = $('sponsor-search');
 const sponsorList = $('sponsor-list');
 const sponsorSearches = { players: '', pending: '' };
-const sponsorDate = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
+const sponsorDate = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric', month: 'numeric', day: 'numeric',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZoneName: 'shortOffset',
+});
 const sponsorStatusMessages = {
   unavailable: '爱发电暂不可用。手动订单仍可查看和编辑。',
   stale: '正在显示上一次同步的爱发电数据。',
@@ -250,14 +253,16 @@ function renderSponsorDetails(group) {
   $('sponsor-orders-status').textContent = orderStatus;
   $('sponsor-payments').innerHTML = group.orders.map((order, index) => {
     const date = new Date(order.at * 1000);
-    const time = order.at && Number.isFinite(date.getTime())
-      ? '<time datetime="' + date.toISOString() + '">' + esc(sponsorDate.format(date)) + '</time>'
-      : '<span>时间未记录</span>';
+    const time = '<time datetime="' + date.toISOString() + '">' + esc(sponsorDate.format(date)) + '</time>';
     const manual = order.source === 'manual';
     const selected = order.id === sponsorOrderToShow;
+    const message = order.message
+      ? '<p class="sponsor-payment-message"><strong>留言</strong><span>' + esc(order.message) + '</span></p>'
+      : '';
     return '<li' + (selected ? ' class="sponsor-payment-selected" tabindex="-1"' : '') +
-      '><div class="sponsor-payment-info"><strong>¥' + esc(order.amount) + '</strong>' +
+      '><div class="sponsor-payment-content"><div class="sponsor-payment-info"><strong>¥' + esc(order.amount) + '</strong>' +
       '<span>' + (manual ? '手动赞助' : '爱发电') + '</span>' + time + '</div>' +
+      message + '</div>' +
       (manual ? '<button type="button" class="btn ghost" data-order-index="' +
         index + '">编辑订单</button>' : '') + '</li>';
   }).join('');
