@@ -72,7 +72,8 @@ export async function handlePublicBuildingsRoute(
       ...query,
       limit: query.limit === null ? '' : String(query.limit),
     });
-    const key = `v12:${encodeURIComponent(state.publicBaseUrl ?? '')}:building-list:${catalog.snapshot.version}:${params}`;
+    const cacheVersion = query.limit === null ? 'v12' : 'v13';
+    const key = `${cacheVersion}:${encodeURIComponent(state.publicBaseUrl ?? '')}:building-list:${catalog.snapshot.version}:${params}`;
     const memoryKey = `${state.scope}:${key}`;
     let body = responses.get(memoryKey);
     if (body === null) {
@@ -102,25 +103,26 @@ async function loadList(
 ): Promise<string> {
   let body = await readResponseCache(key);
   if (body === null) {
-    const filtered: Building[] = [];
-    for (const building of catalog.sorted) {
-      if (query.type && building.buildType !== query.type) continue;
-      if (
-        query.tag &&
-        !building.tags?.some((tag) => tag['zh-CN'] === query.tag || tag.en === query.tag)
-      ) continue;
-      if (
-        query.builder &&
-        !building.builders.some(
+    const matching = query.type || query.tag || query.builder
+      ? catalog.sorted.filter((building) => {
+        if (query.type && building.buildType !== query.type) return false;
+        if (
+          query.tag &&
+          !building.tags?.some((tag) => tag['zh-CN'] === query.tag || tag.en === query.tag)
+        ) return false;
+        return !query.builder || building.builders.some(
           (builder) => builder.name === query.builder || builder.uuid === query.builder,
-        )
-      ) continue;
-      filtered.push(building);
-      if (query.limit !== null && filtered.length === query.limit) break;
-    }
+        );
+      })
+      : catalog.sorted;
+    const selected = query.limit === null ? matching : matching.slice(0, query.limit);
     const locale = query.locale;
-    const buildings = locale ? filtered.map((building) => localizeBuilding(building, locale)) : filtered;
-    body = JSON.stringify({ imageBaseUrl: catalog.imageBaseUrl, buildings });
+    const buildings = locale ? selected.map((building) => localizeBuilding(building, locale)) : selected;
+    body = JSON.stringify({
+      imageBaseUrl: catalog.imageBaseUrl,
+      buildings,
+      ...(query.limit === null ? {} : { total: matching.length }),
+    });
     await writeResponseCache(key, body);
   }
   responses.set(memoryKey, body);

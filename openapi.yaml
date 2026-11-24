@@ -67,6 +67,7 @@ paths:
           in: query
           description: >-
             筛选后的返回上限。省略时返回全部匹配项。
+            指定时，响应中的 `total` 为应用此上限前的匹配总数。
             使用十进制整数，允许首尾空白和前导零。
           schema:
             type: integer
@@ -372,6 +373,10 @@ components:
       properties:
         imageBaseUrl:
           $ref: "#/components/schemas/BuildingImageBaseUrl"
+        total:
+          type: integer
+          minimum: 0
+          description: 应用筛选条件后、截取建筑列表前的匹配总数。仅在请求指定 limit 时返回。
         buildings:
           anyOf:
             - type: array

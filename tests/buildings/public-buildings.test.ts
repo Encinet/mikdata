@@ -82,17 +82,18 @@ async function read(f: ReturnType<typeof fixture>, query = '', id?: string) {
 
 test('limit is applied after every filter and before localization', async () => {
   const f = catalogFixture();
-  const queries: [string, number[]][] = [
-    ['type=original', [1, 3]],
-    ['tag=tag', [2, 3]],
-    [`tag=${encodeURIComponent('标签')}`, [2, 3]],
-    ['builder=Player', [2, 4]],
-    [`builder=${PLAYER_UUID}`, [2, 4]],
-    ['type=original&tag=tag&builder=Player', [0, 5]],
-    ['tag=missing', []],
+  const queries: [string, number[], number][] = [
+    ['type=original', [1, 3], 5],
+    ['tag=tag', [2, 3], 4],
+    [`tag=${encodeURIComponent('标签')}`, [2, 3], 4],
+    ['builder=Player', [2, 4], 4],
+    [`builder=${PLAYER_UUID}`, [2, 4], 4],
+    ['type=original&tag=tag&builder=Player', [0, 5], 2],
+    ['tag=missing', [], 0],
   ];
-  for (const [query, indexes] of queries) {
-    const { buildings } = await (await read(f, `?limit=2&${query}`)).json() as { buildings: Building[] };
+  for (const [query, indexes, expectedTotal] of queries) {
+    const { buildings, total } = await (await read(f, `?limit=2&${query}`)).json() as { buildings: Building[]; total: number };
+    expect(total).toBe(expectedTotal);
     expect(buildings.map((building) => building.id)).toEqual(
       indexes.map((index) => f.buildings[index].id),
     );
@@ -166,13 +167,13 @@ test('normalized limits share concurrent work and keep full, limited and revisio
     },
   });
   const { imageBaseUrl, buildings: full } = await (await read(f)).json() as { imageBaseUrl: string; buildings: Building[] };
-  const limitedCatalog = (count: number) => ({ imageBaseUrl, buildings: full.slice(0, count) });
+  const limitedCatalog = (count: number) => ({ imageBaseUrl, buildings: full.slice(0, count), total: full.length });
   expect(imageBaseUrl).toBe(f.env.BUILDING_IMAGE_PUBLIC_BASE_URL!);
   expect(full.map((building) => building.id)).toEqual(
     [1, 2, 3, 4, 0, 5].map((index) => f.buildings[index].id),
   );
   expect(full[0].name).toEqual(f.building.name);
-  expect(await (await read(f, '?limit=100')).json()).toEqual({ imageBaseUrl, buildings: full });
+  expect(await (await read(f, '?limit=100')).json()).toEqual(limitedCatalog(100));
   const queries = ['?limit=2', '?limit=%202%20', '?limit=02'];
   const bodies = await Promise.all(
     Array.from({ length: 20 }, async (_, index) =>
@@ -201,7 +202,8 @@ test('normalized limits share concurrent work and keep full, limited and revisio
     const refreshed = await (await read(f, '?limit=2')).json();
     expect(refreshed.buildings).toHaveLength(1);
     expect(refreshed.buildings[0].name.en).toBe('New');
-    expect(await (await read(f)).json()).toEqual(refreshed);
+    expect(refreshed.total).toBe(1);
+    expect(await (await read(f)).json()).toEqual({ imageBaseUrl, buildings: refreshed.buildings });
     expect(writes).toBe(6);
     expect(cache.size).toBe(6);
     expect(f.reads()).toBe(2);
@@ -268,7 +270,7 @@ test('public third-party reads share an empty snapshot lookup and retain CORS on
   const empty = { imageBaseUrl: f.env.BUILDING_IMAGE_PUBLIC_BASE_URL, buildings: [] };
   expect(await responses[0]?.json()).toEqual(empty);
   const limited = await handlePublicBuildingsRoute('/buildings', publicRequest('?limit=2'), f.env);
-  expect(await limited?.json()).toEqual(empty);
+  expect(await limited?.json()).toEqual({ ...empty, total: 0 });
   expect(reads).toBe(1);
   f.env.BUILDING_IMAGE_PUBLIC_BASE_URL = undefined;
   const withoutBase = await handlePublicBuildingsRoute('/buildings', publicRequest(), f.env);
