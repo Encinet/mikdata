@@ -1,5 +1,6 @@
 import type { Building, BuildingInput, BuildingSubmissionImage, Coord, I18n } from './types';
 import { isBuildingId } from './id';
+import { IMAGE_FILENAME_PATTERN } from './images/keys';
 export type ValidationResult = { ok: true; value: BuildingInput } | { ok: false; message: string };
 const MAX_NAME_LEN = 200;
 const MAX_DESC_LEN = 2000;
@@ -135,16 +136,18 @@ function validateInput(data: unknown, normalize: boolean, stored: boolean): Vali
       return { ok: false, message: `images[${index}] must be a string` };
     }
 
-    if (image.length > MAX_URL_LEN) {
-      return { ok: false, message: `images[${index}] exceeds max length ${MAX_URL_LEN}` };
-    }
-
-    const url = image.trim();
-    if (!url.startsWith('https://') || !URL.canParse(url)) {
-      return {
-        ok: false,
-        message: `images[${index}] must be an HTTPS URL`,
-      };
+    if (stored) {
+      if (!IMAGE_FILENAME_PATTERN.test(image)) {
+        return { ok: false, message: `images[${index}] must be a WebP filename` };
+      }
+    } else {
+      if (image.length > MAX_URL_LEN) {
+        return { ok: false, message: `images[${index}] exceeds max length ${MAX_URL_LEN}` };
+      }
+      const url = image.trim();
+      if (!url.startsWith('https://') || !URL.canParse(url)) {
+        return { ok: false, message: `images[${index}] must be an HTTPS URL` };
+      }
     }
   }
 
@@ -325,7 +328,7 @@ function isRealDate(value: string): boolean {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-export function isBuildingDocument(building: unknown): building is Building {
+export function isPublicBuildingDocument(building: unknown): building is Building {
   if (!building || typeof building !== 'object' || Array.isArray(building)) {
     return false;
   }

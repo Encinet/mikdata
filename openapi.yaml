@@ -78,13 +78,7 @@ paths:
           content:
             application/json:
               schema:
-                anyOf:
-                  - type: array
-                    items:
-                      $ref: "#/components/schemas/Building"
-                  - type: array
-                    items:
-                      $ref: "#/components/schemas/LocalizedBuilding"
+                $ref: "#/components/schemas/BuildingCatalog"
         "400":
           description: '`limit` 为空、重复、格式无效或超出取值范围。'
           content:
@@ -124,7 +118,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Building"
+                $ref: "#/components/schemas/BuildingDetail"
         "404":
           $ref: "#/components/responses/Error"
 
@@ -296,9 +290,12 @@ components:
           enum: [original, derivative, replica]
         images:
           type: array
-          description: 按展示顺序排列的 WebP 原图 HTTPS 地址，可为空数组。
+          description: >-
+            按展示顺序排列的 WebP 原图文件名，可为空数组。第一张图为封面。
+            原图地址为 `{imageBaseUrl}/buildings/{id}/{filename}`。
           items:
             type: string
+            pattern: '^[0-9a-f]{64}\.webp$'
         buildDate:
           type: string
           description: 建造日期（YYYY-MM-DD）。
@@ -368,6 +365,35 @@ components:
                 - properties:
                     notes:
                       type: string
+
+    BuildingImageBaseUrl:
+      type: [string, 'null']
+      format: uri
+      description: 图片的 HTTPS 基址，可包含路径且没有尾部斜杠。未配置基址且没有图片时为 null。
+
+    BuildingCatalog:
+      type: object
+      required: [imageBaseUrl, buildings]
+      properties:
+        imageBaseUrl:
+          $ref: "#/components/schemas/BuildingImageBaseUrl"
+        buildings:
+          anyOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/Building"
+            - type: array
+              items:
+                $ref: "#/components/schemas/LocalizedBuilding"
+
+    BuildingDetail:
+      type: object
+      required: [imageBaseUrl, building]
+      properties:
+        imageBaseUrl:
+          $ref: "#/components/schemas/BuildingImageBaseUrl"
+        building:
+          $ref: "#/components/schemas/Building"
 
     LocalizedText:
       type: object

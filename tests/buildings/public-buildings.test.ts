@@ -20,7 +20,7 @@ function fixture() {
     builders: [{ uuid: PLAYER_UUID, name: 'Player', weight: 1 }],
     buildType: 'original',
     tags: [{ 'zh-CN': '标签', en: 'tag' }],
-    images: [`${origin}/buildings/${id}/${hash}.webp`],
+    images: [`${hash}.webp`],
     buildDate: '2026-06-27',
     createdAt: '2026-06-27T00:00:00Z',
     updatedAt: '2026-06-27T00:00:00Z',
@@ -69,7 +69,7 @@ function catalogFixture() {
   ];
   const buildings: Building[] = entries.map((entry, index) => {
     const id = (index + 1).toString(16).repeat(32);
-    return { ...f.building, id, images: f.building.images.map(url => url.replace(f.building.id, id)), ...entry };
+    return { ...f.building, id, ...entry };
   });
   f.replace(buildings);
   return { ...f, buildings };
@@ -89,11 +89,11 @@ test('query filtering and cache keys share whitespace normalization', async () =
     const padded = await (await read(f, `?${key}=%20${value}%20`)).text();
     const canonical = await read(f, `?${field}`);
     expect(await canonical.text()).toBe(padded);
-    const buildings = JSON.parse(padded);
+    const { buildings } = JSON.parse(padded);
     expect(buildings).toHaveLength(1);
     expect(buildings[0].id).toBe(f.building.id);
   }
-  expect(await (await read(f, '?type=%20')).json()).toHaveLength(1);
+  expect((await (await read(f, '?type=%20')).json()).buildings).toHaveLength(1);
 });
 
 test('limit is applied after every filter and before localization', async () => {
@@ -108,12 +108,12 @@ test('limit is applied after every filter and before localization', async () => 
     ['tag=missing', []],
   ];
   for (const [query, indexes] of queries) {
-    const buildings = await (await read(f, `?limit=2&${query}`)).json() as Building[];
+    const { buildings } = await (await read(f, `?limit=2&${query}`)).json() as { buildings: Building[] };
     expect(buildings.map((building) => building.id)).toEqual(
       indexes.map((index) => f.buildings[index].id),
     );
   }
-  const localized = await (
+  const { buildings: localized } = await (
     await read(f, '?limit=2&type=original&tag=tag&builder=Player&locale=zh-CN')
   ).json();
   expect(localized).toHaveLength(2);
@@ -164,12 +164,14 @@ test('normalized limits share concurrent work and keep full, limited and revisio
       },
     },
   });
-  const full = await (await read(f)).json() as Building[];
+  const { imageBaseUrl, buildings: full } = await (await read(f)).json() as { imageBaseUrl: string; buildings: Building[] };
+  const limitedCatalog = (count: number) => ({ imageBaseUrl, buildings: full.slice(0, count) });
+  expect(imageBaseUrl).toBe(f.env.BUILDING_IMAGE_PUBLIC_BASE_URL!);
   expect(full.map((building) => building.id)).toEqual(
     [1, 2, 3, 4, 0, 5].map((index) => f.buildings[index].id),
   );
   expect(full[0].name).toEqual(f.building.name);
-  expect(await (await read(f, '?limit=100')).json()).toEqual(full);
+  expect(await (await read(f, '?limit=100')).json()).toEqual({ imageBaseUrl, buildings: full });
   const queries = ['?limit=2', '?limit=%202%20', '?limit=02'];
   const bodies = await Promise.all(
     Array.from({ length: 20 }, async (_, index) =>
@@ -177,18 +179,18 @@ test('normalized limits share concurrent work and keep full, limited and revisio
     ),
   );
   expect(new Set(bodies).size).toBe(1);
-  expect(JSON.parse(bodies[0])).toEqual(full.slice(0, 2));
+  expect(JSON.parse(bodies[0])).toEqual(limitedCatalog(2));
   expect(writes).toBe(3);
-  expect(await (await read(f, '?limit=1')).json()).toEqual(full.slice(0, 1));
+  expect(await (await read(f, '?limit=1')).json()).toEqual(limitedCatalog(1));
   expect(writes).toBe(4);
   expect(cache.size).toBe(4);
   expect(f.reads()).toBe(1);
 
   // A fresh catalog state must receive the right variant from the shared edge cache.
   const cold = catalogFixture();
-  expect(await (await read(cold, '?limit=2')).json()).toEqual(full.slice(0, 2));
-  expect(await (await read(cold)).json()).toEqual(full);
-  expect(await (await read(cold, '?limit=1')).json()).toEqual(full.slice(0, 1));
+  expect(await (await read(cold, '?limit=2')).json()).toEqual(limitedCatalog(2));
+  expect(await (await read(cold)).json()).toEqual({ imageBaseUrl, buildings: full });
+  expect(await (await read(cold, '?limit=1')).json()).toEqual(limitedCatalog(1));
   expect(writes).toBe(4);
 
   const now = Date.now();
@@ -196,8 +198,8 @@ test('normalized limits share concurrent work and keep full, limited and revisio
   try {
     f.update();
     const refreshed = await (await read(f, '?limit=2')).json();
-    expect(refreshed).toHaveLength(1);
-    expect(refreshed[0].name.en).toBe('New');
+    expect(refreshed.buildings).toHaveLength(1);
+    expect(refreshed.buildings[0].name.en).toBe('New');
     expect(await (await read(f)).json()).toEqual(refreshed);
     expect(writes).toBe(6);
     expect(cache.size).toBe(6);
@@ -222,7 +224,7 @@ test('unsupported locales share the English response and concurrent cache writes
     Array.from({ length: 20 }, async (_, i) => (await read(f, `?locale=unknown${i}`)).text()),
   );
   expect(new Set(bodies).size).toBe(1);
-  expect(JSON.parse(bodies[0])[0].name).toBe('Building');
+  expect(JSON.parse(bodies[0]).buildings[0].name).toBe('Building');
   expect(writes).toBe(1);
   expect(f.reads()).toBe(1);
   expect(await (await read(f, '?locale=en')).text()).toBe(bodies[0]);
@@ -240,12 +242,15 @@ test('snapshot refreshes are cached and revision changes invalidate both list an
       now += 16_000;
     }
     expect(f.reads()).toBe(3);
-    expect(await (await read(f, '?limit=0', f.building.id)).json()).toEqual(f.building);
+    expect(await (await read(f, '?limit=0', f.building.id)).json()).toEqual({
+      imageBaseUrl: f.env.BUILDING_IMAGE_PUBLIC_BASE_URL,
+      building: f.building,
+    });
     expect((await read(f, '', '0'.repeat(32))).status).toBe(404);
     f.update();
     now += 60_000;
-    expect((await (await read(f)).json())[0].name.en).toBe('New');
-    expect((await (await read(f, '', f.building.id)).json()).name.en).toBe('New');
+    expect((await (await read(f)).json()).buildings[0].name.en).toBe('New');
+    expect((await (await read(f, '', f.building.id)).json()).building.name.en).toBe('New');
   } finally {
     date.mockRestore();
   }
@@ -272,10 +277,14 @@ test('public third-party reads share an empty snapshot lookup and retain CORS on
   );
   expect(reads).toBe(1);
   expect(responses.every((r) => r?.headers.get('Access-Control-Allow-Origin') === '*')).toBe(true);
-  expect(await responses[0]?.json()).toEqual([]);
+  const empty = { imageBaseUrl: f.env.BUILDING_IMAGE_PUBLIC_BASE_URL, buildings: [] };
+  expect(await responses[0]?.json()).toEqual(empty);
   const limited = await handlePublicBuildingsRoute('/buildings', publicRequest('?limit=2'), f.env);
-  expect(await limited?.json()).toEqual([]);
+  expect(await limited?.json()).toEqual(empty);
   expect(reads).toBe(1);
+  f.env.BUILDING_IMAGE_PUBLIC_BASE_URL = undefined;
+  const withoutBase = await handlePublicBuildingsRoute('/buildings', publicRequest(), f.env);
+  expect(await withoutBase?.json()).toEqual({ imageBaseUrl: null, buildings: [] });
   f.env.BUILDINGS_KV = {
     get: async () => {
       throw new Error('Unavailable');

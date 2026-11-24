@@ -214,7 +214,7 @@ test('a missing public snapshot is rebuilt from SQLite and republished', async (
     f.env,
   );
   expect(response?.status).toBe(200);
-  expect(await response?.json()).toEqual([stored()]);
+  expect(await response?.json()).toEqual({ imageBaseUrl, buildings: [stored()] });
   expect(await f.storage.getAlarm()).toBeNumber();
   f.db.exec('UPDATE building_publication SET next_attempt=0');
   await f.store.alarm();
@@ -229,7 +229,7 @@ test('a fresh database serves and publishes an empty public catalog', async () =
     f.env,
   );
   expect(response?.status).toBe(200);
-  expect(await response?.json()).toEqual([]);
+  expect(await response?.json()).toEqual({ imageBaseUrl, buildings: [] });
   f.db.exec('UPDATE building_publication SET next_attempt=0');
   await f.store.alarm();
   expect(JSON.parse(f.kv.get(PUBLIC_BUILDINGS_KEY)!)).toMatchObject({ buildings: [] });
@@ -252,13 +252,13 @@ test('a public snapshot with duplicate IDs is rebuilt from the authoritative dat
     f.env,
   );
   expect(list?.status).toBe(200);
-  expect(await list!.json()).toEqual([building]);
+  expect(await list!.json()).toEqual({ imageBaseUrl, buildings: [building] });
   const detail = await handlePublicBuildingsRoute(
     `/buildings/${building.id}`,
     new Request(`https://data.example/api/buildings/${building.id}`),
     f.env,
   );
-  expect(await detail!.json()).toEqual(building);
+  expect(await detail!.json()).toEqual({ imageBaseUrl, building });
   expect(await f.storage.getAlarm()).toBeNumber();
 });
 
@@ -406,7 +406,7 @@ test('server-assigned building IDs survive edits, restarts and public reads', as
     f.env,
   );
   expect(detail?.status).toBe(200);
-  expect(await detail!.json()).toEqual(patched.body);
+  expect(await detail!.json()).toEqual({ imageBaseUrl, building: patched.body });
 });
 
 test('building ID collisions retry safely and cannot overwrite existing records', async () => {
@@ -759,12 +759,13 @@ test('upload receipts stay within a draft, survive retries and publish ordered h
   expect(stored.images).toBeUndefined();
   expect(stored.imageHashes).toEqual([...hashes].reverse());
   const list = await handlePublicBuildingsRoute('/buildings', new Request('https://data.example/api/buildings?locale=en'), f.env);
-  expect((await list!.json())[0].images).toEqual([...payload.images].reverse());
+  const filenames = [...hashes].reverse().map(hash => `${hash}.webp`);
+  expect((await list!.json()).buildings[0].images).toEqual(filenames);
   f.db.exec('UPDATE building_publication SET next_attempt=0');
   await f.store.alarm();
   expect(JSON.parse(f.kv.get(PUBLIC_BUILDINGS_KEY)!).buildings[0]).toEqual(stored);
   const detail = await handlePublicBuildingsRoute('/buildings/' + id, new Request('https://data.example/api/buildings/' + id), f.env);
-  expect((await detail!.json()).images).toEqual([...payload.images].reverse());
+  expect((await detail!.json()).building.images).toEqual(filenames);
 });
 
 test('public list and detail use the configured URL prefix when the same KV revision moves to a CDN', async () => {
@@ -782,11 +783,12 @@ test('public list and detail use the configured URL prefix when the same KV revi
   expect(JSON.parse(snapshot).buildings[0].imageHashes).toEqual([hash]);
   for (const base of ['https://media.example/gallery', 'https://cdn.example/photos']) {
     f.env.BUILDING_IMAGE_PUBLIC_BASE_URL = base + '/';
-    for (const path of ['/buildings', '/buildings/' + created.id]) {
-      const result = await handlePublicBuildingsRoute(path, new Request('https://data.example' + path), f.env);
-      const body = await result!.json();
-      expect((Array.isArray(body) ? body[0] : body).images).toEqual([`${base}/${key}`]);
-    }
+    const list = await handlePublicBuildingsRoute('/buildings', new Request('https://data.example/api/buildings'), f.env);
+    const path = `/buildings/${created.id}`;
+    const detail = await handlePublicBuildingsRoute(path, new Request(`https://data.example/api${path}`), f.env);
+    const expected = { id: created.id, images: [`${hash}.webp`] };
+    expect(await list?.json()).toMatchObject({ imageBaseUrl: base, buildings: [expected] });
+    expect(await detail?.json()).toMatchObject({ imageBaseUrl: base, building: expected });
   }
   expect(f.kv.get(PUBLIC_BUILDINGS_KEY)).toBe(snapshot);
 });

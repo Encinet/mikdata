@@ -2,6 +2,7 @@ import type { AdminActor } from '../../auth/access';
 import type { Building, BuildingSubmission } from '../types';
 
 const HASH = /^[0-9a-f]{64}$/;
+export const IMAGE_FILENAME_PATTERN = /^[0-9a-f]{64}\.webp$/;
 export type StoredBuilding = Omit<Building, 'images'> & { imageHashes: string[] };
 
 export function adminImageOwner(actor: AdminActor): string | undefined {
@@ -35,13 +36,21 @@ export function galleryImageKeys(id: string, urls: string[], origin?: string): s
 }
 
 export function expandImages(document: StoredBuilding, origin?: string): Building {
+  return mapImageHashes(document, hash => publicImageUrl(`buildings/${document.id}/${hash}.webp`, origin));
+}
+
+export function expandImageFilenames(document: StoredBuilding): Building {
+  return mapImageHashes(document, hash => `${hash}.webp`);
+}
+
+function mapImageHashes(document: StoredBuilding, map: (hash: string) => string): Building {
   const { imageHashes, ...building } = document;
   if ('images' in building || !Array.isArray(imageHashes) ||
       !imageHashes.every(hash => typeof hash === 'string' && HASH.test(hash)))
     throw new Error('Invalid stored gallery');
   return {
     ...building,
-    images: imageHashes.map(hash => publicImageUrl(`buildings/${building.id}/${hash}.webp`, origin)),
+    images: imageHashes.map(map),
   };
 }
 

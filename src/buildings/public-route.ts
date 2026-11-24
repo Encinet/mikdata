@@ -1,10 +1,10 @@
 import { imagePublicBaseUrl } from './images/storage';
-import { expandImages, type StoredBuilding } from './images/keys';
+import { expandImageFilenames, type StoredBuilding } from './images/keys';
 import type { Env } from '../env';
 import { authStore } from '../auth/binding';
 import { BUILDING_ID_PATTERN } from './id';
 import { PUBLIC_BUILDINGS_KEY } from './store';
-import { isBuildingDocument } from './validation';
+import { isPublicBuildingDocument } from './validation';
 import { json, serializedJson } from '../shared/http';
 import { TtlMemoryCache } from '../shared/memory-cache';
 import type { Building, Source } from './types';
@@ -18,6 +18,7 @@ interface PublicBuildingsSnapshot { version: number; buildings: Building[] }
 interface Catalog {
   raw: string;
   snapshot: PublicBuildingsSnapshot;
+  imageBaseUrl: string | null;
   byId: Map<string, Building>;
   sorted: Building[];
   expiresAt: number;
@@ -60,7 +61,7 @@ export async function handlePublicBuildingsRoute(
       const catalog = await readCatalog(env, state);
       const building = catalog.byId.get(detail[1]);
       return building
-        ? json(building, 200, CACHE_HEADERS)
+        ? json({ imageBaseUrl: catalog.imageBaseUrl, building }, 200, CACHE_HEADERS)
         : json({ error: 'building not found' }, 404);
     }
     const query = parseQuery(new URL(request.url).searchParams);
@@ -72,7 +73,7 @@ export async function handlePublicBuildingsRoute(
       ...query,
       limit: query.limit === null ? '' : String(query.limit),
     });
-    const key = `v8:${encodeURIComponent(state.publicBaseUrl ?? '')}:building-list:${catalog.snapshot.version}:${params}`;
+    const key = `v9:${encodeURIComponent(state.publicBaseUrl ?? '')}:building-list:${catalog.snapshot.version}:${params}`;
     const memoryKey = `${state.scope}:${key}`;
     let body = responses.get(memoryKey);
     if (body === null) {
@@ -119,9 +120,8 @@ async function loadList(
       if (query.limit !== null && filtered.length === query.limit) break;
     }
     const locale = query.locale;
-    body = JSON.stringify(
-      locale ? filtered.map((building) => localizeBuilding(building, locale)) : filtered,
-    );
+    const buildings = locale ? filtered.map((building) => localizeBuilding(building, locale)) : filtered;
+    body = JSON.stringify({ imageBaseUrl: catalog.imageBaseUrl, buildings });
     await writeResponseCache(key, body);
   }
   responses.set(memoryKey, body);
@@ -201,6 +201,7 @@ async function loadCatalog(env: Env, state: CatalogState): Promise<Catalog> {
   const catalog: Catalog = {
     raw: raw!,
     snapshot,
+    imageBaseUrl: origin ?? null,
     byId: new Map(snapshot.buildings.map((building) => [building.id, building])),
     sorted: [...snapshot.buildings].sort((a, b) => b.buildDate.localeCompare(a.buildDate)),
     expiresAt: Date.now() + SNAPSHOT_TTL_MS,
@@ -217,8 +218,9 @@ function publicSnapshot(value: unknown, origin?: string): PublicBuildingsSnapsho
   for (const document of snapshot.buildings) {
     if (!document || typeof document !== 'object') return null;
     let building: Building;
-    try { building = expandImages(document, origin); } catch { return null; }
-    if (!isBuildingDocument(building) || ids.has(building.id)) return null;
+    try { building = expandImageFilenames(document); } catch { return null; }
+    if (!isPublicBuildingDocument(building) || ids.has(building.id)) return null;
+    if (building.images.length > 0 && (!origin || building.id !== building.id.toLowerCase())) return null;
     ids.add(building.id);
     buildings.push(building);
   }
