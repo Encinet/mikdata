@@ -6,14 +6,13 @@ import {
   sha256,
   verifyOriginal,
 } from './storage';
-import { isImageDraftKey, publicImageUrl } from './keys';
+import { imageFilename, isImageDraftKey, publicImageUrl } from './keys';
+import { MAX_BUILDING_IMAGE_BYTES, MAX_BUILDING_IMAGE_DIMENSION } from './validation';
 import type { BuildingStore } from '../store';
 import type { Env } from '../../env';
 import { json } from '../../shared/http';
 
 export const ADMIN_IMAGE_PATH = '/building-images';
-export const ADMIN_IMAGE_MAX_BYTES = 4 * 1024 * 1024;
-export const ADMIN_IMAGE_MAX_DIMENSION = 1920;
 
 export async function uploadAdminBuildingImage(
   request: Request,
@@ -34,12 +33,12 @@ export async function uploadAdminBuildingImage(
 
   let bytes: Uint8Array<ArrayBuffer>;
   try {
-    bytes = await readLimitedImageBody(request, ADMIN_IMAGE_MAX_BYTES);
+    bytes = await readLimitedImageBody(request, MAX_BUILDING_IMAGE_BYTES);
   } catch {
     return json({ error: 'image_too_large' }, 413);
   }
   const dimensions = webpDimensions(bytes);
-  if (!dimensions || Math.max(dimensions.width, dimensions.height) > ADMIN_IMAGE_MAX_DIMENSION)
+  if (!dimensions || Math.max(dimensions.width, dimensions.height) > MAX_BUILDING_IMAGE_DIMENSION)
     return json({ error: 'invalid_image' }, 422);
 
   const hash = await sha256(bytes);
@@ -49,7 +48,8 @@ export async function uploadAdminBuildingImage(
     return result;
   });
   if (!lease) return json({ error: 'image_draft_unavailable' }, 409);
-  if (lease.image) return json({ image: lease.image }, 200);
+  const receipt = { buildingId: lease.buildingId, filename: imageFilename(lease.key) };
+  if (lease.completed) return json(receipt, 200);
   const url = publicImageUrl(lease.key, config.publicBaseUrl);
   try {
     const put = await prepareImagePut(config, lease.key);
@@ -67,9 +67,8 @@ export async function uploadAdminBuildingImage(
     console.warn('Admin building image upload failed', lease.key, error);
     return json({ error: 'image_upload_unavailable' }, 502);
   }
-  const image = { url, ...dimensions, size: bytes.length, mime: 'image/webp' };
-  const expiresAt = await storage.transaction(async () => store.completeUpload(owner, lease.id, image));
-  return expiresAt ? json({ image }, 200) : json({ error: 'image_draft_unavailable' }, 409);
+  const expiresAt = await storage.transaction(async () => store.completeUpload(owner, lease.id, lease.key));
+  return expiresAt ? json(receipt, 200) : json({ error: 'image_draft_unavailable' }, 409);
 }
 
 type ImageDimensions = { width: number; height: number };

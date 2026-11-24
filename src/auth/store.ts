@@ -1,6 +1,7 @@
-import { imageKeyHash, isImageDraftKey } from '../buildings/images/keys';
+import { imageFilename, imageKeyHash, isImageDraftKey } from '../buildings/images/keys';
 import { ADMIN_IMAGE_PATH, uploadAdminBuildingImage } from '../buildings/images/admin-upload';
-import { imagePublicBaseUrl, imageStorageConfig, prepareImagePut, verifyOriginal } from '../buildings/images/storage';
+import { imageStorageConfig, prepareImagePut, verifyOriginal } from '../buildings/images/storage';
+import { MAX_BUILDING_IMAGE_BYTES } from '../buildings/images/validation';
 import { collectBuildingImages, UnavailableBuildingImage } from '../buildings/images/lifecycle';
 import { BuildingStore } from '../buildings/store';
 import { initializeBuildingStorage } from '../buildings/schema';
@@ -16,11 +17,12 @@ import {
 import type { Env } from '../env';
 import { BuildingService, type AdminBuildingCommand } from '../buildings/service';
 import { TtlMemoryCache } from '../shared/memory-cache';
+import { readLimitedRequestText, RequestBodyTooLargeError } from '../shared/http';
 
 import type { AdminActor } from './access';
 import type { StoreRequest } from './binding';
 import { AUTH_RATE_LIMIT_WINDOW_SECONDS, CHALLENGE_TTL_SECONDS, sanitizeRateLimitPart, SESSION_ABSOLUTE_SECONDS } from './policy';
-import { asString, MAX_AUTH_BODY_BYTES, optionalString, readLimitedRequestText, RequestBodyTooLargeError } from './request';
+import { asString, MAX_AUTH_BODY_BYTES, optionalString } from './request';
 
 const SESSION_IDLE_SECONDS = 60 * 60 * 24 * 30;
 
@@ -51,12 +53,12 @@ const DEFAULT_WEBAUTHN_RP_ID = 'mcmik.top';
 const DEFAULT_WEBAUTHN_ORIGIN = 'https://mcmik.top';
 
 const RP_NAME = 'Mik Casual';
+const ACCOUNT_PREFIX = 'account:';
 
 interface PlayerAccountSummary {
   playerUuid: string;
   currentName: string;
   role: string;
-  updatedAt: string;
   passkeyCount: number;
 }
 
@@ -92,7 +94,6 @@ interface SessionRecord {
 interface AccountRecord {
   playerUuid: string;
   currentName: string;
-  updatedAt: string;
   role: string;
   disabledAt?: string;
   banned?: boolean;
@@ -267,7 +268,7 @@ export class AuthStore implements DurableObject {
     this.state = state;
     this.storage = state.storage;
     this.env = env;
-    this.buildings = new BuildingStore(this.storage, imagePublicBaseUrl(env));
+    this.buildings = new BuildingStore(this.storage);
     this.buildingService = new BuildingService(this.buildings);
   }
 
@@ -408,16 +409,16 @@ export class AuthStore implements DurableObject {
       operation: asString(body.operation) as AdminBuildingCommand['operation'],
       id: asString(body.id),
       body: body.body,
-      expectedUpdatedAt: optionalString(body.expectedUpdatedAt),
+      ifMatch: optionalString(body.ifMatch),
       draftKey: optionalString(body.draftKey),
-      status: optionalString(body.status),
+      status: typeof body.status === 'string' ? body.status : undefined,
       actor: adminActorFromStoreBody(body.actor),
     };
-    return this.storage.transaction(async () => {
-      const result = this.buildingService.admin(command);
+    return this.buildingService.admin(command, (mutate) => this.storage.transaction(async () => {
+      const result = mutate();
       if (result.status < 400) await this.scheduleMaintenance();
       return result;
-    });
+    }));
   }
 
   private async createAuthenticationContext(
@@ -670,7 +671,6 @@ export class AuthStore implements DurableObject {
         currentName: player.name,
         role,
         banned: false,
-        updatedAt: new Date().toISOString(),
       };
       const sessionError = await this.storeAuthenticatedSession(txn, record.context, session);
       if (sessionError) return sessionError;
@@ -1290,7 +1290,7 @@ export class AuthStore implements DurableObject {
   }
 
   private async imageUpload(body: StoreRequest): Promise<{status: number; body: unknown}> {
-    const { action, draftKey, requestKey, hash, image } = body;
+    const { action, draftKey, requestKey, hash, size } = body;
     const uploadId = asString(body.uploadId);
     const session = await this.readValidSession(asString(body.sessionId));
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
@@ -1298,15 +1298,18 @@ export class AuthStore implements DurableObject {
     if (!eligibleMemberAccount(account)) return { status: 403, body: { error: 'member_required' } };
     const config = imageStorageConfig(this.env);
     if (!config) return { status: 503, body: { error: 'image_upload_not_configured' } };
+    let verifiedKey: string | null = null;
     if (action === 'completeImageUpload') {
-      if (!validUploadedImage(image)) return { status: 422, body: { error: 'invalid_image' } };
-      const key = this.buildings.uploadKey(account.playerUuid, uploadId, image.url);
+      if (typeof size !== 'number' || !Number.isInteger(size) || size < 1 || size > MAX_BUILDING_IMAGE_BYTES)
+        return { status: 422, body: { error: 'invalid_image' } };
+      const key = this.buildings.uploadKey(account.playerUuid, uploadId);
       if (!key) return { status: 409, body: { error: 'upload_expired' } };
       try {
         const original = await fetch(config.publicBaseUrl + '/' + key, {
           cache: 'no-store', redirect: 'manual', signal: AbortSignal.timeout(15_000),
         });
-        await verifyOriginal(original, imageKeyHash(key), image.size);
+        await verifyOriginal(original, imageKeyHash(key), size);
+        verifiedKey = key;
       } catch (error) {
         console.warn('Building image verification failed', key, error instanceof Error ? error.message : 'storage error');
         return { status: 502, body: { error: 'image_upload_unavailable' } };
@@ -1321,25 +1324,21 @@ export class AuthStore implements DurableObject {
       if (action === 'prepareImageUpload') {
         const key = typeof hash === 'string' && this.buildings.prepareUpload(account.playerUuid, uploadId, hash);
         if (!key) return { status: 409, body: { error: 'upload_expired' } };
-        return { status: 200, body: { url: config.publicBaseUrl + '/' + key, put: await prepareImagePut(config, key) } };
+        return { status: 200, body: { put: await prepareImagePut(config, key) } };
       }
-      if (action === 'completeImageUpload' && validUploadedImage(image)) {
-        const expiresAt = this.buildings.completeUpload(account.playerUuid, uploadId, image);
+      if (verifiedKey !== null) {
+        const expiresAt = this.buildings.completeUpload(account.playerUuid, uploadId, verifiedKey);
         return expiresAt
-          ? { status: 200, body: { image, expiresAt } }
+          ? { status: 200, body: { filename: imageFilename(verifiedKey), expiresAt } }
           : { status: 409, body: { error: 'upload_expired' } };
       }
       if (!isImageDraftKey(draftKey) || !isImageDraftKey(requestKey))
         return { status: 422, body: { error: 'invalid_draft' } };
       const reservation = this.buildings.reserveUpload(account.playerUuid, draftKey, requestKey);
-      await this.scheduleMaintenance();
-      if (reservation.error)
+      if ('error' in reservation)
         return { status: reservation.error === 'draft_submitted' ? 409 : 429, body: reservation };
-      const { id, buildingId, image: previous, expiresAt } = reservation;
-      return {
-        status: 200,
-        body: { uploadId: id, buildingId, image: previous, expiresAt },
-      };
+      if ('uploadId' in reservation) await this.scheduleMaintenance();
+      return { status: 200, body: reservation };
     });
   }
 
@@ -1357,11 +1356,11 @@ export class AuthStore implements DurableObject {
     );
   }
 
-  private async scheduleMaintenance(challenges = Infinity): Promise<void> {
+  private async scheduleMaintenance(additionalDue = Infinity): Promise<void> {
     const current = await this.storage.getAlarm();
     const due = Math.min(
       this.buildings.publicationDue() ?? Infinity,
-      challenges,
+      additionalDue,
       Date.now() + 3600_000,
     );
     // Ordinary writes preserve an already armed challenge alarm without reading its metadata.
@@ -1403,9 +1402,7 @@ export class AuthStore implements DurableObject {
     }
     const imageStorage = imageStorageConfig(this.env);
     if (imageStorage && nextSweep <= Date.now()) await collectBuildingImages(this.storage, imageStorage);
-    await this.scheduleMaintenance(
-      (await this.storage.get<number>('maintenance:challenges-next-sweep')) ?? Infinity,
-    );
+    await this.scheduleMaintenance(await this.storage.get<number>('maintenance:challenges-next-sweep'));
   }
 
   private async pruneAccountSessions(
@@ -1597,7 +1594,6 @@ export class AuthStore implements DurableObject {
             ...current,
             role,
             banned: policy.banned,
-            updatedAt: new Date().toISOString(),
           });
         await this.deleteAccountSessions(txn, playerUuid);
       });
@@ -1702,7 +1698,6 @@ export class AuthStore implements DurableObject {
       playerUuid: account.playerUuid,
       currentName: account.currentName,
       role: account.role,
-      updatedAt: account.updatedAt,
       passkeyCount: (await this.listPasskeys(account.playerUuid)).length,
     };
   }
@@ -1953,7 +1948,6 @@ function sessionBody(
       playerUuid: account.playerUuid,
       currentName: account.currentName,
       role: account.role,
-      updatedAt: account.updatedAt,
       passkeyCount,
     },
   };
@@ -2154,7 +2148,7 @@ function credentialChallengeId(value: unknown): string | undefined {
 }
 
 function accountKey(playerUuid: string): string {
-  return `account:${playerUuid}`;
+  return ACCOUNT_PREFIX + playerUuid;
 }
 
 function accountNameKey(name: string): string {
@@ -2195,22 +2189,4 @@ function accountPasskeyKey(playerUuid: string, credentialId: string): string {
 
 function webauthnChallengeKey(challenge: string): string {
   return `webauthn:${challenge}`;
-}
-
-function validUploadedImage(value: unknown): value is import('../buildings/types').BuildingSubmissionImage {
-  if (!value || typeof value !== 'object') return false;
-  const image = value as Record<string, unknown>;
-  return (
-    typeof image.url === 'string' &&
-    image.mime === 'image/webp' &&
-    Number.isInteger(image.width) &&
-    Number.isInteger(image.height) &&
-    Number.isInteger(image.size) &&
-    Number(image.width) >= 960 &&
-    Number(image.height) >= 540 &&
-    Number(image.width) <= 1920 &&
-    Number(image.height) <= 1920 &&
-    Number(image.size) > 0 &&
-    Number(image.size) <= 4 * 1024 * 1024
-  );
 }

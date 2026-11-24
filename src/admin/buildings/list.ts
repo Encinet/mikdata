@@ -150,6 +150,19 @@ function updatePendingCount() {
   $('submissions-tab').setAttribute('aria-label', '待审申请，' + count + ' 条');
 }
 
+function updateBuildings(buildings) {
+  const byId = new Map(state.buildings.map((building) => [building.id, building]));
+  for (const building of buildings) byId.set(building.id, building);
+  state.buildings = [...byId.values()].sort((left, right) => left.id.localeCompare(right.id));
+  render();
+}
+
+function removePendingSubmission(id) {
+  state.submissions = state.submissions.filter((submission) => submission.id !== id);
+  updatePendingCount();
+  renderSubmissions();
+}
+
 function render() {
   const query = $('search').value.trim().toLowerCase();
   const type = state.typeFilter;
@@ -165,20 +178,19 @@ function render() {
     body.innerHTML = '<tr><td colspan="6" class="empty-cell"><div class="empty">正在加载建筑…</div></td></tr>';
     return;
   }
-  if (state.buildingError && !state.buildings.length) {
-    body.innerHTML = '<tr><td colspan="6" class="empty-cell"><div class="empty"><strong>建筑加载失败</strong><p>' + esc(state.buildingError) + '</p><button class="btn ghost" type="button" data-action="retry">重新加载</button></div></td></tr>';
-    return;
-  }
+  const errorRow = state.buildingError
+    ? '<tr><td colspan="6" class="empty-cell"><div class="empty"><strong>建筑加载失败</strong><p>' + esc(state.buildingError) + '</p><button class="btn ghost" type="button" data-action="retry">重新加载</button></div></td></tr>'
+    : '';
   if (!rows.length) {
     const filtered = query || type;
-    body.innerHTML = '<tr><td colspan="6" class="empty-cell"><div class="empty">' + (filtered ? '没有匹配的建筑 <button class="btn ghost sm" type="button" data-action="reset">清除筛选</button>' : '暂无收录') + '</div></td></tr>';
+    body.innerHTML = errorRow || '<tr><td colspan="6" class="empty-cell"><div class="empty">' + (filtered ? '没有匹配的建筑 <button class="btn ghost sm" type="button" data-action="reset">清除筛选</button>' : '暂无收录') + '</div></td></tr>';
     return;
   }
-  body.innerHTML = rows.map((building) => {
+  body.innerHTML = errorRow + rows.map((building) => {
     const builders = [...(building.builders || [])].sort((a, b) => b.weight - a.weight).map((item) => item.name).join('、');
     const tags = (building.tags || []).map((tag) => tag['zh-CN'] || tag.en).filter(Boolean).join('、');
     return '<tr>' +
-      '<td class="building-cell"><div class="building-summary">' + thumbnail(building.images?.[0]) +
+      '<td class="building-cell"><div class="building-summary">' + thumbnail(building.id, building.images[0]) +
       '<div><div class="title">' + esc(building.name && building.name['zh-CN']) +
       '</div><div class="meta">' + esc(building.name && building.name.en) +
       (tags ? ' · ' + esc(tags) : '') + '</div></div></div></td>' +
@@ -205,12 +217,11 @@ function renderSubmissions() {
       : '<p class="empty">暂无待审申请</p>';
     return;
   }
-  const newest = [...state.submissions].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  list.innerHTML = newest.map((submission) => {
+  list.innerHTML = state.submissions.map((submission) => {
     const payload = submission.payload;
     const title = payload.name['zh-CN'] || payload.name.en;
     const coords = payload.coordinates;
-    return '<article class="review-item">' + thumbnail(payload.images[0]) +
+    return '<article class="review-item">' + thumbnail(submission.id, payload.images[0]) +
       '<div><div class="title">' + esc(title) + '</div>' +
       '<div class="meta">' + esc(submission.submitterName) + ' · ' + esc(formatTime(submission.createdAt)) + '</div>' +
       '<div class="meta">' + esc(typeLabel[payload.buildType] || payload.buildType) + ' · ' +
@@ -222,7 +233,8 @@ function renderSubmissions() {
   updateListControls();
 }
 
-function thumbnail(url) {
+function thumbnail(id, filename) {
+  const url = buildingImageUrl(id, filename);
   return url
     ? '<img class="record-thumb" src="' + esc(url) + '" alt="" loading="lazy" decoding="async">'
     : '<span class="record-thumb record-thumb-empty">${icon('building')}</span>';
@@ -261,18 +273,21 @@ function searchableText(building) {
 
 async function deleteBuilding(id) {
   const building = state.buildings.find((item) => item.id === id);
-  const label = building && building.name ? building.name['zh-CN'] || building.name.en || id : id;
+  if (!building) return;
+  const label = building.name ? building.name['zh-CN'] || building.name.en || id : id;
   if (!confirm('删除「' + label + '」？')) return;
   setBusy(true);
   try {
     const res = await fetch('/admin/api/buildings/' + encodeURIComponent(id), {
       method: 'DELETE',
-      headers: writeHeaders(expectedBuildingHeader(id)),
+      headers: await contentHeaders(building),
     });
     const data = await readJson(res);
+    if (res.status === 412) throw new Error('建筑已被修改，请刷新列表后再删除。');
     if (!res.ok) throw new Error(data.error || res.statusText);
     toast('已删除，公开页面稍后同步', true);
-    await loadBuildings(false);
+    state.buildings = state.buildings.filter((item) => item.id !== data.deleted);
+    render();
   } catch (error) {
     toast(error.message || '删除失败', false);
   } finally {
@@ -284,11 +299,6 @@ function formatTime(value) {
   if (!value) return '-';
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN');
-}
-
-function expectedBuildingHeader(id) {
-  const building = state.buildings.find((item) => item.id === id);
-  return building && building.updatedAt ? { 'X-Expected-Updated-At': building.updatedAt } : {};
 }
 
 function num(value) {

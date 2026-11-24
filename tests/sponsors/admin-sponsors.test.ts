@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { Env } from '../../src/env';
 import worker from '../../src/index';
+import { canonicalContent, contentTag } from '../../src/shared/content-precondition';
 import { handleAdminSponsorsRoute } from '../../src/sponsors';
 import { AFDIAN_FRESH_MS } from '../../src/sponsors/cache';
 import { MAX_MANUAL_MESSAGE_LENGTH } from '../../src/sponsors/model';
@@ -15,14 +16,19 @@ const MANUAL_AT_UTC = '2026-11-21T19:40:00.000Z';
 const AFDIAN_AT_UTC = '2026-11-22T01:12:23.000Z';
 const manualPath = (uuid = UUID, orderId = ORDER_ID) => '/sponsors/' + uuid + '/orders/' + orderId;
 
-function admin(env: Env, path: string, method = 'GET', body?: Record<string, unknown>, origin?: string) {
+function admin(env: Env, path: string, method = 'GET', body?: Record<string, unknown>, origin?: string, ifMatch?: string) {
   const headers = new Headers();
   if (body) headers.set('Content-Type', 'application/json');
   if (origin) headers.set('Origin', origin);
+  if (ifMatch) headers.set('If-Match', ifMatch);
   const request = new Request('https://data.mcmik.top/admin/api' + path, {
     method, headers, body: body ? JSON.stringify(body) : undefined,
   });
   return handleAdminSponsorsRoute(path, request, env, actor);
+}
+
+function orderMatch(uuid: string, amount: string, at: number, message = '') {
+  return contentTag(canonicalContent({ id: ORDER_ID, uuid, amount, at, message }));
 }
 
 function publicList(env: Env) {
@@ -110,7 +116,8 @@ test('moving a manual order is retryable, preserves its ID and prevents duplicat
   expect((await admin(env, manualPath(), 'PUT', body))!.status).toBe(409);
   const edit = { amount: { from: '28.25', to: '30' } };
   expect((await admin(env, manualPath(), 'PATCH', edit))!.status).toBe(409);
-  expect((await admin(env, manualPath(), 'DELETE'))!.status).toBe(404);
+  const originalTag = await orderMatch(UUID, '28.25', MANUAL_AT);
+  expect((await admin(env, manualPath(), 'DELETE', undefined, undefined, originalTag))!.status).toBe(404);
   expect([...storage]).toEqual([['manual-order:' + ORDER_ID, {
     uuid: OTHER_UUID, amountMinor: 2825, at: MANUAL_AT,
   }]]);
@@ -120,10 +127,26 @@ test('moving a manual order is retryable, preserves its ID and prevents duplicat
   }]);
   const detail = await (await admin(env, '/sponsor-catalog/' + OTHER_UUID))!.json();
   expect(detail.orders).toEqual([{ id: 'mn:' + ORDER_ID, amount: '28.25', at: MANUAL_AT, source: 'manual' }]);
-  expect((await admin(env, manualPath(OTHER_UUID), 'DELETE'))!.status).toBe(204);
+  const movedTag = await orderMatch(OTHER_UUID, '28.25', MANUAL_AT);
+  expect((await admin(env, manualPath(OTHER_UUID), 'DELETE', undefined, undefined, movedTag))!.status).toBe(204);
   expect(storage.size).toBe(0);
   expect((await admin(env, manualPath(OTHER_UUID), 'PATCH', edit))!.status).toBe(404);
   expect(await (await publicList(env))!.json()).toEqual([]);
+});
+
+test('manual order deletion requires the current amount, date, and message', async () => {
+  const env = sponsorEnv();
+  const path = manualPath();
+  expect((await admin(env, path, 'PUT', { amount: '10', at: MANUAL_AT, message: '原留言' }))!.status).toBe(204);
+  const originalTag = await orderMatch(UUID, '10.00', MANUAL_AT, '原留言');
+  expect((await admin(env, path, 'DELETE'))!.status).toBe(428);
+  expect((await admin(env, path, 'DELETE', undefined, undefined, '*'))!.status).toBe(400);
+  expect((await admin(env, path, 'PATCH', { message: { from: '原留言', to: '新留言' } }))!.status).toBe(204);
+  expect((await admin(env, path, 'DELETE', undefined, undefined, originalTag))!.status).toBe(412);
+  const detail = await (await admin(env, '/sponsor-catalog/' + UUID))!.json();
+  expect(detail.orders[0].message).toBe('新留言');
+  const currentTag = await orderMatch(UUID, '10.00', MANUAL_AT, '新留言');
+  expect((await admin(env, path, 'DELETE', undefined, undefined, currentTag))!.status).toBe(204);
 });
 
 test('manual orders require a payment time that can be updated', async () => {

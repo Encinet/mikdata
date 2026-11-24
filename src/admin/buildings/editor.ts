@@ -1,4 +1,5 @@
 import { icon } from '../icons';
+import { BUILDING_TEXT_LIMITS } from '../../buildings/validation';
 import { ADMIN_GALLERY } from './gallery';
 
 export const BUILDING_EDITOR_HTML = /* html */ `
@@ -12,28 +13,28 @@ export const BUILDING_EDITOR_HTML = /* html */ `
     </div>
     <div class="modal-body editor-body">
       <div class="grid">
-        <div class="field"><label for="name-zh">中文名称 *</label><input id="name-zh" lang="zh-CN" maxlength="200" required></div>
-        <div class="field"><label for="name-en">英文名称 *</label><input id="name-en" lang="en" maxlength="200" required></div>
-        <div class="field"><label for="desc-zh">中文描述 *</label><textarea id="desc-zh" lang="zh-CN" maxlength="2000" required></textarea></div>
-        <div class="field"><label for="desc-en">英文描述 *</label><textarea id="desc-en" lang="en" maxlength="2000" required></textarea></div>
+        <div class="field"><label for="name-zh">中文名称 *</label><input id="name-zh" lang="zh-CN" maxlength="${BUILDING_TEXT_LIMITS.name}" required></div>
+        <div class="field"><label for="name-en">英文名称 *</label><input id="name-en" lang="en" maxlength="${BUILDING_TEXT_LIMITS.name}" required></div>
+        <div class="field"><label for="desc-zh">中文描述 *</label><textarea id="desc-zh" lang="zh-CN" maxlength="${BUILDING_TEXT_LIMITS.description}" required></textarea></div>
+        <div class="field"><label for="desc-en">英文描述 *</label><textarea id="desc-en" lang="en" maxlength="${BUILDING_TEXT_LIMITS.description}" required></textarea></div>
         <div class="field"><label for="build-type">建筑类型</label><select id="build-type"><option value="original">原创</option><option value="derivative">二创</option><option value="replica">搬运</option></select></div>
         <div class="field"><label for="build-date">建造日期 *</label><input id="build-date" type="date" required></div>
         <h3 class="section">坐标</h3>
         <div class="coordinate-grid full">
-          <div class="field"><label for="coord-world">世界 *</label><input id="coord-world" value="world" maxlength="128" required></div>
-          <div class="field"><label for="coord-x">X *</label><input id="coord-x" type="number" value="0" required></div>
-          <div class="field"><label for="coord-y">Y *</label><input id="coord-y" type="number" value="64" required></div>
-          <div class="field"><label for="coord-z">Z *</label><input id="coord-z" type="number" value="0" required></div>
+          <div class="field"><label for="coord-world">世界 *</label><input id="coord-world" value="world" maxlength="${BUILDING_TEXT_LIMITS.world}" required></div>
+          <div class="field"><label for="coord-x">X *</label><input id="coord-x" type="number" step="any" value="0" required></div>
+          <div class="field"><label for="coord-y">Y *</label><input id="coord-y" type="number" step="any" value="64" required></div>
+          <div class="field"><label for="coord-z">Z *</label><input id="coord-z" type="number" step="any" value="0" required></div>
         </div>
-        <div class="field full"><label for="builders">建造者 *</label><textarea id="builders" aria-describedby="builders-hint" spellcheck="false" required></textarea><p class="hint" id="builders-hint">每行一位，依次填写名称、UUID、贡献权重，用英文逗号分隔。</p></div>
-        <div class="field full"><label for="tags">标签</label><textarea id="tags" aria-describedby="tags-hint"></textarea><p class="hint" id="tags-hint">每行一个标签，中文和英文用英文逗号分隔。</p></div>
+        <div class="field full"><label for="builders">建造者 *</label><textarea id="builders" aria-describedby="builders-hint" spellcheck="false" required></textarea><p class="hint" id="builders-hint">每行一位，依次填写名称、UUID、贡献权重，用英文逗号分隔。名称含逗号或引号时，用英文双引号包住，字段内的双引号写两次。</p></div>
+        <div class="field full"><label for="tags">标签</label><textarea id="tags" aria-describedby="tags-hint"></textarea><p class="hint" id="tags-hint">每行一个标签，按中文、英文填写，至少填一种语言。字段中的逗号和引号用建造者字段的写法。</p></div>
         <details class="source-fields full" id="source-fields">
           <summary>来源与备注</summary>
           <div class="grid">
-            <div class="field"><label for="source-author">原作者</label><input id="source-author" maxlength="200"></div>
-            <div class="field"><label for="source-link">原作链接</label><input id="source-link" type="url" maxlength="500"></div>
-            <div class="field full"><label for="source-note-zh">中文备注</label><input id="source-note-zh" maxlength="500"></div>
-            <div class="field full"><label for="source-note-en">英文备注</label><input id="source-note-en" maxlength="500"></div>
+            <div class="field"><label for="source-author">原作者</label><input id="source-author" maxlength="${BUILDING_TEXT_LIMITS.sourceAuthor}"></div>
+            <div class="field"><label for="source-link">原作链接</label><input id="source-link" type="url" maxlength="${BUILDING_TEXT_LIMITS.sourceLink}"></div>
+            <div class="field full"><label for="source-note-zh">中文备注</label><input id="source-note-zh" maxlength="${BUILDING_TEXT_LIMITS.sourceNote}"></div>
+            <div class="field full"><label for="source-note-en">英文备注</label><input id="source-note-en" maxlength="${BUILDING_TEXT_LIMITS.sourceNote}"></div>
           </div>
         </details>
       </div>
@@ -67,8 +68,8 @@ $('review-approve-btn').addEventListener('click', approveSubmission);
 $('review-reject-btn').addEventListener('click', rejectSubmission);
 
 function openCreate() {
-  state.editId = null;
-  state.reviewId = null;
+  state.editBuilding = null;
+  state.reviewSubmission = null;
   $('modal-title').textContent = '新增建筑';
   $('building-form').reset();
   $('source-fields').open = false;
@@ -87,11 +88,11 @@ function openCreate() {
 function openEdit(id) {
   const building = state.buildings.find((item) => item.id === id);
   if (!building) return;
-  state.editId = id;
-  state.reviewId = null;
+  state.editBuilding = building;
+  state.reviewSubmission = null;
   $('modal-title').textContent = '编辑建筑';
   fillForm(building);
-  resetGallery(building.images.map((url) => ({ url })), id);
+  resetGallery([...building.images], id);
   setReviewMode(false);
   $('overlay').showModal();
   $('overlay').querySelector('.modal-body').scrollTop = 0;
@@ -101,11 +102,11 @@ function openEdit(id) {
 function openSubmissionReview(id) {
   const submission = state.submissions.find((item) => item.id === id);
   if (!submission || submission.status !== 'pending') return;
-  state.editId = null;
-  state.reviewId = id;
+  state.editBuilding = null;
+  state.reviewSubmission = submission;
   $('modal-title').textContent = '审核申请 · ' + (submission.submitterName || submission.id);
   fillForm(submission.payload || {});
-  resetGallery([...submission.images], id);
+  resetGallery([...submission.payload.images], id);
   setReviewMode(true);
   $('overlay').showModal();
   $('overlay').querySelector('.modal-body').scrollTop = 0;
@@ -119,8 +120,8 @@ function dismissEditor() {
 function closeModal() {
   document.body.append($('toast'));
   $('overlay').close();
-  state.editId = null;
-  state.reviewId = null;
+  state.editBuilding = null;
+  state.reviewSubmission = null;
   setReviewMode(false);
 }
 
@@ -141,9 +142,9 @@ function fillForm(building) {
   $('coord-y').value = building.coordinates?.y ?? 64;
   $('coord-z').value = building.coordinates?.z ?? 0;
   $('build-type').value = building.buildType || 'original';
-  $('builders').value = (building.builders || []).map((item) => [item.name, item.uuid, item.weight].join(',')).join('\\n');
+  $('builders').value = formatEditorRows(building.builders.map(({ name, uuid, weight }) => [name, uuid, weight]));
   $('build-date').value = building.buildDate || '';
-  $('tags').value = (building.tags || []).map((tag) => [tag['zh-CN'] || '', tag.en || ''].join(',')).join('\\n');
+  $('tags').value = formatEditorRows((building.tags ?? []).map((tag) => [tag['zh-CN'], tag.en]));
   const source = building.source || {};
   $('source-author').value = source.originalAuthor || '';
   $('source-link').value = source.originalLink || '';
@@ -155,23 +156,24 @@ function fillForm(building) {
 async function saveBuilding(event) {
   event.preventDefault();
   if (state.busy || gallery.uploading) return;
-  if (state.reviewId) {
+  if (state.reviewSubmission) {
     await saveSubmissionEdit();
     return;
   }
   setBusy(true);
   try {
-    const isEdit = Boolean(state.editId);
-    const res = await fetch(isEdit ? '/admin/api/buildings/' + encodeURIComponent(state.editId) : '/admin/api/buildings', {
-      method: isEdit ? 'PUT' : 'POST',
-      headers: editorHeaders(isEdit ? expectedBuildingHeader(state.editId) : {}),
+    const building = state.editBuilding;
+    const res = await fetch(building ? '/admin/api/buildings/' + encodeURIComponent(building.id) : '/admin/api/buildings', {
+      method: building ? 'PUT' : 'POST',
+      headers: editorHeaders(building ? await contentHeaders(building) : {}),
       body: JSON.stringify(toPayload()),
     });
     const data = await readJson(res);
+    if (res.status === 412) throw new Error('建筑已被修改。请保留当前编辑内容，刷新列表后重新打开。');
     if (!res.ok) throw new Error(data.error || res.statusText);
-    toast(isEdit ? '已更新，公开页面稍后同步' : '已创建，公开页面稍后同步', true);
+    toast(building ? '已更新，公开页面稍后同步' : '已创建，公开页面稍后同步', true);
     closeModal();
-    await loadBuildings(false);
+    updateBuildings([data]);
   } catch (error) {
     toast(error.message || '保存失败', false);
   } finally {
@@ -180,23 +182,20 @@ async function saveBuilding(event) {
 }
 
 async function saveSubmissionEdit() {
-  const submission = currentReviewSubmission();
+  const submission = state.reviewSubmission;
   if (!submission || state.busy || gallery.uploading) return;
   if (!reviewFormValid()) return;
   setBusy(true);
   try {
-    const payload = toPayload();
     const res = await fetch('/admin/api/building-submissions/' + encodeURIComponent(submission.id), {
       method: 'PUT',
-      headers: editorHeaders(expectedSubmissionHeader(submission)),
-      body: JSON.stringify({
-        payload,
-        images: gallery.images,
-      }),
+      headers: editorHeaders(await contentHeaders(submission)),
+      body: JSON.stringify({ payload: toPayload() }),
     });
     const data = await readJson(res);
-    if (!res.ok) throw new Error(data.error || res.statusText);
-    Object.assign(submission, data.submission);
+    ensureReviewSaved(res, data);
+    state.reviewSubmission = data.submission;
+    state.submissions = state.submissions.map((item) => item.id === submission.id ? data.submission : item);
     renderSubmissions();
     toast('申请已保存', true);
   } catch (error) {
@@ -207,25 +206,22 @@ async function saveSubmissionEdit() {
 }
 
 async function approveSubmission() {
-  const submission = currentReviewSubmission();
+  const submission = state.reviewSubmission;
   if (!submission || state.busy || gallery.uploading) return;
   if (!reviewFormValid()) return;
   setBusy(true);
   try {
-    const payload = toPayload();
     const res = await fetch('/admin/api/building-submissions/' + encodeURIComponent(submission.id) + '/approve', {
       method: 'PUT',
-      headers: editorHeaders(expectedSubmissionHeader(submission)),
-      body: JSON.stringify({
-        payload,
-        images: gallery.images,
-      }),
+      headers: editorHeaders(await contentHeaders(submission)),
+      body: JSON.stringify({ payload: toPayload() }),
     });
     const data = await readJson(res);
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    ensureReviewSaved(res, data);
     toast('已批准并收入建筑，公开页面稍后同步', true);
     closeModal();
-    await loadAll(false);
+    updateBuildings([data.building]);
+    removePendingSubmission(data.building.id);
   } catch (error) {
     toast(error.message || '批准失败', false);
   } finally {
@@ -234,7 +230,7 @@ async function approveSubmission() {
 }
 
 async function rejectSubmission() {
-  const submission = currentReviewSubmission();
+  const submission = state.reviewSubmission;
   if (!submission || state.busy || gallery.uploading) return;
   const reviewNote = prompt('填写退回原因，帮助玩家修改申请');
   if (!reviewNote || !reviewNote.trim()) return;
@@ -242,14 +238,14 @@ async function rejectSubmission() {
   try {
     const res = await fetch('/admin/api/building-submissions/' + encodeURIComponent(submission.id) + '/reject', {
       method: 'PUT',
-      headers: writeHeaders(expectedSubmissionHeader(submission)),
+      headers: writeHeaders(await contentHeaders(submission)),
       body: JSON.stringify({ reviewNote: reviewNote.trim() }),
     });
     const data = await readJson(res);
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    ensureReviewSaved(res, data);
     toast('申请已退回', true);
     closeModal();
-    await loadSubmissions(false);
+    removePendingSubmission(data.id);
   } catch (error) {
     toast(error.message || '拒绝失败', false);
   } finally {
@@ -266,43 +262,46 @@ function toPayload() {
     originalAuthor: sourceAuthor || undefined,
     originalLink: sourceLink || undefined,
     notes: sourceNoteZh || sourceNoteEn ? { 'zh-CN': sourceNoteZh, en: sourceNoteEn } : undefined,
-  } : null;
+  } : undefined;
+  const builders = parseEditorRows($('builders').value, 3, '建造者').map(([name, uuid = '', weight = '']) => ({
+    name, uuid, weight: Number(weight),
+  }));
+  const tags = parseEditorRows($('tags').value, 2, '标签').map(([zh, en = '']) => ({ 'zh-CN': zh, en }));
   return {
     name: { 'zh-CN': $('name-zh').value.trim(), en: $('name-en').value.trim() },
     description: { 'zh-CN': $('desc-zh').value.trim(), en: $('desc-en').value.trim() },
     coordinates: { world: $('coord-world').value.trim(), x: Number($('coord-x').value), y: Number($('coord-y').value), z: Number($('coord-z').value) },
-    builders: parseBuilders($('builders').value),
+    builders,
     buildType: $('build-type').value,
-    images: gallery.images.map((image) => image.url),
+    images: gallery.images,
     buildDate: $('build-date').value,
-    tags: parseTags($('tags').value),
+    tags: tags.length ? tags : undefined,
     source,
   };
 }
 
-function parseBuilders(value) {
-  return splitLines(value).map((line) => {
-    const parts = line.split(',').map((part) => part.trim());
-    return { name: parts[0] || '', uuid: parts[1] || '', weight: Number(parts[2] || 0) };
-  });
+function formatEditorRows(rows) {
+  return rows.map((row) => row.map((field) => {
+    const text = String(field);
+    return /[,"\\r\\n]/.test(text) ? '"' + text.replaceAll('"', '""') + '"' : text;
+  }).join(',')).join('\\n');
 }
 
-function parseTags(value) {
-  return splitLines(value).map((line) => {
-    const parts = line.split(',').map((part) => part.trim());
-    const tag = {};
-    if (parts[0]) tag['zh-CN'] = parts[0];
-    if (parts[1]) tag.en = parts[1];
-    return tag;
-  }).filter((tag) => tag['zh-CN'] || tag.en);
-}
-
-function splitLines(value) {
-  return value.split('\\n').map((line) => line.trim()).filter(Boolean);
-}
-
-function currentReviewSubmission() {
-  return state.reviewId ? state.submissions.find((item) => item.id === state.reviewId) : null;
+function parseEditorRows(value, columns, label) {
+  const fieldPattern = /(?:[ \\t]*"((?:[^"]|"")*)"[ \\t]*|([^",\\r\\n]*))(\\r\\n|[,\\r\\n]|$)/y;
+  const rows = [];
+  let row = [];
+  while (true) {
+    const match = fieldPattern.exec(value);
+    if (!match) throw new Error(label + '的引号格式不正确');
+    const [, quoted, unquoted, separator] = match;
+    row.push((quoted === undefined ? unquoted : quoted.replaceAll('""', '"')).trim());
+    if (row.length > columns) throw new Error(label + '字段过多，请检查逗号和引号');
+    if (separator === ',') continue;
+    if (row.some(Boolean)) rows.push(row);
+    if (!separator) return rows;
+    row = [];
+  }
 }
 
 function reviewFormValid() {
@@ -317,8 +316,9 @@ function editorHeaders(extra) {
   return writeHeaders({ ...extra, 'X-Building-Draft': gallery.draft });
 }
 
-function expectedSubmissionHeader(submission) {
-  return submission && submission.updatedAt ? { 'X-Expected-Updated-At': submission.updatedAt } : {};
+function ensureReviewSaved(response, data) {
+  if (response.status === 412) throw new Error('申请已被修改，请刷新列表后重新打开。');
+  if (!response.ok) throw new Error(data.error || response.statusText);
 }
 
 function updateEditorControls() {

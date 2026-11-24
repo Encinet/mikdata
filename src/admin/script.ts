@@ -42,6 +42,16 @@ function writeHeaders(extra) {
   return { 'Content-Type': 'application/json', ...(extra || {}) };
 }
 
+async function contentHeaders(record) {
+  const content = JSON.stringify(record, (_key, value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]]));
+  });
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content)));
+  const hash = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return { 'If-Match': '"' + hash + '"' };
+}
+
 async function readJson(res) {
   return res.json().catch(() => ({}));
 }

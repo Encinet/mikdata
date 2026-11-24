@@ -1,15 +1,19 @@
-import type { Building, BuildingInput, BuildingSubmissionImage, Coord, I18n } from './types';
+import type { Building, BuildingInput, Coord, I18n, Source } from './types';
 import { isBuildingId } from './id';
 import { IMAGE_FILENAME_PATTERN } from './images/keys';
 export type ValidationResult = { ok: true; value: BuildingInput } | { ok: false; message: string };
-const MAX_NAME_LEN = 200;
-const MAX_DESC_LEN = 2000;
-const MAX_URL_LEN = 500;
-const MAX_TAG_LEN = 50;
+export const BUILDING_TEXT_LIMITS = {
+  name: 200,
+  description: 2000,
+  world: 128,
+  tag: 50,
+  sourceAuthor: 200,
+  sourceLink: 500,
+  sourceNote: 500,
+} as const;
 const MAX_TAGS = 20;
 export const MAX_BUILDING_IMAGES = 15;
-const MAX_BUILDERS = 50;
-const MAX_NOTE_LEN = 500;
+export const MAX_BUILDERS = 50;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const INPUT_FIELDS = [
@@ -23,21 +27,19 @@ const INPUT_FIELDS = [
   'tags',
   'source',
 ] as const;
-export const VALID_FIELDS = new Set<string>(INPUT_FIELDS);
-const STORED_FIELDS = new Set([...VALID_FIELDS, 'id', 'createdAt', 'updatedAt']);
-export function validateBuildingInput(data: unknown): ValidationResult {
-  return validateInput(data, true, false);
-}
+const VALID_FIELDS = new Set<string>(INPUT_FIELDS);
+const COORDINATE_FIELDS = new Set(['world', 'x', 'y', 'z']);
+const BUILDER_FIELDS = new Set(['name', 'uuid', 'weight']);
+const SOURCE_FIELDS = new Set(['originalAuthor', 'originalLink', 'notes']);
 
-function validateInput(data: unknown, normalize: boolean, stored: boolean): ValidationResult {
+export function validateBuildingInput(data: unknown): ValidationResult {
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     return { ok: false, message: 'body must be a JSON object' };
   }
 
   const building = data as Record<string, unknown>;
-  const unknownField = findUnknownField(building, stored ? STORED_FIELDS : VALID_FIELDS);
-
-  if (unknownField) {
+  const unknownField = findUnknownField(building, VALID_FIELDS);
+  if (unknownField !== undefined) {
     return { ok: false, message: `unknown field: ${unknownField}` };
   }
 
@@ -58,7 +60,7 @@ function validateInput(data: unknown, normalize: boolean, stored: boolean): Vali
       return { ok: false, message: `${key}.en is required` };
     }
 
-    const limit = key === 'name' ? MAX_NAME_LEN : MAX_DESC_LEN;
+    const limit = BUILDING_TEXT_LIMITS[key];
 
     if ((i18n['zh-CN'] as string).length > limit || (i18n.en as string).length > limit) {
       return { ok: false, message: `${key} exceeds max length ${limit}` };
@@ -76,9 +78,9 @@ function validateInput(data: unknown, normalize: boolean, stored: boolean): Vali
   if (
     typeof coord.world !== 'string' ||
     !coord.world.trim() ||
-    coord.world.length > 128 ||
+    coord.world.length > BUILDING_TEXT_LIMITS.world ||
     /[\u0000-\u001f\u007f-\u009f]/u.test(coord.world) ||
-    Object.keys(coord).some((key) => !['world', 'x', 'y', 'z'].includes(key))
+    findUnknownField(coord, COORDINATE_FIELDS) !== undefined
   ) {
     return { ok: false, message: 'coordinates must contain a valid world name and x, y, z' };
   }
@@ -98,11 +100,15 @@ function validateInput(data: unknown, normalize: boolean, stored: boolean): Vali
   for (let index = 0; index < building.builders.length; index += 1) {
     const builder = building.builders[index];
 
-    if (!builder || typeof builder !== 'object') {
+    if (!builder || typeof builder !== 'object' || Array.isArray(builder)) {
       return { ok: false, message: `builders[${index}] must be an object` };
     }
 
     const value = builder as Record<string, unknown>;
+    const field = findUnknownField(value, BUILDER_FIELDS);
+    if (field !== undefined) {
+      return { ok: false, message: `unknown field: builders[${index}].${field}` };
+    }
 
     if (typeof value.name !== 'string' || !value.name.trim()) {
       return { ok: false, message: `builders[${index}].name is required` };
@@ -132,22 +138,8 @@ function validateInput(data: unknown, normalize: boolean, stored: boolean): Vali
   for (let index = 0; index < building.images.length; index += 1) {
     const image = building.images[index];
 
-    if (typeof image !== 'string') {
-      return { ok: false, message: `images[${index}] must be a string` };
-    }
-
-    if (stored) {
-      if (!IMAGE_FILENAME_PATTERN.test(image)) {
-        return { ok: false, message: `images[${index}] must be a WebP filename` };
-      }
-    } else {
-      if (image.length > MAX_URL_LEN) {
-        return { ok: false, message: `images[${index}] exceeds max length ${MAX_URL_LEN}` };
-      }
-      const url = image.trim();
-      if (!url.startsWith('https://') || !URL.canParse(url)) {
-        return { ok: false, message: `images[${index}] must be an HTTPS URL` };
-      }
+    if (typeof image !== 'string' || !IMAGE_FILENAME_PATTERN.test(image)) {
+      return { ok: false, message: `images[${index}] must be a WebP filename` };
     }
   }
 
@@ -183,16 +175,16 @@ function validateInput(data: unknown, normalize: boolean, stored: boolean): Vali
             return { ok: false, message: `tags[${index}].${lang} must be a string` };
           }
 
-          if ((value[lang] as string).length > MAX_TAG_LEN) {
+          if ((value[lang] as string).length > BUILDING_TEXT_LIMITS.tag) {
             return {
               ok: false,
-              message: `tags[${index}].${lang} exceeds max length ${MAX_TAG_LEN}`,
+              message: `tags[${index}].${lang} exceeds max length ${BUILDING_TEXT_LIMITS.tag}`,
             };
           }
         }
       }
 
-      if (!value['zh-CN'] && !value.en) {
+      if (value['zh-CN'] === undefined && value.en === undefined) {
         return { ok: false, message: `tags[${index}] must have at least one language` };
       }
     }
@@ -204,24 +196,28 @@ function validateInput(data: unknown, normalize: boolean, stored: boolean): Vali
     }
 
     const source = building.source as Record<string, unknown>;
+    const field = findUnknownField(source, SOURCE_FIELDS);
+    if (field !== undefined) {
+      return { ok: false, message: `unknown field: source.${field}` };
+    }
 
     if (source.originalAuthor !== undefined && typeof source.originalAuthor !== 'string') {
       return { ok: false, message: 'source.originalAuthor must be a string' };
     }
 
-    if (typeof source.originalAuthor === 'string' && source.originalAuthor.length > MAX_NAME_LEN) {
-      return { ok: false, message: `source.originalAuthor exceeds max length ${MAX_NAME_LEN}` };
+    if (typeof source.originalAuthor === 'string' && source.originalAuthor.length > BUILDING_TEXT_LIMITS.sourceAuthor) {
+      return { ok: false, message: `source.originalAuthor exceeds max length ${BUILDING_TEXT_LIMITS.sourceAuthor}` };
     }
 
     if (source.originalLink !== undefined && typeof source.originalLink !== 'string') {
       return { ok: false, message: 'source.originalLink must be a string' };
     }
 
-    if (typeof source.originalLink === 'string' && source.originalLink.length > MAX_URL_LEN) {
-      return { ok: false, message: `source.originalLink exceeds max length ${MAX_URL_LEN}` };
+    if (typeof source.originalLink === 'string' && source.originalLink.length > BUILDING_TEXT_LIMITS.sourceLink) {
+      return { ok: false, message: `source.originalLink exceeds max length ${BUILDING_TEXT_LIMITS.sourceLink}` };
     }
 
-    if (source.originalLink && !isHttpUrl(source.originalLink)) {
+    if (source.originalLink?.trim() && !isHttpUrl(source.originalLink.trim())) {
       return { ok: false, message: 'source.originalLink must be a valid http/https URL' };
     }
 
@@ -238,10 +234,10 @@ function validateInput(data: unknown, normalize: boolean, stored: boolean): Vali
             return { ok: false, message: `source.notes.${lang} must be a string` };
           }
 
-          if ((notes[lang] as string).length > MAX_NOTE_LEN) {
+          if ((notes[lang] as string).length > BUILDING_TEXT_LIMITS.sourceNote) {
             return {
               ok: false,
-              message: `source.notes.${lang} exceeds max length ${MAX_NOTE_LEN}`,
+              message: `source.notes.${lang} exceeds max length ${BUILDING_TEXT_LIMITS.sourceNote}`,
             };
           }
         }
@@ -249,11 +245,17 @@ function validateInput(data: unknown, normalize: boolean, stored: boolean): Vali
     }
   }
 
-  return { ok: true, value: normalize ? normalizeInput(building) : (building as unknown as BuildingInput) };
+  return { ok: true, value: normalizeInput(building) };
+}
+
+export function validateSubmissionPayload(data: unknown): ValidationResult {
+  const payload = validateBuildingInput(data);
+  if (payload.ok && !payload.value.images.length)
+    return { ok: false, message: 'at least one image is required' };
+  return payload;
 }
 
 function normalizeInput(building: Record<string, unknown>): BuildingInput {
-  const source = building.source as Record<string, unknown> | null | undefined;
   const normalized: BuildingInput = {
     name: normalizeI18n(building.name as Record<string, unknown>),
     description: normalizeI18n(building.description as Record<string, unknown>),
@@ -264,31 +266,33 @@ function normalizeInput(building: Record<string, unknown>): BuildingInput {
       weight: builder.weight as number,
     })),
     buildType: building.buildType as BuildingInput['buildType'],
-    images: (building.images as string[]).map((image) => image.trim()),
+    images: building.images as string[],
     buildDate: (building.buildDate as string).trim(),
   };
 
   if (building.tags !== undefined) {
-    normalized.tags = (building.tags as Record<string, unknown>[]).map(normalizeI18n);
+    const tags = (building.tags as Record<string, unknown>[])
+      .map(normalizeI18n)
+      .filter((tag) => tag['zh-CN'] || tag.en);
+    if (tags.length) normalized.tags = tags;
   }
 
-  if (building.source !== undefined) {
-    normalized.source =
-      source === null
-        ? null
-        : {
-            originalAuthor:
-              typeof source?.originalAuthor === 'string' ? source.originalAuthor.trim() : undefined,
-            originalLink:
-              typeof source?.originalLink === 'string' ? source.originalLink.trim() : undefined,
-            notes:
-              source?.notes && typeof source.notes === 'object' && !Array.isArray(source.notes)
-                ? normalizeI18n(source.notes as Record<string, unknown>)
-                : undefined,
-          };
-  }
+  const source = normalizeSource(building.source as Source | null | undefined);
+  if (source) normalized.source = source;
 
   return normalized;
+}
+
+function normalizeSource(source: Source | null | undefined): Source | undefined {
+  if (!source) return undefined;
+  const originalAuthor = source.originalAuthor?.trim();
+  const originalLink = source.originalLink?.trim();
+  const notes = source.notes && normalizeI18n(source.notes);
+  const normalized: Source = {};
+  if (originalAuthor) normalized.originalAuthor = originalAuthor;
+  if (originalLink) normalized.originalLink = originalLink;
+  if (notes && (notes['zh-CN'] || notes.en)) normalized.notes = notes;
+  return Object.keys(normalized).length ? normalized : undefined;
 }
 
 function normalizeI18n(value: Record<string, unknown>): I18n {
@@ -307,11 +311,11 @@ function normalizeCoordinates(value: Record<string, unknown>): Coord {
   };
 }
 
-function findUnknownField(
+export function findUnknownField(
   data: Record<string, unknown>,
-  allowedFields: Set<string>,
-): string | null {
-  return Object.keys(data).find((key) => !allowedFields.has(key)) ?? null;
+  allowedFields: ReadonlySet<string>,
+): string | undefined {
+  return Object.keys(data).find((key) => !allowedFields.has(key));
 }
 
 function isHttpUrl(value: string): boolean {
@@ -328,78 +332,11 @@ function isRealDate(value: string): boolean {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-export function isPublicBuildingDocument(building: unknown): building is Building {
-  if (!building || typeof building !== 'object' || Array.isArray(building)) {
-    return false;
-  }
-
-  const record = building as Partial<Building>;
-  return (
-    isBuildingId(record.id) &&
-    typeof record.createdAt === 'string' &&
-    !Number.isNaN(Date.parse(record.createdAt)) &&
-    typeof record.updatedAt === 'string' &&
-    !Number.isNaN(Date.parse(record.updatedAt)) &&
-    validateInput(building, false, true).ok
-  );
-}
-
-export function stripStoredBuildingFields(value: unknown): unknown {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return value;
-  }
-
-  const payload = { ...(value as Record<string, unknown>) };
-  delete payload.id;
-  delete payload.createdAt;
-  delete payload.updatedAt;
-  return payload;
-}
-
-export function validateSubmissionImages(
-  raw: unknown,
-  urls: string[],
-): { ok: true; value: BuildingSubmissionImage[] } | { ok: false; message: string } {
-  if (!Array.isArray(raw) || !raw.length) {
-    return { ok: false, message: 'images metadata must be a non-empty array' };
-  }
-  if (raw.length !== urls.length) {
-    return { ok: false, message: 'images metadata does not match payload images' };
-  }
-
-  const images: BuildingSubmissionImage[] = [];
-  for (let index = 0; index < raw.length; index += 1) {
-    const item = raw[index];
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      return { ok: false, message: `images[${index}] metadata must be an object` };
-    }
-    const value = item as Record<string, unknown>;
-    if (
-      value.url !== urls[index] ||
-      typeof value.url !== 'string'
-    ) {
-      return { ok: false, message: `images[${index}].url must be an uploaded image URL` };
-    }
-    if (
-      !Number.isFinite(value.width) ||
-      !Number.isFinite(value.height) ||
-      !Number.isFinite(value.size) ||
-      (value.width as number) <= 0 ||
-      (value.height as number) <= 0 ||
-      (value.size as number) <= 0
-    ) {
-      return { ok: false, message: `images[${index}] dimensions and size are required` };
-    }
-    if (typeof value.mime !== 'string' || value.mime !== 'image/webp') {
-      return { ok: false, message: `images[${index}].mime must be image/webp` };
-    }
-    images.push({
-      url: value.url,
-      width: value.width as number,
-      height: value.height as number,
-      size: value.size as number,
-      mime: value.mime,
-    });
-  }
-  return { ok: true, value: images };
+export function parseStoredBuilding(data: unknown): Building | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const { id, imageHashes, ...input } = data as Record<string, unknown>;
+  if (!isBuildingId(id) || 'images' in input || !Array.isArray(imageHashes) ||
+      !imageHashes.every((hash) => typeof hash === 'string')) return null;
+  const parsed = validateBuildingInput({ ...input, images: imageHashes.map((hash) => `${hash}.webp`) });
+  return parsed.ok ? { id, ...parsed.value } : null;
 }

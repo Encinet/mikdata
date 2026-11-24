@@ -4,7 +4,7 @@ export const BUILDING_IMPORT_HTML = /* html */ `
 <dialog class="overlay" id="import-overlay" aria-labelledby="import-title" aria-describedby="import-hint">
   <form class="modal modal--import" id="import-form">
     <div class="modal-head">
-      <div><h2 class="modal-title" id="import-title">导入建筑</h2><p class="modal-subtitle" id="import-hint">上传或粘贴 JSON，导入后在图册添加图片。</p></div>
+      <div><h2 class="modal-title" id="import-title">导入建筑</h2><p class="modal-subtitle" id="import-hint">上传或粘贴 JSON，由系统分配 ID，导入后在图册添加图片。</p></div>
       <div class="grow"></div>
       <button class="btn ghost icon-btn" id="import-close-btn" type="button" aria-label="关闭导入">${icon('close')}</button>
     </div>
@@ -102,7 +102,7 @@ async function importBuildings(event) {
   setBusy(true);
 
   try {
-    const payload = { buildings: items.map(toImportPayload) };
+    const payload = { buildings: items };
     const res = await fetch('/admin/api/buildings/import', {
       method: 'POST',
       headers: writeHeaders(),
@@ -111,9 +111,9 @@ async function importBuildings(event) {
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || res.statusText);
 
-    toast('已导入 ' + data.imported + ' 条，公开页面稍后同步', true);
+    toast('已导入 ' + data.buildings.length + ' 条，公开页面稍后同步', true);
     closeImport();
-    await loadBuildings(false);
+    updateBuildings(data.buildings);
   } catch (error) {
     toast(error.message || '导入失败', false);
   } finally {
@@ -121,15 +121,4 @@ async function importBuildings(event) {
   }
 }
 
-function toImportPayload(item) {
-  if (!item || typeof item !== 'object' || Array.isArray(item)) {
-    throw new Error('导入项必须是对象');
-  }
-
-  const payload = { ...item };
-  delete payload.id;
-  delete payload.createdAt;
-  delete payload.updatedAt;
-  return payload;
-}
 `;

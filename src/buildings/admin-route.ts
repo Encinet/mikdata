@@ -1,18 +1,18 @@
 import type { AdminActor } from '../auth/access';
 import type { Env } from '../env';
-import { ADMIN_IMAGE_MAX_BYTES, ADMIN_IMAGE_PATH } from './images/admin-upload';
+import { ADMIN_IMAGE_PATH } from './images/admin-upload';
 import { adminImageOwner } from './images/keys';
+import { MAX_BUILDING_IMAGE_BYTES } from './images/validation';
 import type { AdminBuildingCommand } from './service';
 import { BUILDING_ID_PATTERN } from './id';
 import { authStore } from '../auth/binding';
-import { isSameOriginBrowserRequest, json } from '../shared/http';
+import { isSameOriginBrowserRequest, json, readLimitedRequestText, requestMediaType, RequestBodyTooLargeError } from '../shared/http';
 
 const MAX_BODY_BYTES = 64 * 1024;
-const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-const BUILDING_ROUTE_RE = new RegExp(`^/buildings/(${BUILDING_ID_PATTERN})$`, 'i');
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'DELETE']);
+const BUILDING_ROUTE_RE = new RegExp(`^/buildings/(${BUILDING_ID_PATTERN})$`);
 const SUBMISSION_ROUTE_RE = new RegExp(
   `^/building-submissions/(${BUILDING_ID_PATTERN})(?:/(approve|reject))?$`,
-  'i',
 );
 const error = (message: string, status: number): Response =>
   json({ error: message }, status);
@@ -30,19 +30,22 @@ export async function handleAdminBuildingsRoute(
   if (routePath === ADMIN_IMAGE_PATH) return forwardAdminImage(request, env, actor);
   const target = adminTarget(routePath, request.method);
   if (!target) return error('method not allowed', 405);
-  const text = await readLimitedRequestText(request);
-  if (!text.ok) return text.response;
-  let body: unknown = {};
-  if (request.method !== 'GET' && request.method !== 'DELETE') {
-    const optional = routePath.startsWith('/building-submissions/');
-    if (text.text.trim() || !optional) {
-      if (!(request.headers.get('Content-Type') ?? '').toLowerCase().includes('application/json'))
+  let status: string | undefined;
+  if (target.operation === 'listSubmissions') {
+    const values = new URL(request.url).searchParams.getAll('status');
+    if (values.length > 1) return error('invalid_status', 400);
+    status = values.at(0);
+  }
+  let body: unknown;
+  if (request.method === 'POST' || request.method === 'PUT') {
+    try {
+      const text = await readLimitedRequestText(request, MAX_BODY_BYTES);
+      if (requestMediaType(request) !== 'application/json')
         return error('content-type must be application/json', 415);
-      try {
-        body = JSON.parse(text.text);
-      } catch {
-        return error('invalid JSON body', 400);
-      }
+      body = JSON.parse(text);
+    } catch (cause) {
+      if (cause instanceof RequestBodyTooLargeError) return error('request body too large', 413);
+      return error('invalid JSON body', 400);
     }
   }
   const response = await authStore(env).fetch(
@@ -53,9 +56,9 @@ export async function handleAdminBuildingsRoute(
         action: 'adminBuildingMutation',
         ...target,
         body,
-        expectedUpdatedAt: request.headers.get('X-Expected-Updated-At') ?? undefined,
+        ifMatch: request.headers.get('If-Match') ?? undefined,
         draftKey: request.headers.get('X-Building-Draft') ?? undefined,
-        status: new URL(request.url).searchParams.get('status') ?? undefined,
+        status,
         actor,
       }),
     }),
@@ -71,7 +74,7 @@ async function forwardAdminImage(request: Request, env: Env, actor: AdminActor):
   const contentType = request.headers.get('Content-Type');
   if (contentType !== 'image/webp') return error('image_must_be_webp', 415);
   const length = request.headers.get('Content-Length');
-  if (Number(length) > ADMIN_IMAGE_MAX_BYTES) return error('image_too_large', 413);
+  if (Number(length) > MAX_BUILDING_IMAGE_BYTES) return error('image_too_large', 413);
   if (!request.body) return error('invalid_image', 422);
   const headers = new Headers({
     'Content-Type': contentType,
@@ -84,44 +87,6 @@ async function forwardAdminImage(request: Request, env: Env, actor: AdminActor):
   return authStore(env).fetch(
     new Request(url, { method: 'POST', headers, body: request.body }),
   );
-}
-
-async function readLimitedRequestText(
-  request: Request,
-): Promise<{ ok: true; text: string } | { ok: false; response: Response }> {
-  const contentLength = request.headers.get('content-length');
-
-  if (contentLength && Number.parseInt(contentLength, 10) > MAX_BODY_BYTES) {
-    return { ok: false, response: error('request body too large', 413) };
-  }
-
-  if (!request.body) {
-    return { ok: true, text: '' };
-  }
-
-  const reader = request.body.getReader();
-  const decoder = new TextDecoder();
-  let size = 0;
-  let text = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-
-    if (done) {
-      break;
-    }
-
-    size += value.byteLength;
-    if (size > MAX_BODY_BYTES) {
-      await reader.cancel().catch(() => undefined);
-      return { ok: false, response: error('request body too large', 413) };
-    }
-
-    text += decoder.decode(value, { stream: true });
-  }
-
-  text += decoder.decode();
-  return { ok: true, text };
 }
 
 function isAdminBuildingsRoute(routePath: string): boolean {
@@ -155,16 +120,14 @@ function adminTarget(
     const operation =
       method === 'PUT'
         ? 'replaceBuilding'
-        : method === 'PATCH'
-          ? 'patchBuilding'
-          : method === 'DELETE'
-            ? 'deleteBuilding'
-            : null;
+        : method === 'DELETE'
+          ? 'deleteBuilding'
+          : null;
     return operation ? { operation, id: building[1] } : null;
   }
   const submission = route.match(SUBMISSION_ROUTE_RE);
   if (!submission || method !== 'PUT') return null;
-  const action = submission[2]?.toLowerCase();
+  const action = submission[2];
   return {
     operation:
       action === 'approve'

@@ -19,7 +19,7 @@ Run `bun run check` for tests, type checking and a deployment dry run.
 
 ## Deployment
 
-1. Set the KV namespace, VPC service, domain and distinct rate-limit namespace IDs in [wrangler.jsonc](./wrangler.jsonc). Keep the existing Durable Object migrations.
+1. Set the KV namespace, VPC service, domain and distinct rate-limit namespace IDs in [wrangler.jsonc](./wrangler.jsonc).
 2. Create a Cloudflare Access application for `data.mcmik.top/admin*`. Set Worker variables from [.dev.vars.example](./.dev.vars.example) and use `bunx wrangler secret put VARIABLE_NAME` for secrets.
 3. Run `bun run deploy`.
 
@@ -27,11 +27,13 @@ Run `bun run check` for tests, type checking and a deployment dry run.
 
 The S3 credentials need read, write and delete access under `buildings/`. The public image base URL defaults to the bucket URL.
 
-Upload and reorder images in the admin editor. The first image is the cover. For JSON imports, use `"images": []` and add files in the editor afterward.
+Upload and reorder images in the admin editor. The first image is the cover. For JSON imports, omit `id`, use `"images": []`, and add files in the editor afterward.
 
 Each member account can have 10 pending submissions. Completed reviews stay visible for 14 days. Unused uploads expire after 24 hours. Unreferenced images become eligible for deletion 14 days after the public catalog is current and the last reference is gone.
 
 Public buildings are served from KV snapshots. Publication runs at most once every five minutes, and KV propagation and cache expiry may add delay.
+
+An existing SQLite store must match [the current schema](./src/buildings/schema.ts) before deployment.
 
 ## Sponsors
 

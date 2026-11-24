@@ -75,32 +75,10 @@
 			}
 		]
 	},
-	"migrations": [
-		{
-			"tag": "v1",
-			"new_sqlite_classes": [
-				"BuildingsWriter"
-			]
-		},
-		{
-			"tag": "v2",
-			"new_sqlite_classes": [
-				"AuthStore"
-			]
-		},
-		{
-			"tag": "v3",
-			"deleted_classes": [
-				"BuildingsWriter"
-			]
-		},
-		{
-			"tag": "v4",
-			"new_sqlite_classes": [
-				"SponsorStore"
-			]
-		}
-	],
+	"exports": {
+		"AuthStore": { "type": "durable-object", "storage": "sqlite" },
+		"SponsorStore": { "type": "durable-object", "storage": "sqlite" }
+	},
 	"kv_namespaces": [
 		{
 			"binding": "BUILDINGS_KV",

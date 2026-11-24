@@ -7,8 +7,8 @@ export const BUILDINGS_SCRIPT = /* js */ `
 const state = {
   buildings: [],
   submissions: [],
-  editId: null,
-  reviewId: null,
+  editBuilding: null,
+  reviewSubmission: null,
   busy: false,
   typeFilter: '',
   loadingBuildings: true,

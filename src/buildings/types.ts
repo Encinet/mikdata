@@ -31,36 +31,33 @@ export interface Building {
   coordinates: Coord;
   builders: Builder[];
   buildType: 'original' | 'derivative' | 'replica';
+  /** Original WebP filenames in gallery order. */
   images: string[];
   buildDate: string;
   tags?: I18n[];
-  source?: Source | null;
-  createdAt: string;
-  updatedAt: string;
+  source?: Source;
 }
 
-export type BuildingInput = Omit<Building, 'id' | 'createdAt' | 'updatedAt'>;
+export type BuildingInput = Omit<Building, 'id'>;
 
-export interface BuildingSubmissionImage {
-  url: string;
-  width: number;
-  height: number;
-  size: number;
-  mime: string;
-}
+export type StoredBuilding = Omit<Building, 'images'> & { imageHashes: string[] };
 
 export interface BuildingSubmission {
   id: string;
   status: 'pending' | 'approved' | 'rejected';
   submitterUuid: string;
   submitterName: string;
-  submitterRole: string;
   payload: BuildingInput;
-  images: BuildingSubmissionImage[];
   reviewer?: string;
   reviewNote?: string;
-  rejectedAt?: string;
   expiresAt?: string;
   createdAt: string;
-  updatedAt: string;
+}
+
+export interface BuildingSubmissionSummary {
+  id: string;
+  name: BuildingInput['name'];
+  status: BuildingSubmission['status'];
+  reviewNote?: string;
+  expiresAt?: string;
 }

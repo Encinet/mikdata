@@ -228,7 +228,6 @@ export async function seedSession(
     playerUuid,
     currentName: 'Player',
     role: 'member',
-    updatedAt: new Date().toISOString(),
   });
   return { token, record };
 }
@@ -271,7 +270,6 @@ export async function passkeyFixture(values: Map<string, unknown>) {
     playerUuid: PLAYER_UUID,
     currentName: 'Player',
     role: 'member',
-    updatedAt: new Date().toISOString(),
   });
   const authData = new Uint8Array([
     ...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('mcmik.top'))),

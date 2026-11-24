@@ -1,8 +1,8 @@
 import type { Env } from '../env';
-import { authJson } from '../shared/http';
+import { authJson, readLimitedRequestText, RequestBodyTooLargeError } from '../shared/http';
 import { authStore, type StoreRequest } from './binding';
 import { AUTH_RATE_LIMIT_WINDOW_SECONDS, CHALLENGE_TTL_SECONDS, sanitizeRateLimitPart, SESSION_ABSOLUTE_SECONDS } from './policy';
-import { asString, optionalString, readLimitedRequestText, RequestBodyTooLargeError } from './request';
+import { asString, MAX_AUTH_BODY_BYTES, optionalString } from './request';
 
 const SESSION_COOKIE_NAME = '__Host-mik_sid';
 
@@ -297,7 +297,7 @@ export async function handleAuthRoute(
       draftKey: payload.data.draftKey,
       requestKey: payload.data.requestKey,
       uploadId: payload.data.uploadId,
-      image: payload.data.image,
+      size: payload.data.size,
     });
     return authJson(
       response.body,
@@ -405,7 +405,7 @@ async function readJsonObject(
 ): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; response: Response }> {
   let text: string;
   try {
-    text = await readLimitedRequestText(request);
+    text = await readLimitedRequestText(request, MAX_AUTH_BODY_BYTES);
   } catch (error) {
     return {
       ok: false,

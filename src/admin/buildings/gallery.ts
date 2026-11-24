@@ -1,4 +1,4 @@
-import { ADMIN_IMAGE_MAX_BYTES, ADMIN_IMAGE_MAX_DIMENSION } from '../../buildings/images/admin-upload';
+import { MAX_BUILDING_IMAGE_BYTES, MAX_BUILDING_IMAGE_DIMENSION } from '../../buildings/images/validation';
 import { MAX_BUILDING_IMAGES } from '../../buildings/validation';
 
 export const ADMIN_GALLERY = /* html */ `
@@ -30,6 +30,7 @@ const gallery = {
   images: [],
   draft: '',
   target: null,
+  buildingId: null,
   uploading: false,
   dragged: null,
 };
@@ -54,22 +55,27 @@ function resetGallery(images, target = null) {
   gallery.images = images;
   gallery.draft = crypto.randomUUID();
   gallery.target = target;
+  gallery.buildingId = target;
   gallery.dragged = null;
   $('gallery-status').textContent = '';
   showGalleryErrors([]);
   renderGallery();
 }
 
+function buildingImageUrl(id, filename) {
+  return imageBaseUrl && id && filename ? imageBaseUrl + '/buildings/' + id + '/' + filename : '';
+}
+
 function renderGallery() {
   const count = gallery.images.length;
   $('gallery-count').textContent = count + ' / ' + maxGalleryImages;
   $('gallery-empty').hidden = count > 0;
-  galleryList.innerHTML = gallery.images.map((image, index) => {
+  galleryList.innerHTML = gallery.images.map((filename, index) => {
     const label = index === 0 ? '封面' : '第 ' + (index + 1) + ' 张';
     const attrs = ' type="button" data-index="' + index + '"';
     return '<li class="gallery-tile" data-index="' + index + '" draggable="true">' +
       '<button class="gallery-preview"' + attrs + ' data-gallery="preview" aria-label="预览' + label + '">' +
-      '<img draggable="false" loading="lazy" decoding="async" src="' + esc(image.url) + '" alt="">' + (index === 0 ? '<span>封面</span>' : '') + '</button>' +
+      '<img draggable="false" loading="lazy" decoding="async" src="' + esc(buildingImageUrl(gallery.buildingId, filename)) + '" alt="">' + (index === 0 ? '<span>封面</span>' : '') + '</button>' +
       '<div class="gallery-actions">' +
       '<button class="btn ghost sm"' + attrs + ' data-gallery="earlier" aria-label="前移' + label + '"' +
       (index === 0 ? ' disabled' : '') + '>←</button>' +
@@ -110,7 +116,7 @@ galleryList.addEventListener('click', (event) => {
     const title = index === 0 ? '封面预览' : '第 ' + (index + 1) + ' 张图片';
     $('image-preview-title').textContent = title;
     $('image-preview-img').alt = title;
-    $('image-preview-img').src = gallery.images[index].url;
+    $('image-preview-img').src = buildingImageUrl(gallery.buildingId, gallery.images[index]);
     imagePreview.showModal();
   } else if (action === 'remove') {
     gallery.images.splice(index, 1);
@@ -201,12 +207,13 @@ async function addImages(files) {
           body,
         });
         const data = await readJson(response);
-        if (!response.ok || !data.image) throw new Error(imageUploadError(data.error));
-        if (gallery.images.some((image) => image.url === data.image.url)) {
+        if (!response.ok || !data.filename || !data.buildingId) throw new Error(imageUploadError(data.error));
+        if (gallery.images.includes(data.filename)) {
           errors.push(file.name + ' · 图片已在图册中');
           continue;
         }
-        gallery.images.push(data.image);
+        gallery.buildingId = data.buildingId;
+        gallery.images.push(data.filename);
         added++;
         renderGallery();
       } catch (error) {
@@ -228,7 +235,7 @@ async function encodeGalleryImage(file) {
   } catch {
     throw new Error('无法读取此图片格式');
   }
-  const scale = Math.min(1, ${ADMIN_IMAGE_MAX_DIMENSION} / Math.max(bitmap.width, bitmap.height));
+  const scale = Math.min(1, ${MAX_BUILDING_IMAGE_DIMENSION} / Math.max(bitmap.width, bitmap.height));
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(bitmap.width * scale));
   canvas.height = Math.max(1, Math.round(bitmap.height * scale));
@@ -237,7 +244,7 @@ async function encodeGalleryImage(file) {
     for (const quality of [0.86, 0.72, 0.55]) {
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/webp', quality));
       if (!blob || blob.type !== 'image/webp') throw new Error('当前浏览器无法生成 WebP');
-      if (blob.size <= ${ADMIN_IMAGE_MAX_BYTES}) return blob;
+      if (blob.size <= ${MAX_BUILDING_IMAGE_BYTES}) return blob;
     }
     throw new Error('压缩后超过 4 MiB');
   } finally {

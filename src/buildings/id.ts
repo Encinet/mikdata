@@ -1,5 +1,5 @@
 export const BUILDING_ID_PATTERN = '[0-9a-f]{32}';
-const ID_RE = new RegExp(`^${BUILDING_ID_PATTERN}$`, 'i');
+const ID_RE = new RegExp(`^${BUILDING_ID_PATTERN}$`);
 
 export function isBuildingId(value: unknown): value is string {
   return typeof value === 'string' && ID_RE.test(value);

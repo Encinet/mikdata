@@ -176,8 +176,11 @@ async function saveSponsor(remove) {
   setSponsorError('');
   setSponsorSaving(true);
   try {
+    const headers = remove && kind === 'order'
+      ? await contentHeaders({ id: orderId, uuid, amount: order.amount, at: order.at, message: order.message ?? '' })
+      : undefined;
     await sponsorRequest(path, remove
-      ? { method: 'DELETE' }
+      ? { method: 'DELETE', headers }
       : { method: order ? 'PATCH' : 'PUT', headers: writeHeaders(), body: JSON.stringify(body) });
   } catch (error) {
     setSponsorError(error.message);

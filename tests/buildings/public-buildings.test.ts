@@ -22,8 +22,6 @@ function fixture() {
     tags: [{ 'zh-CN': '标签', en: 'tag' }],
     images: [`${hash}.webp`],
     buildDate: '2026-06-27',
-    createdAt: '2026-06-27T00:00:00Z',
-    updatedAt: '2026-06-27T00:00:00Z',
   };
   const serialize = (buildings: Building[], version: number) => JSON.stringify({
     version,
@@ -82,20 +80,6 @@ async function read(f: ReturnType<typeof fixture>, query = '', id?: string) {
   ))!;
 }
 
-test('query filtering and cache keys share whitespace normalization', async () => {
-  const f = fixture();
-  for (const field of ['type=original', 'builder=Player', 'tag=tag', 'locale=zh-CN']) {
-    const [key, value] = field.split('=');
-    const padded = await (await read(f, `?${key}=%20${value}%20`)).text();
-    const canonical = await read(f, `?${field}`);
-    expect(await canonical.text()).toBe(padded);
-    const { buildings } = JSON.parse(padded);
-    expect(buildings).toHaveLength(1);
-    expect(buildings[0].id).toBe(f.building.id);
-  }
-  expect((await (await read(f, '?type=%20')).json()).buildings).toHaveLength(1);
-});
-
 test('limit is applied after every filter and before localization', async () => {
   const f = catalogFixture();
   const queries: [string, number[]][] = [
@@ -114,12 +98,29 @@ test('limit is applied after every filter and before localization', async () => 
     );
   }
   const { buildings: localized } = await (
-    await read(f, '?limit=2&type=original&tag=tag&builder=Player&locale=zh-CN')
+    await read(f, '?limit=2&type=%20original&tag=tag%20&builder=%20Player&locale=zh-CN%20')
   ).json();
   expect(localized).toHaveLength(2);
   expect(localized.map((building: { name: string }) => building.name)).toEqual(['建筑', '建筑']);
   expect(localized[0].description).toBe('描述');
   expect(localized[0].tags).toEqual(['标签']);
+  expect(await (await read(f, '?locale=unknown')).json()).toEqual(await (await read(f, '?locale=en')).json());
+});
+
+test('public snapshots skip blank tags and fall back to the available language', async () => {
+  const f = fixture();
+  f.replace([{
+    ...f.building,
+    tags: [{ 'zh-CN': '', en: '' }, { 'zh-CN': '', en: 'Trail' }],
+    source: { notes: { 'zh-CN': '', en: 'Credit' } },
+  }]);
+  const list = await read(f, '?locale=zh-CN');
+  expect(list.status).toBe(200);
+  const { buildings } = await list.json() as { buildings: { tags: string[]; source: { notes: string } }[] };
+  expect(buildings[0].tags).toEqual(['Trail']);
+  expect(buildings[0].source.notes).toBe('Credit');
+  const detail = await (await read(f, '', f.building.id)).json() as { building: Building };
+  expect(detail.building.tags).toEqual([{ 'zh-CN': '', en: 'Trail' }]);
 });
 
 test('invalid or repeated limits return uncached CORS errors before any storage read', async () => {
@@ -209,26 +210,13 @@ test('normalized limits share concurrent work and keep full, limited and revisio
   }
 });
 
-test('unsupported locales share the English response and concurrent cache writes', async () => {
+test('public reads use the configured image base URL for the same snapshot', async () => {
   const f = fixture();
-  let writes = 0;
-  (globalThis as any).caches = {
-    default: {
-      match: async () => undefined,
-      put: async () => {
-        writes++;
-      },
-    },
-  };
-  const bodies = await Promise.all(
-    Array.from({ length: 20 }, async (_, i) => (await read(f, `?locale=unknown${i}`)).text()),
-  );
-  expect(new Set(bodies).size).toBe(1);
-  expect(JSON.parse(bodies[0]).buildings[0].name).toBe('Building');
-  expect(writes).toBe(1);
-  expect(f.reads()).toBe(1);
-  expect(await (await read(f, '?locale=en')).text()).toBe(bodies[0]);
-  expect(writes).toBe(1);
+  for (const base of ['https://images.example/gallery', 'https://cdn.example/photos']) {
+    f.env.BUILDING_IMAGE_PUBLIC_BASE_URL = base + '/';
+    expect(await (await read(f)).json()).toEqual({ imageBaseUrl: base, buildings: [f.building] });
+    expect(await (await read(f, '', f.building.id)).json()).toEqual({ imageBaseUrl: base, building: f.building });
+  }
 });
 
 test('snapshot refreshes are cached and revision changes invalidate both list and detail responses', async () => {

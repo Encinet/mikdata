@@ -1,9 +1,10 @@
-import { asString, readLimitedRequestText, RequestBodyTooLargeError } from '../auth/request';
+import { asString } from '../auth/request';
 import type { Env } from '../env';
-import { json, serializedJson } from '../shared/http';
+import { canonicalContent, contentPrecondition, contentTag } from '../shared/content-precondition';
+import { json, readLimitedRequestText, requestMediaType, RequestBodyTooLargeError, serializedJson } from '../shared/http';
 import { AFDIAN_FRESH_MS, AfdianCache, type AfdianPayload } from './cache';
 import { adminSponsorDetail, adminSponsorSummary, buildCatalog, publicSponsors } from './catalog';
-import { AFDIAN_ID_RE, minecraftUuid, parseManualOrder, parseManualOrderEdit, type ManualOrder } from './model';
+import { AFDIAN_ID_RE, formatAmount, minecraftUuid, parseManualOrder, parseManualOrderEdit, type ManualOrder } from './model';
 
 const MAPPING_PREFIX = 'sponsor-mapping:';
 const MANUAL_ORDER_PREFIX = 'manual-order:';
@@ -27,7 +28,7 @@ export class SponsorStore implements DurableObject {
         return await this.afdian.get() ? new Response(null, { status: 204 }) : unavailable();
       }
       if (request.method === 'GET') return await this.read(path);
-      if (request.method === 'DELETE') return this.remove(path);
+      if (request.method === 'DELETE') return await this.remove(path, request.headers.get('If-Match'));
       if (request.method === 'PUT' || request.method === 'PATCH') return await this.write(path, request);
       return json({ error: 'method not allowed' }, 405);
     } catch (error) {
@@ -143,7 +144,7 @@ export class SponsorStore implements DurableObject {
     return this.changed();
   }
 
-  private remove(path: string[]): Response {
+  private async remove(path: string[], ifMatch: string | null): Promise<Response> {
     const [, route, id, item, orderId] = path;
     if (route === 'sponsor-mappings' && path.length === 3 && AFDIAN_ID_RE.test(id)) {
       return this.removeKey(MAPPING_PREFIX + id);
@@ -151,8 +152,19 @@ export class SponsorStore implements DurableObject {
     const uuid = minecraftUuid(id);
     const orderUuid = minecraftUuid(orderId);
     if (route !== 'sponsors' || path.length !== 5 || item !== 'orders' || !uuid || !orderUuid) return notFound();
+    const expected = contentPrecondition(ifMatch);
+    if ('status' in expected) return json(expected.body, expected.status);
     const key = MANUAL_ORDER_PREFIX + orderUuid;
-    if (this.records.get<ManualOrder>(key)?.uuid !== uuid) return notFound();
+    const order = this.records.get<ManualOrder>(key);
+    if (!order || order.uuid !== uuid) return notFound();
+    const content = canonicalContent({
+      id: orderUuid, uuid, amount: formatAmount(order.amountMinor), at: order.at, message: order.message ?? '',
+    });
+    if (expected.tag !== await contentTag(content)) return orderChanged();
+    const current = this.records.get<ManualOrder>(key);
+    if (!current) return notFound();
+    // Keep the comparison and deletion synchronous within the Durable Object.
+    if (!sameOrder(current, order)) return orderChanged();
     return this.removeKey(key);
   }
 
@@ -168,6 +180,10 @@ export class SponsorStore implements DurableObject {
 
 function sameOrder(a: ManualOrder, b: ManualOrder): boolean {
   return a.uuid === b.uuid && a.amountMinor === b.amountMinor && a.at === b.at && a.message === b.message;
+}
+
+function orderChanged(): Response {
+  return json({ error: 'that order has changed' }, 412);
 }
 
 function afdianStatus(payload: AfdianPayload | undefined) {
@@ -190,7 +206,7 @@ function unavailable(): Response {
 }
 
 async function readJsonBody(request: Request): Promise<Record<string, unknown> | Response> {
-  if (request.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
+  if (requestMediaType(request) !== 'application/json') {
     return json({ error: 'content-type must be application/json' }, 415);
   }
   try {

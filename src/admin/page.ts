@@ -12,7 +12,7 @@ import { SPONSORS_SCRIPT } from './sponsors/script';
 export function adminPage(imageBaseUrl?: string, view: 'buildings' | 'sponsors' = 'buildings'): Response {
   const nonce = createNonce();
 
-  return new Response(workspaceHtml(view).replaceAll('__NONCE__', nonce), {
+  return new Response(workspaceHtml(view, imageBaseUrl).replaceAll('__NONCE__', nonce), {
     headers: htmlHeaders(nonce, imageBaseUrl ? new URL(imageBaseUrl).origin : undefined),
   });
 }
@@ -35,8 +35,11 @@ function createNonce(): string {
   return btoa(String.fromCharCode(...bytes));
 }
 
-function workspaceHtml(view: 'buildings' | 'sponsors'): string {
+function workspaceHtml(view: 'buildings' | 'sponsors', imageBaseUrl?: string): string {
   const sponsors = view === 'sponsors';
+  const script = sponsors ? SPONSORS_SCRIPT : `
+const imageBaseUrl = ${JSON.stringify(imageBaseUrl ?? null).replaceAll('<', '\\u003c')};
+${BUILDINGS_SCRIPT}`;
   return /* html */ `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -74,7 +77,7 @@ ${sponsors ? '' : BUILDING_EDITOR_HTML + BUILDING_IMPORT_HTML + ADMIN_IMAGE_PREV
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <script nonce="__NONCE__">
 ${WORKSPACE_SCRIPT}
-${sponsors ? SPONSORS_SCRIPT : BUILDINGS_SCRIPT}
+${script}
 </script>
 </body>
 </html>`;

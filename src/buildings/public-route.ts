@@ -1,10 +1,9 @@
 import { imagePublicBaseUrl } from './images/storage';
-import { expandImageFilenames, type StoredBuilding } from './images/keys';
 import type { Env } from '../env';
 import { authStore } from '../auth/binding';
 import { BUILDING_ID_PATTERN } from './id';
 import { PUBLIC_BUILDINGS_KEY } from './store';
-import { isPublicBuildingDocument } from './validation';
+import { parseStoredBuilding } from './validation';
 import { json, serializedJson } from '../shared/http';
 import { TtlMemoryCache } from '../shared/memory-cache';
 import type { Building, Source } from './types';
@@ -13,7 +12,7 @@ const SNAPSHOT_TTL_MS = 60_000;
 const RESPONSE_TTL_MS = 300_000;
 const MAX_LIST_LIMIT = 100;
 const CACHE_HEADERS = { 'Cache-Control': 'public, max-age=300, stale-while-revalidate=600' };
-const BUILDING_ROUTE_RE = new RegExp(`^/buildings/(${BUILDING_ID_PATTERN})$`, 'i');
+const BUILDING_ROUTE_RE = new RegExp(`^/buildings/(${BUILDING_ID_PATTERN})$`);
 interface PublicBuildingsSnapshot { version: number; buildings: Building[] }
 interface Catalog {
   raw: string;
@@ -73,7 +72,7 @@ export async function handlePublicBuildingsRoute(
       ...query,
       limit: query.limit === null ? '' : String(query.limit),
     });
-    const key = `v9:${encodeURIComponent(state.publicBaseUrl ?? '')}:building-list:${catalog.snapshot.version}:${params}`;
+    const key = `v12:${encodeURIComponent(state.publicBaseUrl ?? '')}:building-list:${catalog.snapshot.version}:${params}`;
     const memoryKey = `${state.scope}:${key}`;
     let body = responses.get(memoryKey);
     if (body === null) {
@@ -211,16 +210,13 @@ async function loadCatalog(env: Env, state: CatalogState): Promise<Catalog> {
 }
 function publicSnapshot(value: unknown, origin?: string): PublicBuildingsSnapshot | null {
   if (!value || typeof value !== 'object') return null;
-  const snapshot = value as { version: number; buildings: StoredBuilding[] };
+  const snapshot = value as { version: number; buildings: unknown };
   if (!Number.isSafeInteger(snapshot.version) || snapshot.version < 0 || !Array.isArray(snapshot.buildings)) return null;
   const ids = new Set<string>();
   const buildings: Building[] = [];
-  for (const document of snapshot.buildings) {
-    if (!document || typeof document !== 'object') return null;
-    let building: Building;
-    try { building = expandImageFilenames(document); } catch { return null; }
-    if (!isPublicBuildingDocument(building) || ids.has(building.id)) return null;
-    if (building.images.length > 0 && (!origin || building.id !== building.id.toLowerCase())) return null;
+  for (const entry of snapshot.buildings) {
+    const building = parseStoredBuilding(entry);
+    if (!building || ids.has(building.id) || (building.images.length > 0 && !origin)) return null;
     ids.add(building.id);
     buildings.push(building);
   }
@@ -232,22 +228,22 @@ function localizeBuilding(
 ): Omit<Building, 'name' | 'description' | 'tags' | 'source'> & {
   name: string;
   description: string;
-  tags?: (string | undefined)[];
-  source?: (Omit<Source, 'notes'> & { notes?: string }) | null;
+  tags?: string[];
+  source?: Omit<Source, 'notes'> & { notes?: string };
 } {
   return {
     ...building,
     name: building.name[locale] ?? building.name.en,
     description: building.description[locale] ?? building.description.en,
-    tags: building.tags?.map((tag) => tag[locale] ?? tag['zh-CN'] ?? tag.en),
+    tags: building.tags?.map((tag) => tag[locale] || tag['zh-CN'] || tag.en),
     source: building.source
       ? {
           ...building.source,
           notes: building.source.notes
-            ? (building.source.notes[locale] ?? building.source.notes.en)
+            ? (building.source.notes[locale] || building.source.notes['zh-CN'] || building.source.notes.en || undefined)
             : undefined,
         }
-      : building.source,
+      : undefined,
   };
 }
 function workerCache(): Cache | null {

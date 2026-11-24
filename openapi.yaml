@@ -60,6 +60,7 @@ paths:
             省略或为空时，返回按语言代码索引的文本对象。
             指定 `zh-CN` 选择中文，其他非空值选择英文。
             单语响应中的 `name`、`description`、`tags` 元素和 `source.notes` 为字符串。
+            标签或来源备注缺少指定语言的文本时，使用已有的另一种语言。
           schema:
             type: string
         - name: limit
@@ -91,16 +92,7 @@ paths:
                     type: string
                     const: invalid_limit
         "503":
-          description: 建筑数据暂时不可用。
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [error]
-                properties:
-                  error:
-                    type: string
-                    const: building_data_unavailable
+          $ref: "#/components/responses/BuildingDataUnavailable"
 
   /buildings/{id}:
     parameters:
@@ -121,6 +113,8 @@ paths:
                 $ref: "#/components/schemas/BuildingDetail"
         "404":
           $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/BuildingDataUnavailable"
 
   /sponsors:
     get:
@@ -216,6 +210,17 @@ components:
         type: string
         enum: [UPSTREAM, FALLBACK]
   responses:
+    BuildingDataUnavailable:
+      description: 建筑数据暂时不可用。
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: string
+                const: building_data_unavailable
     Error:
       description: 未找到建筑。
       content:
@@ -277,12 +282,17 @@ components:
 
     BuildingFields:
       type: object
-      required: [coordinates, builders, buildType, images, buildDate]
+      required: [id, coordinates, builders, buildType, images, buildDate]
       properties:
+        id:
+          $ref: "#/components/schemas/BuildingId"
+          readOnly: true
         coordinates:
           $ref: "#/components/schemas/Coordinates"
         builders:
           type: array
+          minItems: 1
+          maxItems: 50
           items:
             $ref: "#/components/schemas/Builder"
         buildType:
@@ -290,6 +300,7 @@ components:
           enum: [original, derivative, replica]
         images:
           type: array
+          maxItems: 15
           description: >-
             按展示顺序排列的 WebP 原图文件名，可为空数组。第一张图为封面。
             原图地址为 `{imageBaseUrl}/buildings/{id}/{filename}`。
@@ -298,9 +309,11 @@ components:
             pattern: '^[0-9a-f]{64}\.webp$'
         buildDate:
           type: string
+          format: date
           description: 建造日期（YYYY-MM-DD）。
 
-    BuildingInput:
+    Building:
+      unevaluatedProperties: false
       allOf:
         - $ref: "#/components/schemas/BuildingFields"
         - type: object
@@ -312,6 +325,7 @@ components:
               $ref: "#/components/schemas/LocalizedText"
             tags:
               type: array
+              maxItems: 20
               items:
                 $ref: "#/components/schemas/LocalizedText"
             source:
@@ -321,33 +335,14 @@ components:
       type: string
       minLength: 32
       maxLength: 32
-      pattern: '^[0-9A-Fa-f]{32}$'
-      description: 服务端分配的固定标识。
+      pattern: '^[0-9a-f]{32}$'
+      description: 服务端分配的固定小写十六进制标识。
       example: b40cfbaf9cd674ce203b81e7a8f690d2
 
-    BuildingMetadata:
-      type: object
-      required: [id, createdAt, updatedAt]
-      properties:
-        id:
-          $ref: "#/components/schemas/BuildingId"
-          readOnly: true
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-
-    Building:
-      allOf:
-        - $ref: "#/components/schemas/BuildingInput"
-        - $ref: "#/components/schemas/BuildingMetadata"
-
     LocalizedBuilding:
+      unevaluatedProperties: false
       allOf:
         - $ref: "#/components/schemas/BuildingFields"
-        - $ref: "#/components/schemas/BuildingMetadata"
         - type: object
           required: [name, description]
           properties:
@@ -433,10 +428,13 @@ components:
           format: uuid
         weight:
           type: number
+          minimum: 0
           description: 用于计算该建造者的贡献比例。
 
     BuildingSourceFields:
-      type: ["object", "null"]
+      type: object
+      minProperties: 1
+      description: 建筑有来源信息时才返回该字段。
       properties:
         originalAuthor:
           type: string

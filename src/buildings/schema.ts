@@ -21,7 +21,7 @@ export function initializeBuildingStorage(storage: DurableObjectStorage): void {
     CREATE INDEX IF NOT EXISTS submissions_owner ON submissions(owner, created_at DESC);
     CREATE INDEX IF NOT EXISTS submissions_status ON submissions(status, created_at DESC);
     CREATE INDEX IF NOT EXISTS submissions_expiry ON submissions(expires_at);
-    CREATE UNIQUE INDEX IF NOT EXISTS submissions_draft ON submissions(owner,draft_key) WHERE draft_key IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS submissions_draft ON submissions(owner,draft_key);
     CREATE TABLE IF NOT EXISTS building_publication (
       id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0,
       published_revision INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0,
@@ -30,8 +30,9 @@ export function initializeBuildingStorage(storage: DurableObjectStorage): void {
     INSERT OR IGNORE INTO building_publication(id) VALUES(1);
     CREATE TABLE IF NOT EXISTS image_uploads (
       id TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at INTEGER NOT NULL,
-      expires_at INTEGER NOT NULL, image TEXT, draft_key TEXT NOT NULL, building_id TEXT NOT NULL,
-      request_key TEXT, object_key TEXT
+      expires_at INTEGER NOT NULL, draft_key TEXT NOT NULL, building_id TEXT NOT NULL,
+      request_key TEXT, object_key TEXT,
+      completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1))
     );
     CREATE INDEX IF NOT EXISTS uploads_owner ON image_uploads(owner, created_at);
     CREATE INDEX IF NOT EXISTS uploads_expiry ON image_uploads(expires_at);
