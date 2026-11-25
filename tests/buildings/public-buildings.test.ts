@@ -20,12 +20,12 @@ function fixture() {
     builders: [{ uuid: PLAYER_UUID, name: 'Player', weight: 1 }],
     buildType: 'original',
     tags: [{ 'zh-CN': '标签', en: 'tag' }],
-    images: [`${hash}.webp`],
+    images: [{ webp: hash, jxl: hash }],
     buildDate: '2026-06-27',
   };
   const serialize = (buildings: Building[], version: number) => JSON.stringify({
     version,
-    buildings: buildings.map(({ images: _, ...document }) => ({ ...document, imageHashes: [hash] })),
+    buildings,
   });
   let raw = serialize([building], 1),
     reads = 0;

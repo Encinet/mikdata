@@ -1,8 +1,8 @@
 import type { AdminActor } from '../auth/access';
 import { canonicalContent, contentPrecondition, contentTag } from '../shared/content-precondition';
 import { summarizeSubmission, type BuildingStore } from './store';
-import { adminImageOwner, isImageDraftKey } from './images/keys';
-import type { Building, BuildingInput, BuildingSubmission } from './types';
+import { adminImageOwner, isImageDraftKey, sameBuildingImage } from './images/keys';
+import type { Building, BuildingImage, BuildingInput, BuildingSubmission } from './types';
 import { findUnknownField, MAX_BUILDERS, validateBuildingInput, validateSubmissionPayload } from './validation';
 
 export interface BuildingResult {
@@ -118,8 +118,8 @@ export class BuildingService {
     }
     if (this.store.pendingCount(owner) >= 10)
       return result({ error: 'pending_limit_reached', limit: 10 }, 429);
-    const uploaded = this.store.draftImageFilenames(owner, draftKey, buildingId);
-    if (!payload.images.every(filename => uploaded.has(filename)))
+    const uploaded = this.store.draftImages(owner, draftKey, buildingId);
+    if (!payload.images.every(image => uploaded.some(candidate => sameBuildingImage(image, candidate))))
       return error('images must be uploaded by the current account within 24 hours', 422);
     const now = new Date().toISOString();
     const submission: BuildingSubmission = {
@@ -151,8 +151,9 @@ export class BuildingService {
         return error('image_draft_unavailable', 422);
       if (this.store.buildingIdExists(reserved) || this.store.submissionIdExists(reserved))
         return error('image_draft_unavailable', 409);
-      const uploaded = this.store.draftImageFilenames(owner, draft, reserved);
-      if (!input.value.images.every(filename => uploaded.has(filename))) return error('image_unavailable', 422);
+      const uploaded = this.store.draftImages(owner, draft, reserved);
+      if (!input.value.images.every(image => uploaded.some(candidate => sameBuildingImage(image, candidate))))
+        return error('image_unavailable', 422);
     }
     const existing = this.store.duplicateBuildingId(input.value);
     if (existing) return error(`duplicate building: ${existing}`, 409);
@@ -303,14 +304,14 @@ export class BuildingService {
     return result(building ? { building } : { submission });
   }
 
-  private adminImagesAvailable(command: AdminBuildingCommand, id: string, images: string[], previous: string[]): boolean {
-    const additions = images.filter(filename => !previous.includes(filename));
+  private adminImagesAvailable(command: AdminBuildingCommand, id: string, images: BuildingImage[], previous: BuildingImage[]): boolean {
+    const additions = images.filter(image => !previous.some(candidate => sameBuildingImage(image, candidate)));
     if (!additions.length) return true;
     const owner = adminImageOwner(command.actor);
     const draft = command.draftKey;
     if (!owner || !isImageDraftKey(draft)) return false;
-    const uploaded = this.store.draftImageFilenames(owner, draft, id);
-    return additions.every(filename => uploaded.has(filename));
+    const uploaded = this.store.draftImages(owner, draft, id);
+    return additions.every(image => uploaded.some(candidate => sameBuildingImage(image, candidate)));
   }
 
   private actor(actor: AdminActor): string {

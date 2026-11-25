@@ -7,7 +7,7 @@ import { initializeBuildingStorage } from '../../src/buildings/schema';
 import { handleAdminBuildingsRoute } from '../../src/buildings/admin-route';
 import { handlePublicBuildingsRoute } from '../../src/buildings/public-route';
 import { validateBuildingInput } from '../../src/buildings/validation';
-import type { Building, BuildingSubmission } from '../../src/buildings/types';
+import type { Building, BuildingImage, BuildingSubmission } from '../../src/buildings/types';
 import {
   authCall,
   OTHER_UUID,
@@ -22,10 +22,9 @@ const input = (name = 'Building') => ({
   coordinates: { world: 'world', x: 0, y: 64, z: 0 },
   builders: [{ name: 'Player', uuid: PLAYER_UUID, weight: 1 }],
   buildType: 'original' as const,
-  images: [] as string[],
+  images: [] as BuildingImage[],
   buildDate: '2026-06-27',
 });
-const IMAGE_SIZE = 120_000;
 const imageBaseUrl = 'https://images.example/gallery';
 function setup() {
   const kv = new Map<string, string>();
@@ -93,13 +92,31 @@ const galleryWebps = [
   'UklGRlwAAABXRUJQVlA4WAoAAAAQAAAAAgAAAQAAQUxQSAcAAAAAgICAgICAAFZQOCAuAAAAkAEAnQEqAwACAAFAIiWgAnS6AAOYAP770d//sM//15l/68y/7DP/WqhU7+kAAA==',
 ].map(value => Uint8Array.from(atob(value), byte => byte.charCodeAt(0)));
 
-async function adminUploadRequest(f: ReturnType<typeof setup>, draft: string, bytes: Uint8Array<ArrayBuffer>, target?: string, origin = 'https://data.example') {
+// Corresponding 3×2 JPEG XL fixtures. The first uses a progressive low-frequency frame.
+const galleryJxls = [
+  '/woIQLATCgQAAIgAADgAWABYShJpKHbeJzMAGiAN/BaOHjoAkCSSNwjYO9kHAuCDVAUIAQCwwAAUAAAAAFUPAACoUBll3ODlXM+XHzospm1cZ2irbQtLEoVGxLswAF2SSNYWRHQQEREBU50BlSQoSQA=',
+  '/woIQLATAEiAEADoAHM5AABUqIwybvByrufLDx0W0zauM7TVtoUliSLj2CTVIRM4JIkVkHkBAjhMAB9ERETm0dV6khytJAE=',
+  '/woIQLATAEiAEADgAHM5AABUqIwybvByrufLDx0W0zauM7TVtoUliSLj2CTVIRM4JIkFUHYHBNAAiIYkSeadjk+1TCUJ',
+].map(value => Uint8Array.from(atob(value), byte => byte.charCodeAt(0)));
+const galleryHashes = await Promise.all(galleryWebps.map(async (webp, index) => ({
+  webp: await sha256(webp), jxl: await sha256(galleryJxls[index]),
+})));
+const galleryImages = galleryHashes;
+
+async function adminUploadRequest(f: ReturnType<typeof setup>, draft: string, bytes: Uint8Array<ArrayBuffer>,
+  { target, origin = 'https://data.example', jxl }: {
+    target?: string; origin?: string; jxl?: Uint8Array<ArrayBuffer>;
+  } = {},
+) {
   const path = '/building-images';
   const url = 'https://data.example/admin/api' + path + (target ? '?building=' + target : '');
+  const form = new FormData();
+  form.set('webp', new Blob([bytes], { type: 'image/webp' }), 'test.webp');
+  form.set('jxl', new Blob([jxl ?? galleryJxls[galleryWebps.indexOf(bytes)] ?? galleryJxls[0]], { type: 'image/jxl' }), 'test.jxl');
   const response = await handleAdminBuildingsRoute(path, new Request(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'image/webp', Origin: origin, 'X-Building-Draft': draft },
-    body: bytes,
+    headers: { Origin: origin, 'X-Building-Draft': draft },
+    body: form,
   }), f.env, { email: 'admin@example.com' });
   return { status: response!.status, body: await response!.json() };
 }
@@ -108,61 +125,70 @@ async function adminUpload(
   f: ReturnType<typeof setup>, draft: string, target?: string,
   bytes = galleryWebps[0], writtenStatus = 200, mismatch = false,
 ) {
-  const hash = await sha256(bytes);
+  const index = galleryWebps.indexOf(bytes);
   const network = spyOn(globalThis, 'fetch').mockImplementation(async (request, init) => {
     const url = new URL(request as string);
+    const format = url.pathname.endsWith('.jxl') ? 'jxl' : 'webp';
+    const variant = format === 'webp' ? bytes : galleryJxls[index];
     if (init?.method === 'PUT') {
       expect(url.origin).toBe('https://bucket.example');
-      expect(url.pathname).toEndWith('/' + hash + '.webp');
-      expect(new Headers(init.headers).get('x-amz-content-sha256')).toBe(hash);
-      expect(init.body).toEqual(bytes);
-      return new Response(null, { status: writtenStatus });
+      expect(url.pathname).toEndWith('/' + galleryImages[index][format] + '.' + format);
+      expect(new Headers(init.headers).get('x-amz-content-sha256')).toBe(galleryHashes[index][format]);
+      expect(init.body).toEqual(variant);
+      return new Response(null, { status: format === 'jxl' ? writtenStatus : 200 });
     }
     expect(url.origin + url.pathname).toStartWith(f.env.BUILDING_IMAGE_PUBLIC_BASE_URL!.replace(/\/$/, '') + '/');
-    const original = bytes.slice();
-    if (mismatch) original[original.length - 1] ^= 1;
-    return new Response(original, { headers: { 'Content-Type': 'image/webp' } });
+    const original = variant.slice();
+    if (mismatch && format === 'jxl') original[original.length - 1] ^= 1;
+    return new Response(original, { headers: { 'Content-Type': 'image/' + format } });
   });
   try {
-    return await adminUploadRequest(f, draft, bytes, target);
+    return await adminUploadRequest(f, draft, bytes, { target });
   } finally {
     network.mockRestore();
   }
 }
 
-async function completeImage(fixture: ReturnType<typeof setup>, token: string, id: string, bytes: Uint8Array, size = bytes.length) {
+async function completeImage(fixture: ReturnType<typeof setup>, token: string, id: string,
+  bytes = galleryWebps[0], failJxl = false) {
+  const jxl = galleryJxls[galleryWebps.indexOf(bytes)];
   const network = spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     expect(init?.redirect).toBe('manual');
     expect(String(input)).toStartWith(fixture.env.BUILDING_IMAGE_PUBLIC_BASE_URL!.replace(/\/$/, '') + '/buildings/');
-    return new Response(bytes, { headers: { 'content-type': 'image/webp' } });
+    const isJxl = String(input).endsWith('.jxl');
+    if (isJxl && failJxl) return new Response(null, { status: 404 });
+    return new Response(isJxl ? jxl : bytes, { headers: { 'content-type': isJxl ? 'image/jxl' : 'image/webp' } });
   });
   try {
-    return await authCall(fixture.store, { action: 'completeImageUpload', sessionId: token, uploadId: id, size });
+    return await authCall(fixture.store, {
+      action: 'completeImageUpload', sessionId: token, uploadId: id, sizes: { webp: bytes.length, jxl: jxl.length },
+    });
   } finally {
     network.mockRestore();
   }
 }
 
 async function permitImage(fixture: ReturnType<typeof setup>, token: string,
-  draftKey: string = crypto.randomUUID(), bytes = new Uint8Array(IMAGE_SIZE)) {
+  draftKey: string = crypto.randomUUID(), bytes = galleryWebps[0]) {
   const reserved = await authCall(fixture.store, {
     action: 'reserveImageUpload', sessionId: token, draftKey, requestKey: crypto.randomUUID(),
   });
   expect(reserved.status).toBe(200);
   const prepared = await authCall(fixture.store, {
-    action: 'prepareImageUpload', sessionId: token, uploadId: reserved.body.uploadId, hash: await sha256(bytes),
+    action: 'prepareImageUpload', sessionId: token, uploadId: reserved.body.uploadId,
+    hashes: galleryHashes[galleryWebps.indexOf(bytes)],
   });
   expect(prepared.status).toBe(200);
-  const key = new URL(prepared.body.put.url).pathname.slice(1);
+  const key = new URL(prepared.body.put.webp.url).pathname.slice(1);
   const completed = await completeImage(fixture, token, reserved.body.uploadId, bytes);
   expect(completed.status).toBe(200);
-  return { draftKey, key, filename: completed.body.filename as string };
+  return { draftKey, key, image: completed.body.image as BuildingImage };
 }
 
 async function submit(fixture: ReturnType<typeof setup>, token: string, draft: Awaited<ReturnType<typeof permitImage>>, name = 'Building') {
   return authCall(fixture.store, {
     action: 'createBuildingSubmission', sessionId: token,
-    payload: { draftKey: draft.draftKey, payload: { ...input(name), images: [draft.filename] } },
+    payload: { draftKey: draft.draftKey, payload: { ...input(name), images: [draft.image] } },
   });
 }
 
@@ -170,7 +196,7 @@ function storedSubmission(fixture: ReturnType<typeof setup>, id: string): Buildi
   return new BuildingStore(fixture.storage).submission(id)!;
 }
 
-test('validation rejects unknown fields, invalid dates and image paths instead of filenames', () => {
+test('validation rejects unknown fields, invalid dates and image paths', () => {
   expect(validateBuildingInput(input()).ok).toBe(true);
   expect(validateBuildingInput({ ...input(), images: ['/images/test.webp'] }).ok).toBe(false);
   expect(
@@ -573,7 +599,7 @@ test('building ID reservation also checks expired records awaiting cleanup', asy
     status: 'rejected',
     submitterUuid: OTHER_UUID,
     submitterName: 'Other',
-    payload: { ...input('Expired'), images: ['a'.repeat(64) + '.webp'] },
+    payload: { ...input('Expired'), images: [galleryImages[0]] },
     createdAt: past,
     expiresAt: past,
   };
@@ -626,7 +652,7 @@ test('adding the authenticated submitter cannot exceed the builder cap', async (
   const result = await authCall(f.store, {
     action: 'createBuildingSubmission',
     sessionId: token,
-    payload: { draftKey: draft.draftKey, payload: { ...input(), builders, images: [draft.filename] } },
+    payload: { draftKey: draft.draftKey, payload: { ...input(), builders, images: [draft.image] } },
   });
   expect(result.status).toBe(422);
 });
@@ -718,7 +744,7 @@ test('admin HTTP adapter rejects malformed, cross-site and unsupported requests 
   }
 });
 
-test('completed uploads stay within a draft, survive retries and publish ordered hashes under the reserved ID', async () => {
+test('completed uploads stay within a draft, survive retries and publish ordered image pairs under the reserved ID', async () => {
   const f = setup();
   const { token } = await seedSession(f.values);
   const other = await seedSession(f.values, 0, OTHER_UUID);
@@ -726,10 +752,10 @@ test('completed uploads stay within a draft, survive retries and publish ordered
   const reserve = (requestKey: string, draft = draftKey) => authCall(f.store, {
     action: 'reserveImageUpload', sessionId: token, draftKey: draft, requestKey,
   });
-  const bytes = [new Uint8Array(IMAGE_SIZE), new Uint8Array(IMAGE_SIZE).fill(1)];
-  const hashes = await Promise.all(bytes.map(sha256));
-  const prepare = (uploadId: string, hash: string) => authCall(f.store, {
-    action: 'prepareImageUpload', sessionId: token, uploadId, hash,
+  const bytes = galleryWebps;
+  const hashes = galleryHashes;
+  const prepare = (uploadId: string, hashes: typeof galleryHashes[number]) => authCall(f.store, {
+    action: 'prepareImageUpload', sessionId: token, uploadId, hashes,
   });
   const complete = (id: string, data = bytes[0]) => completeImage(f, token, id, data);
   const firstRequest = crypto.randomUUID();
@@ -739,48 +765,50 @@ test('completed uploads stay within a draft, survive retries and publish ordered
   expect((await complete(first.body.uploadId)).status).toBe(409);
   const signed = await prepare(first.body.uploadId, hashes[0]);
   expect(Object.keys(signed.body)).toEqual(['put']);
-  const [, , id] = new URL(signed.body.put.url).pathname.split('/');
+  const [, , id] = new URL(signed.body.put.webp.url).pathname.split('/');
   expect(id).toMatch(/^[0-9a-f]{32}$/);
-  expect(signed.body.put.headers['x-amz-content-sha256']).toBe(hashes[0]);
+  expect(signed.body.put.webp.headers['x-amz-content-sha256']).toBe(hashes[0].webp);
+  expect(signed.body.put.jxl.headers['x-amz-content-sha256']).toBe(hashes[0].jxl);
   expect((await prepare(first.body.uploadId, hashes[1])).status).toBe(409);
   expect((await completeImage(f, other.token, first.body.uploadId, bytes[0])).status).toBe(409);
   expect((await complete(first.body.uploadId, bytes[1])).status).toBe(502);
+  expect((await completeImage(f, token, first.body.uploadId, bytes[0], true)).status).toBe(502);
   const completed = await complete(first.body.uploadId);
   expect(completed.status).toBe(200);
   expect(await complete(first.body.uploadId)).toEqual(completed);
-  expect((await reserve(firstRequest)).body).toEqual({ filename: hashes[0] + '.webp', expiresAt: expect.any(Number) });
+  expect((await reserve(firstRequest)).body).toEqual({ image: galleryImages[0], expiresAt: expect.any(Number) });
   const second = await reserve(crypto.randomUUID());
   const secondPut = await prepare(second.body.uploadId, hashes[1]);
-  expect(new URL(secondPut.body.put.url).pathname).toBe(`/buildings/${id}/${hashes[1]}.webp`);
+  expect(new URL(secondPut.body.put.webp.url).pathname).toBe(`/buildings/${id}/${hashes[1].webp}.webp`);
   expect((await complete(second.body.uploadId, bytes[1])).status).toBe(200);
   const otherDraft = crypto.randomUUID();
   const separate = await reserve(crypto.randomUUID(), otherDraft);
   expect((await complete(separate.body.uploadId)).status).toBe(409);
   const separatePut = await prepare(separate.body.uploadId, hashes[0]);
-  expect(new URL(separatePut.body.put.url).pathname).not.toBe(new URL(signed.body.put.url).pathname);
-  const filenames = hashes.map(hash => `${hash}.webp`);
-  const payload = { ...input(), images: filenames };
-  const create = (sessionId: string, key?: string, images = filenames) => authCall(f.store, {
+  expect(new URL(separatePut.body.put.webp.url).pathname).not.toBe(new URL(signed.body.put.webp.url).pathname);
+  const images = galleryImages.slice(0, 2);
+  const payload = { ...input(), images };
+  const create = (sessionId: string, key?: string, gallery = images) => authCall(f.store, {
     action: 'createBuildingSubmission',
     sessionId,
-    payload: { payload: { ...payload, images }, draftKey: key },
+    payload: { payload: { ...payload, images: gallery }, draftKey: key },
   });
   expect(await create(token)).toEqual({ status: 422, body: { error: 'invalid_draft' } });
   expect((await create(other.token, draftKey)).status).toBe(422);
   expect((await create(token, otherDraft)).status).toBe(422);
-  expect((await create(token, draftKey, [hashes[1] + '.jpg'])).status).toBe(422);
+  expect((await create(token, draftKey, [{ ...images[1], jxl: images[0].jxl }])).status).toBe(422);
   const submitted = await create(token, draftKey);
   const summary = { id, name: payload.name, status: 'pending' };
   expect(submitted).toEqual({ status: 201, body: { playerUuid: PLAYER_UUID, submission: summary } });
   const submission = storedSubmission(f, id);
-  expect(submission.payload.images).toEqual(filenames);
+  expect(submission.payload.images).toEqual(images);
   const history = (sessionId: string) => authCall(f.store, { action: 'listBuildingSubmissions', sessionId });
   expect((await history(token)).body).toEqual({ playerUuid: PLAYER_UUID, submissions: [summary] });
   expect((await history(other.token)).body).toEqual({ playerUuid: OTHER_UUID, submissions: [] });
   const route = '/building-submissions/' + id + '/approve';
   expect((await admin(f, route, 'PUT', { payload: input() }, submission)).status).toBe(422);
   expect((await admin(f, route, 'PUT', {
-    payload: { ...payload, images: ['f'.repeat(64) + '.webp'] },
+    payload: { ...payload, images: [{ ...images[0], webp: 'f'.repeat(64) }] },
   }, submission)).status).toBe(422);
   f.db.exec('DELETE FROM image_uploads');
   expect(await create(token, draftKey)).toEqual({ status: 200, body: submitted.body });
@@ -788,14 +816,13 @@ test('completed uploads stay within a draft, survive retries and publish ordered
   expect(f.db.query('SELECT COUNT(*) AS n FROM submissions').get()).toEqual({ n: 1 });
   expect(f.db.query('SELECT COUNT(*) AS n FROM image_uploads').get()).toEqual({ n: 0 });
 
-  const ordered = [...filenames].reverse();
+  const ordered = [...images].reverse();
   const approved = await admin(f, route, 'PUT', { payload: { ...payload, images: ordered } }, submission);
   expect(approved.status).toBe(200);
   expect(approved.body).toEqual({ building: { id, ...payload, images: ordered } });
   expect(storedSubmission(f, id).payload.images).toEqual(ordered);
   const stored = JSON.parse((f.db.query('SELECT document FROM buildings WHERE id=?').get(id) as { document: string }).document);
-  expect(stored.images).toBeUndefined();
-  expect(stored.imageHashes).toEqual([...hashes].reverse());
+  expect(stored.images).toEqual(ordered);
   const list = await handlePublicBuildingsRoute('/buildings', new Request('https://data.example/api/buildings?locale=en'), f.env);
   expect((await list!.json()).buildings[0].images).toEqual(ordered);
   f.db.exec('UPDATE building_publication SET next_attempt=0');
@@ -810,18 +837,18 @@ test('removing the last gallery reference waits for publication, survives reatta
   const source = (await admin(f, '/buildings', 'POST', input('First'))).body;
   const hash = await sha256(galleryWebps[0]);
   const key = `buildings/${source.id}/${hash}.webp`;
-  const filename = `${hash}.webp`;
+  const image = galleryImages[0];
   const path = '/buildings/' + source.id;
   const draft = crypto.randomUUID();
   let current: Building = source;
-  const saveGallery = async (images: string[], imageDraft?: string) => {
+  const saveGallery = async (images: BuildingImage[], imageDraft?: string) => {
     const response = await admin(f, path, 'PUT', { ...input('First'), images }, current, imageDraft);
     if (response.status === 200) current = response.body;
     return response;
   };
   const attach = async () => {
     expect((await adminUpload(f, draft, source.id)).status).toBe(200);
-    const response = await saveGallery([filename], draft);
+    const response = await saveGallery([image], draft);
     expect(response.status).toBe(200);
     f.db.exec('UPDATE image_uploads SET expires_at=0');
   };
@@ -854,25 +881,25 @@ test('removing the last gallery reference waits for publication, survives reatta
     expect(init?.redirect).toBe('manual');
     expect(request).toBeInstanceOf(Request);
     const req = request as Request;
-    expect(req.url).toBe('https://bucket.example/' + key);
+    expect([key, `buildings/${source.id}/${image.jxl}.jxl`].some(object => req.url === 'https://bucket.example/' + object)).toBe(true);
     expect(req.method).toBe('DELETE');
     expect(req.headers.get('Authorization')).toContain('/test-region/s3/aws4_request');
     attempts++;
     return new Response(null, { status: attempts === 1 ? 503 : 404 });
   });
   try {
-    f.db.exec('UPDATE building_image_objects SET due=0');
+    f.db.exec("UPDATE building_image_objects SET due=0 WHERE state<>'deleted'");
     await sweep();
     expect(state().state).toBe('deleting');
-    expect((await adminUploadRequest(f, draft, galleryWebps[0], source.id)).status).toBe(409);
+    expect((await adminUploadRequest(f, draft, galleryWebps[0], { target: source.id })).status).toBe(409);
     expect((await admin(f)).body[0].images).toEqual(input().images);
-    f.db.exec('UPDATE building_image_objects SET due=0');
+    f.db.exec("UPDATE building_image_objects SET due=0 WHERE state<>'deleted'");
     await sweep();
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(3);
     expect(state()).toEqual({ state: 'deleted', due: null });
-    expect((await saveGallery([filename], draft)).status).toBe(422);
+    expect((await saveGallery([image], draft)).status).toBe(422);
     await sweep();
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(3);
   } finally {
     network.mockRestore();
   }
@@ -889,13 +916,13 @@ test('an incomplete upload expires independently of a rejected submission’s im
   const reserve = await authCall(f.store, { action: 'reserveImageUpload', sessionId: token,
     draftKey: crypto.randomUUID(), requestKey: crypto.randomUUID() });
   const abandoned = await authCall(f.store, { action: 'prepareImageUpload', sessionId: token,
-    uploadId: reserve.body.uploadId, hash: 'f'.repeat(64) });
+    uploadId: reserve.body.uploadId, hashes: { webp: 'f'.repeat(64), jxl: 'a'.repeat(64) } });
   expect(abandoned.status).toBe(200);
   f.db.exec('UPDATE image_uploads SET expires_at=0');
   await f.store.alarm();
   const due = (key: string) => (f.db.query('SELECT due FROM building_image_objects WHERE object_key=?')
     .get(key) as { due: number | null }).due;
-  expect(due(new URL(abandoned.body.put.url).pathname.slice(1))).toBeNumber();
+  expect(due(new URL(abandoned.body.put.webp.url).pathname.slice(1))).toBeNumber();
   expect(due(approvedDraft.key)).toBeNull();
   const reviewed = await admin(f, '/building-submissions/' + id + '/reject', 'PUT', { reviewNote: 'Retry' }, storedSubmission(f, id));
   expect(reviewed.status).toBe(200);
@@ -911,19 +938,26 @@ test('an incomplete upload expires independently of a rejected submission’s im
 test('admin image uploads reserve one building ID and require verified uploads from the same draft', async () => {
   const f = setup();
   const draft = crypto.randomUUID();
-  expect((await adminUploadRequest(f, draft, galleryWebps[0], undefined, 'https://elsewhere.example')).status).toBe(403);
+  expect((await adminUploadRequest(f, draft, galleryWebps[0], { origin: 'https://elsewhere.example' })).status).toBe(403);
   expect((await adminUploadRequest(f, draft, Uint8Array.of(0))).status).toBe(422);
+  const webpWithoutPixels = galleryWebps[1].slice(0, 30);
+  const header = new DataView(webpWithoutPixels.buffer);
+  header.setUint32(4, webpWithoutPixels.length - 8, true);
+  header.setUint32(16, 10, true);
+  expect((await adminUploadRequest(f, draft, webpWithoutPixels)).status).toBe(422);
+  const truncatedJxl = galleryJxls[0].slice(0, -1);
+  expect((await adminUploadRequest(f, draft, galleryWebps[0], { jxl: truncatedJxl })).status).toBe(422);
   expect((await adminUpload(f, draft, undefined, galleryWebps[0], 503)).status).toBe(502);
   expect((await adminUpload(f, draft, undefined, galleryWebps[0], 200, true)).status).toBe(502);
   const first = await adminUpload(f, draft);
   const second = await adminUpload(f, draft, undefined, galleryWebps[1]);
   expect(first.status).toBe(200);
   expect(second.status).toBe(200);
-  expect(first.body.filename).toBe((await sha256(galleryWebps[0])) + '.webp');
+  expect(first.body.image).toEqual(galleryImages[0]);
   expect(await adminUploadRequest(f, draft, galleryWebps[0])).toEqual(first);
   const { buildingId } = first.body;
   expect(second.body.buildingId).toBe(buildingId);
-  const images = [second.body.filename, first.body.filename];
+  const images = [second.body.image, first.body.image];
   const payload = { ...input(), images };
   expect((await admin(f, '/buildings', 'POST', payload)).status).toBe(422);
   expect((await admin(f, '/buildings', 'POST', payload, undefined, draft, 'other@example.com')).status).toBe(422);
@@ -939,11 +973,11 @@ test('admin image uploads reserve one building ID and require verified uploads f
   const nextDraft = crypto.randomUUID();
   const added = await adminUpload(f, nextDraft, buildingId, galleryWebps[2]);
   expect(added.status).toBe(200);
-  expect((await adminUploadRequest(f, nextDraft, galleryWebps[0], 'a'.repeat(32))).status).toBe(409);
-  expect((await admin(f, path, 'PUT', { ...input(), images: [images[1], added.body.filename] }, trimmed.body, crypto.randomUUID())).status).toBe(422);
+  expect((await adminUploadRequest(f, nextDraft, galleryWebps[0], { target: 'a'.repeat(32) })).status).toBe(409);
+  expect((await admin(f, path, 'PUT', { ...input(), images: [images[1], added.body.image] }, trimmed.body, crypto.randomUUID())).status).toBe(422);
   expect((await admin(f, path, 'PUT', { ...input(), images: [images[1], 'e'.repeat(64) + '.webp'] }, trimmed.body, nextDraft)).status).toBe(422);
-  const edited = await admin(f, path, 'PUT', { ...input(), images: [added.body.filename, images[1]] }, trimmed.body, nextDraft);
-  expect(edited.body.images).toEqual([added.body.filename, images[1]]);
+  const edited = await admin(f, path, 'PUT', { ...input(), images: [added.body.image, images[1]] }, trimmed.body, nextDraft);
+  expect(edited.body.images).toEqual([added.body.image, images[1]]);
 });
 
 test('review rejects unexpected fields before changing the saved submission', async () => {
@@ -991,7 +1025,7 @@ test('admins can add, reorder and remove submission images before approval', asy
   expect(first.status).toBe(200);
   expect(second.status).toBe(200);
   const path = '/building-submissions/' + submission.id;
-  const images = [second.body.filename, first.body.filename, playerDraft.filename];
+  const images = [second.body.image, first.body.image, playerDraft.image];
   const payload = { ...submission.payload, images };
   expect((await admin(f, path, 'PUT', { payload }, submission, draft, 'other@example.com')).status).toBe(422);
   const updated = await admin(f, path, 'PUT', { payload }, submission, draft);
@@ -999,7 +1033,7 @@ test('admins can add, reorder and remove submission images before approval', asy
   expect(updated.body.submission.payload.images).toEqual(images);
   expect((await admin(f, path + '/reject', 'PUT', { reviewNote: 'Retry' })).status).toBe(428);
   expect((await admin(f, path + '/reject', 'PUT', { reviewNote: 'Retry' }, submission)).status).toBe(412);
-  const ordered = [first.body.filename, second.body.filename];
+  const ordered = [first.body.image, second.body.image];
   const approved = await admin(f, path + '/approve', 'PUT', {
     payload: { ...payload, images: ordered },
   }, updated.body.submission);
@@ -1016,8 +1050,8 @@ test('completed uploads and saved submissions remain usable across public base U
   const building = (await admin(f, '/buildings', 'POST', input('Admin'))).body as Building;
   const adminDraft = crypto.randomUUID();
   const uploaded = await adminUpload(f, adminDraft, building.id);
-  const key = 'buildings/' + building.id + '/' + uploaded.body.filename;
-  const saved = await admin(f, '/buildings/' + building.id, 'PUT', { ...input('Admin'), images: [uploaded.body.filename] }, building, adminDraft);
+  const key = 'buildings/' + building.id + '/' + uploaded.body.image.webp + '.webp';
+  const saved = await admin(f, '/buildings/' + building.id, 'PUT', { ...input('Admin'), images: [uploaded.body.image] }, building, adminDraft);
   expect(saved.status).toBe(200);
   const env = { ...f.env, BUILDING_IMAGE_PUBLIC_BASE_URL: base };
   const store = new AuthStore({ storage: f.storage } as DurableObjectState, env);
@@ -1033,13 +1067,13 @@ test('completed uploads and saved submissions remain usable across public base U
   expect(f.db.query('SELECT owner FROM building_image_refs WHERE object_key=? AND owner=?').get(key, 'building/' + building.id))
     .toEqual({ owner: 'building/' + building.id });
   const upload = f.db.query('SELECT id FROM image_uploads WHERE draft_key=?').get(draft.draftKey) as { id: string };
-  const completed = await completeImage({ ...f, store, env }, token, upload.id, new Uint8Array(IMAGE_SIZE));
+  const completed = await completeImage({ ...f, store, env }, token, upload.id, galleryWebps[0]);
   expect(completed.status).toBe(200);
-  expect(completed.body.filename).toBe(draft.filename);
+  expect(completed.body.image).toEqual(draft.image);
   const submitted = await submit({ ...f, store }, token, draft);
   expect(submitted.status).toBe(201);
   const submission = storedSubmission(f, submitted.body.submission.id);
   const approved = await admin(f, `/building-submissions/${submission.id}/approve`, 'PUT', {}, submission);
   expect(approved.status).toBe(200);
-  expect(approved.body.building.images).toEqual([draft.filename]);
+  expect(approved.body.building.images).toEqual([draft.image]);
 });

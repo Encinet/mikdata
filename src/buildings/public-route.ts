@@ -72,7 +72,7 @@ export async function handlePublicBuildingsRoute(
       ...query,
       limit: query.limit === null ? '' : String(query.limit),
     });
-    const cacheVersion = query.limit === null ? 'v12' : 'v13';
+    const cacheVersion = 'v14';
     const key = `${cacheVersion}:${encodeURIComponent(state.publicBaseUrl ?? '')}:building-list:${catalog.snapshot.version}:${params}`;
     const memoryKey = `${state.scope}:${key}`;
     let body = responses.get(memoryKey);

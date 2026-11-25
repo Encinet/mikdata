@@ -303,11 +303,19 @@ components:
           type: array
           maxItems: 15
           description: >-
-            按展示顺序排列的 WebP 原图文件名，可为空数组。第一张图为封面。
-            原图地址为 `{imageBaseUrl}/buildings/{id}/{filename}`。
+            按展示顺序排列的图片，可为空数组。第一张图为封面。
+            每张图片分别提供 JPEG XL 和 WebP 的 SHA-256，地址为 `{imageBaseUrl}/buildings/{id}/{hash}.{format}`。
           items:
-            type: string
-            pattern: '^[0-9a-f]{64}\.webp$'
+            type: object
+            additionalProperties: false
+            required: [webp, jxl]
+            properties:
+              webp:
+                type: string
+                pattern: '^[0-9a-f]{64}$'
+              jxl:
+                type: string
+                pattern: '^[0-9a-f]{64}$'
         buildDate:
           type: string
           format: date

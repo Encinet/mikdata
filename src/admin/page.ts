@@ -25,7 +25,7 @@ function htmlHeaders(nonce: string, imageOrigin?: string): HeadersInit {
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'strict-origin-when-cross-origin',
     'Content-Security-Policy':
-      `default-src 'self'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; img-src 'self'${imageOrigin ? ' ' + imageOrigin : ''}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`,
+      `default-src 'self'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; worker-src 'self'; connect-src 'self'; img-src 'self'${imageOrigin ? ' ' + imageOrigin : ''}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`,
   };
 }
 

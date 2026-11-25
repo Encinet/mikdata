@@ -1,4 +1,4 @@
-import { MAX_BUILDING_IMAGE_BYTES, MAX_BUILDING_IMAGE_DIMENSION } from '../../buildings/images/validation';
+import { MAX_BUILDING_IMAGE_BYTES, MAX_BUILDING_IMAGE_DIMENSION } from '../../buildings/images/limits';
 import { MAX_BUILDING_IMAGES } from '../../buildings/validation';
 
 export const ADMIN_GALLERY = /* html */ `
@@ -20,7 +20,7 @@ export const ADMIN_IMAGE_PREVIEW = /* html */ `
 <dialog class="overlay image-preview" id="image-preview" aria-labelledby="image-preview-title">
   <div class="image-preview-panel">
     <div class="gallery-head"><h2 id="image-preview-title"></h2><button type="button" class="btn ghost sm" id="image-preview-close">关闭</button></div>
-    <img id="image-preview-img" alt="">
+    <picture><source id="image-preview-jxl" type="image/jxl"><img id="image-preview-img" alt=""></picture>
   </div>
 </dialog>
 `;
@@ -49,7 +49,10 @@ $('image-preview-close').addEventListener('click', () => imagePreview.close());
 imagePreview.addEventListener('click', (event) => {
   if (event.target === imagePreview) imagePreview.close();
 });
-imagePreview.addEventListener('close', () => $('image-preview-img').removeAttribute('src'));
+imagePreview.addEventListener('close', () => {
+  $('image-preview-jxl').removeAttribute('srcset');
+  $('image-preview-img').removeAttribute('src');
+});
 
 function resetGallery(images, target = null) {
   gallery.images = images;
@@ -62,20 +65,35 @@ function resetGallery(images, target = null) {
   renderGallery();
 }
 
-function buildingImageUrl(id, filename) {
-  return imageBaseUrl && id && filename ? imageBaseUrl + '/buildings/' + id + '/' + filename : '';
+function buildingImageUrl(id, hash, format) {
+  return imageBaseUrl && id && hash ? imageBaseUrl + '/buildings/' + id + '/' + hash + '.' + format : '';
 }
+
+function buildingPicture(id, image, attributes) {
+  return '<picture><source type="image/jxl" srcset="' + esc(buildingImageUrl(id, image.jxl, 'jxl')) + '">' +
+    '<img ' + attributes + ' src="' + esc(buildingImageUrl(id, image.webp, 'webp')) + '" alt=""></picture>';
+}
+
+function fallbackToWebp(event) {
+  const image = event.target;
+  if (!(image instanceof HTMLImageElement)) return;
+  const source = image.closest('picture')?.querySelector('source[type="image/jxl"]');
+  if (source && image.currentSrc === source.srcset) source.removeAttribute('srcset');
+}
+
+document.addEventListener('error', fallbackToWebp, true);
 
 function renderGallery() {
   const count = gallery.images.length;
   $('gallery-count').textContent = count + ' / ' + maxGalleryImages;
   $('gallery-empty').hidden = count > 0;
-  galleryList.innerHTML = gallery.images.map((filename, index) => {
+  galleryList.innerHTML = gallery.images.map((image, index) => {
     const label = index === 0 ? '封面' : '第 ' + (index + 1) + ' 张';
     const attrs = ' type="button" data-index="' + index + '"';
     return '<li class="gallery-tile" data-index="' + index + '" draggable="true">' +
       '<button class="gallery-preview"' + attrs + ' data-gallery="preview" aria-label="预览' + label + '">' +
-      '<img draggable="false" loading="lazy" decoding="async" src="' + esc(buildingImageUrl(gallery.buildingId, filename)) + '" alt="">' + (index === 0 ? '<span>封面</span>' : '') + '</button>' +
+      buildingPicture(gallery.buildingId, image, 'draggable="false" loading="lazy" decoding="async"') +
+      (index === 0 ? '<span>封面</span>' : '') + '</button>' +
       '<div class="gallery-actions">' +
       '<button class="btn ghost sm"' + attrs + ' data-gallery="earlier" aria-label="前移' + label + '"' +
       (index === 0 ? ' disabled' : '') + '>←</button>' +
@@ -116,7 +134,8 @@ galleryList.addEventListener('click', (event) => {
     const title = index === 0 ? '封面预览' : '第 ' + (index + 1) + ' 张图片';
     $('image-preview-title').textContent = title;
     $('image-preview-img').alt = title;
-    $('image-preview-img').src = buildingImageUrl(gallery.buildingId, gallery.images[index]);
+    $('image-preview-jxl').srcset = buildingImageUrl(gallery.buildingId, gallery.images[index].jxl, 'jxl');
+    $('image-preview-img').src = buildingImageUrl(gallery.buildingId, gallery.images[index].webp, 'webp');
     imagePreview.showModal();
   } else if (action === 'remove') {
     gallery.images.splice(index, 1);
@@ -191,36 +210,44 @@ async function addImages(files) {
   updateEditorControls();
   showGalleryErrors([]);
   let added = 0;
+  let worker;
   try {
     for (const [index, file] of files.entries()) {
       if (gallery.images.length >= maxGalleryImages) {
         errors.push('最多保留 ' + maxGalleryImages + ' 张图片，剩余 ' + (files.length - index) + ' 张未上传。');
         break;
       }
-      $('gallery-status').textContent = '正在上传 ' + (index + 1) + ' / ' + files.length + ' · ' + file.name;
+      const progress = (index + 1) + ' / ' + files.length + ' · ' + file.name;
+      $('gallery-status').textContent = '正在转换 ' + progress;
       try {
-        const body = await encodeGalleryImage(file);
+        worker ??= new Worker('/building-codec/encode-building-image.js', { type: 'module' });
+        const body = await encodeGalleryImage(file, worker);
+        $('gallery-status').textContent = '正在上传 ' + progress;
         const target = gallery.target ? '?building=' + encodeURIComponent(gallery.target) : '';
         const response = await fetch('/admin/api/building-images' + target, {
           method: 'POST',
-          headers: { 'Content-Type': 'image/webp', 'X-Building-Draft': gallery.draft },
+          headers: { 'X-Building-Draft': gallery.draft },
           body,
         });
         const data = await readJson(response);
-        if (!response.ok || !data.filename || !data.buildingId) throw new Error(imageUploadError(data.error));
-        if (gallery.images.includes(data.filename)) {
+        if (!response.ok || !data.image?.webp || !data.image?.jxl || !data.buildingId)
+          throw new Error(imageUploadError(data.error));
+        if (gallery.images.some(image => image.webp === data.image.webp && image.jxl === data.image.jxl)) {
           errors.push(file.name + ' · 图片已在图册中');
           continue;
         }
         gallery.buildingId = data.buildingId;
-        gallery.images.push(data.filename);
+        gallery.images.push(data.image);
         added++;
         renderGallery();
       } catch (error) {
+        worker?.terminate();
+        worker = undefined;
         errors.push(file.name + ' · ' + (error.message || '上传失败'));
       }
     }
   } finally {
+    worker?.terminate();
     gallery.uploading = false;
     updateEditorControls();
     $('gallery-status').textContent = added ? '已添加 ' + added + ' 张图片。' : '';
@@ -228,7 +255,7 @@ async function addImages(files) {
   }
 }
 
-async function encodeGalleryImage(file) {
+async function encodeGalleryImage(file, worker) {
   let bitmap;
   try {
     bitmap = await createImageBitmap(file);
@@ -236,20 +263,60 @@ async function encodeGalleryImage(file) {
     throw new Error('无法读取此图片格式');
   }
   const scale = Math.min(1, ${MAX_BUILDING_IMAGE_DIMENSION} / Math.max(bitmap.width, bitmap.height));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  const tryLossless = file.type === 'image/png' && file.size <= bitmap.width * bitmap.height;
+  let context;
   try {
-    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    for (const quality of [0.86, 0.72, 0.55]) {
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/webp', quality));
-      if (!blob || blob.type !== 'image/webp') throw new Error('当前浏览器无法生成 WebP');
-      if (blob.size <= ${MAX_BUILDING_IMAGE_BYTES}) return blob;
-    }
-    throw new Error('压缩后超过 4 MiB');
+    context = drawGalleryImage(bitmap, bitmap.width * scale, bitmap.height * scale);
   } finally {
     bitmap.close();
   }
+  try {
+    while (true) {
+      const { canvas } = context;
+      const { webp, jxl } = await encodeGalleryPixels(worker, context, tryLossless);
+      const size = webp.byteLength + jxl.byteLength;
+      if (size <= ${MAX_BUILDING_IMAGE_BYTES}) {
+        const form = new FormData();
+        form.set('webp', new Blob([webp], { type: 'image/webp' }), 'building.webp');
+        form.set('jxl', new Blob([jxl], { type: 'image/jxl' }), 'building.jxl');
+        return form;
+      }
+
+      const scale = 0.95 * Math.sqrt(${MAX_BUILDING_IMAGE_BYTES} / size);
+      const width = Math.max(1, Math.round(canvas.width * scale));
+      const height = Math.max(1, Math.round(canvas.height * scale));
+      if (width === canvas.width && height === canvas.height)
+        throw new Error('WebP 和 JPEG XL 合计超过 4 MiB');
+      context = drawGalleryImage(canvas, width, height);
+      canvas.width = 0;
+    }
+  } finally {
+    context.canvas.width = 0;
+  }
+}
+
+function drawGalleryImage(source, width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('无法处理图片');
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return context;
+}
+
+function encodeGalleryPixels(worker, context, tryLossless) {
+  const pixels = context.getImageData(0, 0, context.canvas.width, context.canvas.height);
+  const listeners = new AbortController();
+  const options = { signal: listeners.signal };
+  return new Promise((resolve, reject) => {
+    const failed = () => reject(new Error('无法生成 WebP 或 JPEG XL'));
+    worker.addEventListener('error', failed, options);
+    worker.addEventListener('messageerror', failed, options);
+    worker.addEventListener('message', ({ data }) => data ? resolve(data) : failed(), options);
+    worker.postMessage({ pixels, tryLossless }, [pixels.data.buffer]);
+  }).finally(() => listeners.abort());
 }
 
 function showGalleryErrors(errors) {
@@ -264,7 +331,7 @@ function showGalleryErrors(errors) {
 function imageUploadError(code) {
   return {
     image_upload_not_configured: '图片存储尚未配置',
-    image_too_large: '图片超过 4 MiB',
+    image_too_large: 'WebP 和 JPEG XL 合计超过 4 MiB',
     invalid_image: '图片内容无效',
     image_draft_unavailable: '草稿已失效，请重新打开编辑窗口',
     image_unavailable: '图片暂不可用，请稍后重试',

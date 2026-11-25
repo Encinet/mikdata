@@ -233,10 +233,9 @@ function renderSubmissions() {
   updateListControls();
 }
 
-function thumbnail(id, filename) {
-  const url = buildingImageUrl(id, filename);
-  return url
-    ? '<img class="record-thumb" src="' + esc(url) + '" alt="" loading="lazy" decoding="async">'
+function thumbnail(id, image) {
+  return image && imageBaseUrl
+    ? buildingPicture(id, image, 'class="record-thumb" loading="lazy" decoding="async"')
     : '<span class="record-thumb record-thumb-empty">${icon('building')}</span>';
 }
 

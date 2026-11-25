@@ -2,6 +2,8 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "mikdata",
 	"main": "src/index.ts",
+	"build": { "command": "bun scripts/prepare-admin-images.ts" },
+	"assets": { "directory": "./dist/admin-assets" },
 	"compatibility_date": "2026-06-26",
 	"workers_dev": false,
 	"routes": [

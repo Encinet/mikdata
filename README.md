@@ -29,11 +29,11 @@ The S3 credentials need read, write and delete access under `buildings/`. The pu
 
 Upload and reorder images in the admin editor. The first image is the cover. For JSON imports, omit `id`, use `"images": []`, and add files in the editor afterward.
 
+The browser resizes the longest edge to at most 3840 pixels and encodes WebP and progressive JPEG XL from the same pixels. The two files share a 4 MiB upload budget. The Worker checks the file structure, matching dimensions, and SHA-256 digests. Each catalog image contains `webp` and `jxl` digests. Object storage serves both files directly at `{imageBaseUrl}/buildings/{id}/{digest}.{format}`.
+
 Each member account can have 10 pending submissions. Completed reviews stay visible for 14 days. Unused uploads expire after 24 hours. Unreferenced images become eligible for deletion 14 days after the public catalog is current and the last reference is gone.
 
 Public buildings are served from KV snapshots. Publication runs at most once every five minutes, and KV propagation and cache expiry may add delay.
-
-An existing SQLite store must match [the current schema](./src/buildings/schema.ts) before deployment.
 
 ## Sponsors
 

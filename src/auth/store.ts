@@ -1,7 +1,8 @@
-import { imageFilename, imageKeyHash, isImageDraftKey } from '../buildings/images/keys';
+import { isImageDraftKey, isImagePair, type ImagePair } from '../buildings/images/keys';
 import { ADMIN_IMAGE_PATH, uploadAdminBuildingImage } from '../buildings/images/admin-upload';
-import { imageStorageConfig, prepareImagePut, verifyOriginal } from '../buildings/images/storage';
-import { MAX_BUILDING_IMAGE_BYTES } from '../buildings/images/validation';
+import { imageStorageConfig, prepareImagePut, readBuildingImage } from '../buildings/images/storage';
+import { MAX_BUILDING_IMAGE_BYTES } from '../buildings/images/limits';
+import { validImagePair } from '../buildings/images/validation';
 import { collectBuildingImages, UnavailableBuildingImage } from '../buildings/images/lifecycle';
 import { BuildingStore } from '../buildings/store';
 import { initializeBuildingStorage } from '../buildings/schema';
@@ -1290,7 +1291,7 @@ export class AuthStore implements DurableObject {
   }
 
   private async imageUpload(body: StoreRequest): Promise<{status: number; body: unknown}> {
-    const { action, draftKey, requestKey, hash, size } = body;
+    const { action, draftKey, requestKey, hashes, sizes } = body;
     const uploadId = asString(body.uploadId);
     const session = await this.readValidSession(asString(body.sessionId));
     if (!session) return { status: 401, body: { error: 'unauthenticated' } };
@@ -1298,20 +1299,23 @@ export class AuthStore implements DurableObject {
     if (!eligibleMemberAccount(account)) return { status: 403, body: { error: 'member_required' } };
     const config = imageStorageConfig(this.env);
     if (!config) return { status: 503, body: { error: 'image_upload_not_configured' } };
-    let verifiedKey: string | null = null;
+    let verifiedKeys: ImagePair<string> | null = null;
     if (action === 'completeImageUpload') {
-      if (typeof size !== 'number' || !Number.isInteger(size) || size < 1 || size > MAX_BUILDING_IMAGE_BYTES)
+      const isSize = (value: unknown): value is number => typeof value === 'number' &&
+        Number.isInteger(value) && value >= 1 && value <= MAX_BUILDING_IMAGE_BYTES;
+      if (!isImagePair(sizes, isSize) || sizes.webp + sizes.jxl > MAX_BUILDING_IMAGE_BYTES)
         return { status: 422, body: { error: 'invalid_image' } };
-      const key = this.buildings.uploadKey(account.playerUuid, uploadId);
-      if (!key) return { status: 409, body: { error: 'upload_expired' } };
+      const keys = this.buildings.uploadKeys(account.playerUuid, uploadId);
+      if (!keys) return { status: 409, body: { error: 'upload_expired' } };
       try {
-        const original = await fetch(config.publicBaseUrl + '/' + key, {
-          cache: 'no-store', redirect: 'manual', signal: AbortSignal.timeout(15_000),
-        });
-        await verifyOriginal(original, imageKeyHash(key), size);
-        verifiedKey = key;
+        const [webp, jxl] = await Promise.all([
+          readBuildingImage(config, keys.webp, sizes.webp),
+          readBuildingImage(config, keys.jxl, sizes.jxl),
+        ]);
+        if (!(await validImagePair({ webp, jxl }))) return { status: 422, body: { error: 'invalid_image' } };
+        verifiedKeys = keys;
       } catch (error) {
-        console.warn('Building image verification failed', key, error instanceof Error ? error.message : 'storage error');
+        console.warn('Building image verification failed', keys, error instanceof Error ? error.message : 'storage error');
         return { status: 502, body: { error: 'image_upload_unavailable' } };
       }
     }
@@ -1322,14 +1326,16 @@ export class AuthStore implements DurableObject {
       if (!eligibleMemberAccount(currentAccount))
         return { status: 403, body: { error: 'member_required' } };
       if (action === 'prepareImageUpload') {
-        const key = typeof hash === 'string' && this.buildings.prepareUpload(account.playerUuid, uploadId, hash);
-        if (!key) return { status: 409, body: { error: 'upload_expired' } };
-        return { status: 200, body: { put: await prepareImagePut(config, key) } };
+        const keys = isImagePair(hashes, (value): value is string => typeof value === 'string') &&
+          this.buildings.prepareUpload(account.playerUuid, uploadId, hashes);
+        if (!keys) return { status: 409, body: { error: 'upload_expired' } };
+        const [webp, jxl] = await Promise.all([prepareImagePut(config, keys.webp), prepareImagePut(config, keys.jxl)]);
+        return { status: 200, body: { put: { webp, jxl } } };
       }
-      if (verifiedKey !== null) {
-        const expiresAt = this.buildings.completeUpload(account.playerUuid, uploadId, verifiedKey);
-        return expiresAt
-          ? { status: 200, body: { filename: imageFilename(verifiedKey), expiresAt } }
+      if (verifiedKeys !== null) {
+        const completed = this.buildings.completeUpload(account.playerUuid, uploadId, verifiedKeys);
+        return completed
+          ? { status: 200, body: completed }
           : { status: 409, body: { error: 'upload_expired' } };
       }
       if (!isImageDraftKey(draftKey) || !isImageDraftKey(requestKey))
@@ -1358,8 +1364,9 @@ export class AuthStore implements DurableObject {
 
   private async scheduleMaintenance(additionalDue = Infinity): Promise<void> {
     const current = await this.storage.getAlarm();
+    const publicationDue = this.buildings.publicationDue();
     const due = Math.min(
-      this.buildings.publicationDue() ?? Infinity,
+      publicationDue ?? Infinity,
       additionalDue,
       Date.now() + 3600_000,
     );
@@ -1402,7 +1409,9 @@ export class AuthStore implements DurableObject {
     }
     const imageStorage = imageStorageConfig(this.env);
     if (imageStorage && nextSweep <= Date.now()) await collectBuildingImages(this.storage, imageStorage);
-    await this.scheduleMaintenance(await this.storage.get<number>('maintenance:challenges-next-sweep'));
+    await this.scheduleMaintenance(
+      (await this.storage.get<number>('maintenance:challenges-next-sweep')) ?? Infinity,
+    );
   }
 
   private async pruneAccountSessions(
@@ -1807,7 +1816,8 @@ export class AuthStore implements DurableObject {
       const managedImages = this.storage.sql.exec(
         "SELECT 1 FROM building_image_objects WHERE state<>'deleted' LIMIT 1",
       ).toArray().length;
-      if (managedImages || this.buildings.publicationDue() !== null) await this.scheduleMaintenance();
+      if (managedImages || this.buildings.publicationDue() !== null)
+        await this.scheduleMaintenance();
     }).catch((error) => {
       this.initialized = null;
       throw error;

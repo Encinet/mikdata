@@ -292,12 +292,12 @@ export async function handleAuthRoute(
     if (!payload.ok) return payload.response;
     const response = await callStore(store, {
       action: uploadAction,
-      hash: payload.data.hash,
+      hashes: payload.data.hashes,
       sessionId,
       draftKey: payload.data.draftKey,
       requestKey: payload.data.requestKey,
       uploadId: payload.data.uploadId,
-      size: payload.data.size,
+      sizes: payload.data.sizes,
     });
     return authJson(
       response.body,

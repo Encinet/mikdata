@@ -1,5 +1,5 @@
 import { AwsClient } from 'aws4fetch';
-import { buildingImageBaseUrl, imageKeyHash, isImageKey } from './keys';
+import { buildingImageBaseUrl, imageKeyFormat, imageKeyHash, isImageKey, publicImageUrl } from './keys';
 import type { Env } from '../../env';
 
 type ImageStorageEnv = Pick<
@@ -47,7 +47,7 @@ function signed(config: ImageStorage, key: string, method: string, headers?: Hea
 
 export async function prepareImagePut(config: ImageStorage, key: string) {
   const request = await signed(config, key, 'PUT', {
-    'Content-Type': 'image/webp',
+    'Content-Type': 'image/' + imageKeyFormat(key),
     'Cache-Control': 'public, max-age=31536000, immutable',
     'x-amz-content-sha256': imageKeyHash(key),
   });
@@ -64,18 +64,37 @@ export async function deleteBuildingImage(config: ImageStorage, key: string) {
     throw new Error(`S3 DELETE failed (${response.status})`);
 }
 
+export async function putBuildingImage(config: ImageStorage, key: string, bytes: Uint8Array<ArrayBuffer>) {
+  const put = await prepareImagePut(config, key);
+  const response = await fetch(put.url, {
+    method: 'PUT', body: bytes, headers: put.headers,
+    redirect: 'manual', signal: AbortSignal.timeout(15_000),
+  });
+  await response.body?.cancel();
+  if (!response.ok) throw new Error(`S3 PUT failed (${response.status})`);
+}
+
+export async function readBuildingImage(config: ImageStorage, key: string, size: number) {
+  const response = await fetch(publicImageUrl(key, config.publicBaseUrl), {
+    cache: 'no-store', redirect: 'manual', signal: AbortSignal.timeout(15_000),
+  });
+  return verifyOriginal(response, key, size);
+}
+
 export async function verifyOriginal(
   response: Response,
-  hash: string,
+  key: string,
   size: number,
-): Promise<void> {
-  if (!response.ok || response.headers.get('content-type')?.split(';')[0].trim() !== 'image/webp') {
+): Promise<Uint8Array<ArrayBuffer>> {
+  const contentType = 'image/' + imageKeyFormat(key);
+  if (!response.ok || response.headers.get('content-type')?.split(';')[0].trim() !== contentType) {
     await response.body?.cancel();
     throw new Error(`S3 original unavailable (${response.status})`);
   }
   const original = await readLimitedImageBody(response, size);
-  if (original.length !== size || (await sha256(original)) !== hash)
+  if (!original.length || original.length !== size || (await sha256(original)) !== imageKeyHash(key))
     throw new Error('S3 original checksum mismatch');
+  return original;
 }
 
 /** Bound memory while reading a response, including when Content-Length is missing or wrong. */

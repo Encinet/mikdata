@@ -173,6 +173,7 @@ export const ADMIN_STYLES = /* css */ `
   .gallery-status:empty { margin: 0; }
   .gallery-errors { padding-left: 22px; color: var(--red); }
   .image-preview-panel { display: flex; flex-direction: column; gap: 10px; max-width: 100%; max-height: 100%; padding: 12px; border-radius: 10px; background: var(--surface); }
+  .image-preview-panel picture { display: flex; min-height: 0; justify-content: center; }
   .image-preview-panel img { min-height: 0; max-width: 100%; object-fit: contain; }
   .sponsors-workspace .primary, .modal--sponsor .primary { background: var(--accent-strong); }
   .sponsors-workspace .primary:hover:not(:disabled), .modal--sponsor .primary:hover:not(:disabled) { background: var(--accent-hover); }

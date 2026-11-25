@@ -23,6 +23,11 @@ export interface Source {
   notes?: I18n;
 }
 
+export interface BuildingImage {
+  webp: string;
+  jxl: string;
+}
+
 export interface Building {
   /** Immutable, server-assigned opaque identifier. */
   readonly id: string;
@@ -31,16 +36,14 @@ export interface Building {
   coordinates: Coord;
   builders: Builder[];
   buildType: 'original' | 'derivative' | 'replica';
-  /** Original WebP filenames in gallery order. */
-  images: string[];
+  /** SHA-256 digests by format, in gallery order. */
+  images: BuildingImage[];
   buildDate: string;
   tags?: I18n[];
   source?: Source;
 }
 
 export type BuildingInput = Omit<Building, 'id'>;
-
-export type StoredBuilding = Omit<Building, 'images'> & { imageHashes: string[] };
 
 export interface BuildingSubmission {
   id: string;

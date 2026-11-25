@@ -2,7 +2,7 @@ import type { AdminActor } from '../auth/access';
 import type { Env } from '../env';
 import { ADMIN_IMAGE_PATH } from './images/admin-upload';
 import { adminImageOwner } from './images/keys';
-import { MAX_BUILDING_IMAGE_BYTES } from './images/validation';
+import { MAX_BUILDING_IMAGE_MULTIPART_BYTES } from './images/limits';
 import type { AdminBuildingCommand } from './service';
 import { BUILDING_ID_PATTERN } from './id';
 import { authStore } from '../auth/binding';
@@ -72,9 +72,9 @@ async function forwardAdminImage(request: Request, env: Env, actor: AdminActor):
   const owner = adminImageOwner(actor);
   if (!owner) return error('forbidden', 403);
   const contentType = request.headers.get('Content-Type');
-  if (contentType !== 'image/webp') return error('image_must_be_webp', 415);
+  if (!contentType || requestMediaType(request) !== 'multipart/form-data') return error('multipart_required', 415);
   const length = request.headers.get('Content-Length');
-  if (Number(length) > MAX_BUILDING_IMAGE_BYTES) return error('image_too_large', 413);
+  if (Number(length) > MAX_BUILDING_IMAGE_MULTIPART_BYTES) return error('image_too_large', 413);
   if (!request.body) return error('invalid_image', 422);
   const headers = new Headers({
     'Content-Type': contentType,

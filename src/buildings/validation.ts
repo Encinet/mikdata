@@ -1,6 +1,6 @@
 import type { Building, BuildingInput, Coord, I18n, Source } from './types';
 import { isBuildingId } from './id';
-import { IMAGE_FILENAME_PATTERN } from './images/keys';
+import { isBuildingImage } from './images/keys';
 export type ValidationResult = { ok: true; value: BuildingInput } | { ok: false; message: string };
 export const BUILDING_TEXT_LIMITS = {
   name: 200,
@@ -138,8 +138,8 @@ export function validateBuildingInput(data: unknown): ValidationResult {
   for (let index = 0; index < building.images.length; index += 1) {
     const image = building.images[index];
 
-    if (typeof image !== 'string' || !IMAGE_FILENAME_PATTERN.test(image)) {
-      return { ok: false, message: `images[${index}] must be a WebP filename` };
+    if (!isBuildingImage(image)) {
+      return { ok: false, message: `images[${index}] must contain WebP and JPEG XL SHA-256 digests` };
     }
   }
 
@@ -266,7 +266,7 @@ function normalizeInput(building: Record<string, unknown>): BuildingInput {
       weight: builder.weight as number,
     })),
     buildType: building.buildType as BuildingInput['buildType'],
-    images: building.images as string[],
+    images: (building.images as Building['images']).map(({ webp, jxl }) => ({ webp, jxl })),
     buildDate: (building.buildDate as string).trim(),
   };
 
@@ -334,9 +334,8 @@ function isRealDate(value: string): boolean {
 
 export function parseStoredBuilding(data: unknown): Building | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-  const { id, imageHashes, ...input } = data as Record<string, unknown>;
-  if (!isBuildingId(id) || 'images' in input || !Array.isArray(imageHashes) ||
-      !imageHashes.every((hash) => typeof hash === 'string')) return null;
-  const parsed = validateBuildingInput({ ...input, images: imageHashes.map((hash) => `${hash}.webp`) });
+  const { id, ...input } = data as Record<string, unknown>;
+  if (!isBuildingId(id)) return null;
+  const parsed = validateBuildingInput(input);
   return parsed.ok ? { id, ...parsed.value } : null;
 }

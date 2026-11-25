@@ -1,0 +1,30 @@
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 660a5f83eb8787b25afede1f5e796eef0a3450e4..733969c380901f5130d99f0e37a91cbfb0b2ef51 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -248,5 +248,5 @@ declare class JxlTranTransformer {
+  * Loads the WebAssembly module and returns the transformer. One module instance per call; create
+  * it once and reuse it - runs are synchronous and share nothing between instances.
+  */
+-export declare function createJxlTran(): Promise<JxlTranTransformer>;
++export declare function createJxlTran(wasm?: WebAssembly.Module): Promise<JxlTranTransformer>;
+ export type { JxlTranTransformer };
+diff --git a/dist/index.js b/dist/index.js
+index 4a8123f2287960688702f7ad4f2911c1b3a0bb73..d33c00486dc1f11e5d7c25830096c517141ff07e 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -356,10 +356,13 @@ class JxlTranTransformer {
+  * Loads the WebAssembly module and returns the transformer. One module instance per call; create
+  * it once and reuse it - runs are synchronous and share nothing between instances.
+  */
+-export async function createJxlTran() {
++export async function createJxlTran(wasm) {
+     const stdout = [];
+     const stderr = [];
+     const module = (await createJxlTranWasm({
++        instantiateWasm: wasm && ((imports, receiveInstance) => {
++            receiveInstance(new WebAssembly.Instance(wasm, imports));
++        }),
+         print: (line) => stdout.push(line),
+         printErr: (line) => stderr.push(line),
+     }));
