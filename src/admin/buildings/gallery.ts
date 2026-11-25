@@ -1,4 +1,4 @@
-import { MAX_BUILDING_IMAGE_BYTES, MAX_BUILDING_IMAGE_DIMENSION } from '../../buildings/images/limits';
+import { MAX_BUILDING_IMAGE_BYTES, MAX_BUILDING_IMAGE_DIMENSION, MAX_THUMBNAIL_DIMENSION } from '../../buildings/images/limits';
 import { MAX_BUILDING_IMAGES } from '../../buildings/validation';
 
 export const ADMIN_GALLERY = /* html */ `
@@ -70,6 +70,7 @@ function buildingImageUrl(id, hash, format) {
 }
 
 function buildingPicture(id, image, attributes) {
+  if (image.thumbnailWebp) return '<img ' + attributes + ' src="' + esc(buildingImageUrl(id, image.thumbnailWebp, 'webp')) + '" alt="">';
   return '<picture><source type="image/jxl" srcset="' + esc(buildingImageUrl(id, image.jxl, 'jxl')) + '">' +
     '<img ' + attributes + ' src="' + esc(buildingImageUrl(id, image.webp, 'webp')) + '" alt=""></picture>';
 }
@@ -232,12 +233,15 @@ async function addImages(files) {
         const data = await readJson(response);
         if (!response.ok || !data.image?.webp || !data.image?.jxl || !data.buildingId)
           throw new Error(imageUploadError(data.error));
-        if (gallery.images.some(image => image.webp === data.image.webp && image.jxl === data.image.jxl)) {
+        const existing = gallery.images.findIndex(image => image.webp === data.image.webp && image.jxl === data.image.jxl);
+        if (existing >= 0 && gallery.images[existing].thumbnailWebp === data.image.thumbnailWebp &&
+            gallery.images[existing].jxlPreviewBytes === data.image.jxlPreviewBytes) {
           errors.push(file.name + ' · 图片已在图册中');
           continue;
         }
         gallery.buildingId = data.buildingId;
-        gallery.images.push(data.image);
+        if (existing >= 0) gallery.images[existing] = data.image;
+        else gallery.images.push(data.image);
         added++;
         renderGallery();
       } catch (error) {
@@ -273,12 +277,13 @@ async function encodeGalleryImage(file, worker) {
   try {
     while (true) {
       const { canvas } = context;
-      const { webp, jxl } = await encodeGalleryPixels(worker, context, tryLossless);
+      const { webp, jxl, thumbnailWebp } = await encodeGalleryPixels(worker, context, tryLossless);
       const size = webp.byteLength + jxl.byteLength;
       if (size <= ${MAX_BUILDING_IMAGE_BYTES}) {
         const form = new FormData();
         form.set('webp', new Blob([webp], { type: 'image/webp' }), 'building.webp');
         form.set('jxl', new Blob([jxl], { type: 'image/jxl' }), 'building.jxl');
+        form.set('thumbnailWebp', new Blob([thumbnailWebp], { type: 'image/webp' }), 'thumbnail.webp');
         return form;
       }
 
@@ -308,6 +313,10 @@ function drawGalleryImage(source, width, height) {
 
 function encodeGalleryPixels(worker, context, tryLossless) {
   const pixels = context.getImageData(0, 0, context.canvas.width, context.canvas.height);
+  const scale = Math.min(1, ${MAX_THUMBNAIL_DIMENSION} / Math.max(pixels.width, pixels.height));
+  const small = drawGalleryImage(context.canvas, pixels.width * scale, pixels.height * scale);
+  const thumbnail = small.getImageData(0, 0, small.canvas.width, small.canvas.height);
+  small.canvas.width = 0;
   const listeners = new AbortController();
   const options = { signal: listeners.signal };
   return new Promise((resolve, reject) => {
@@ -315,7 +324,7 @@ function encodeGalleryPixels(worker, context, tryLossless) {
     worker.addEventListener('error', failed, options);
     worker.addEventListener('messageerror', failed, options);
     worker.addEventListener('message', ({ data }) => data ? resolve(data) : failed(), options);
-    worker.postMessage({ pixels, tryLossless }, [pixels.data.buffer]);
+    worker.postMessage({ pixels, thumbnail, tryLossless }, [pixels.data.buffer, thumbnail.data.buffer]);
   }).finally(() => listeners.abort());
 }
 

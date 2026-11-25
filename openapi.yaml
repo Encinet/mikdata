@@ -316,6 +316,15 @@ components:
               jxl:
                 type: string
                 pattern: '^[0-9a-f]{64}$'
+              thumbnailWebp:
+                type: string
+                pattern: '^[0-9a-f]{64}$'
+                description: 小 WebP 的 SHA-256，使用同一对象路径和 .webp 扩展名。
+              jxlPreviewBytes:
+                type: integer
+                minimum: 0
+                maximum: 131072
+                description: 封面可读取的 JXL 前缀字节数。0 表示直接使用小 WebP。
         buildDate:
           type: string
           format: date

@@ -31,7 +31,7 @@ export function initializeBuildingStorage(storage: DurableObjectStorage): void {
     CREATE TABLE IF NOT EXISTS image_uploads (
       id TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at INTEGER NOT NULL,
       expires_at INTEGER NOT NULL, draft_key TEXT NOT NULL, building_id TEXT NOT NULL,
-      request_key TEXT, object_key TEXT, jxl_key TEXT,
+      request_key TEXT, object_key TEXT, jxl_key TEXT, thumbnail_key TEXT, jxl_preview_bytes INTEGER,
       completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1))
     );
     CREATE INDEX IF NOT EXISTS uploads_owner ON image_uploads(owner, created_at);
@@ -56,5 +56,10 @@ export function initializeBuildingStorage(storage: DurableObjectStorage): void {
       DELETE FROM building_image_refs WHERE owner='building/' || OLD.id;
     END;
     `);
+    const columns = storage.sql.exec<{name: string}>('PRAGMA table_info(image_uploads)').toArray();
+    if (!columns.some(c => c.name === 'thumbnail_key'))
+      storage.sql.exec('ALTER TABLE image_uploads ADD COLUMN thumbnail_key TEXT');
+    if (!columns.some(c => c.name === 'jxl_preview_bytes'))
+      storage.sql.exec('ALTER TABLE image_uploads ADD COLUMN jxl_preview_bytes INTEGER');
   });
 }

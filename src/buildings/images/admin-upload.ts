@@ -7,8 +7,8 @@ import {
   sha256,
 } from './storage';
 import { isImageDraftKey } from './keys';
-import { MAX_BUILDING_IMAGE_BYTES, MAX_BUILDING_IMAGE_MULTIPART_BYTES } from './limits';
-import { validImagePair } from './validation';
+import { MAX_BUILDING_IMAGE_BYTES, MAX_BUILDING_IMAGE_MULTIPART_BYTES, MAX_THUMBNAIL_BYTES } from './limits';
+import { inspectBuildingImages } from './validation';
 import type { BuildingStore } from '../store';
 import type { Env } from '../../env';
 import { json, requestMediaType } from '../../shared/http';
@@ -46,7 +46,10 @@ export async function uploadAdminBuildingImage(
   }
   const webp = form.get('webp');
   const jxl = form.get('jxl');
-  if (!(webp instanceof File) || !(jxl instanceof File) || [...form.keys()].length !== 2 ||
+  const thumbnail = form.get('thumbnailWebp');
+  if (thumbnail !== null && (!(thumbnail instanceof File) || thumbnail.type !== 'image/webp' || thumbnail.size > MAX_THUMBNAIL_BYTES))
+    return json({ error: 'invalid_image' }, 422);
+  if (!(webp instanceof File) || !(jxl instanceof File) || [...form.keys()].length !== (thumbnail ? 3 : 2) ||
       webp.type !== 'image/webp' || (jxl.type && jxl.type !== 'image/jxl'))
     return json({ error: 'invalid_image' }, 422);
   if (webp.size + jxl.size > MAX_BUILDING_IMAGE_BYTES)
@@ -54,10 +57,14 @@ export async function uploadAdminBuildingImage(
   const images = {
     webp: new Uint8Array(await webp.arrayBuffer()),
     jxl: new Uint8Array(await jxl.arrayBuffer()),
+    ...(thumbnail && { thumbnailWebp: new Uint8Array(await thumbnail.arrayBuffer()) }),
   };
-  if (!(await validImagePair(images))) return json({ error: 'invalid_image' }, 422);
+  const inspected = await inspectBuildingImages(images);
+  if (!inspected) return json({ error: 'invalid_image' }, 422);
 
-  const hashes = { webp: await sha256(images.webp), jxl: await sha256(images.jxl) };
+  const hashes = { webp: await sha256(images.webp), jxl: await sha256(images.jxl),
+    ...(images.thumbnailWebp && { thumbnailWebp: await sha256(images.thumbnailWebp) }),
+  };
   const lease = await storage.transaction(async () => {
     const result = store.reserveAdminImage(owner, draft, target, hashes);
     if (result) await scheduleMaintenance();
@@ -70,6 +77,7 @@ export async function uploadAdminBuildingImage(
     const uploaded = await Promise.allSettled([
       putBuildingImage(config, lease.keys.webp, images.webp),
       putBuildingImage(config, lease.keys.jxl, images.jxl),
+      ...(images.thumbnailWebp ? [putBuildingImage(config, lease.keys.thumbnailWebp!, images.thumbnailWebp)] : []),
     ]);
     for (const result of uploaded) {
       if (result.status === 'rejected') throw result.reason;
@@ -77,11 +85,12 @@ export async function uploadAdminBuildingImage(
     await Promise.all([
       readBuildingImage(config, lease.keys.webp, images.webp.length),
       readBuildingImage(config, lease.keys.jxl, images.jxl.length),
+      ...(images.thumbnailWebp ? [readBuildingImage(config, lease.keys.thumbnailWebp!, images.thumbnailWebp.length)] : []),
     ]);
   } catch (error) {
     console.warn('Admin building image upload failed', lease.keys, error);
     return json({ error: 'image_upload_unavailable' }, 502);
   }
-  const completed = await storage.transaction(async () => store.completeUpload(owner, lease.id, lease.keys));
-  return completed ? json(receipt, 200) : json({ error: 'image_draft_unavailable' }, 409);
+  const completed = await storage.transaction(async () => store.completeUpload(owner, lease.id, lease.keys, inspected.jxlPreviewBytes));
+  return completed ? json({ buildingId: lease.buildingId, image: completed.image }, 200) : json({ error: 'image_draft_unavailable' }, 409);
 }

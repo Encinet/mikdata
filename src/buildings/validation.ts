@@ -266,7 +266,7 @@ function normalizeInput(building: Record<string, unknown>): BuildingInput {
       weight: builder.weight as number,
     })),
     buildType: building.buildType as BuildingInput['buildType'],
-    images: (building.images as Building['images']).map(({ webp, jxl }) => ({ webp, jxl })),
+    images: (building.images as Building['images']).map(image => ({ ...image })),
     buildDate: (building.buildDate as string).trim(),
   };
 

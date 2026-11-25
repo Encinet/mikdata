@@ -1,8 +1,8 @@
-import { isImageDraftKey, isImagePair, type ImagePair } from '../buildings/images/keys';
+import { isImageDraftKey, isImageFiles, type ImageFiles } from '../buildings/images/keys';
 import { ADMIN_IMAGE_PATH, uploadAdminBuildingImage } from '../buildings/images/admin-upload';
 import { imageStorageConfig, prepareImagePut, readBuildingImage } from '../buildings/images/storage';
-import { MAX_BUILDING_IMAGE_BYTES } from '../buildings/images/limits';
-import { validImagePair } from '../buildings/images/validation';
+import { MAX_BUILDING_IMAGE_BYTES, MAX_THUMBNAIL_BYTES } from '../buildings/images/limits';
+import { inspectBuildingImages } from '../buildings/images/validation';
 import { collectBuildingImages, UnavailableBuildingImage } from '../buildings/images/lifecycle';
 import { BuildingStore } from '../buildings/store';
 import { initializeBuildingStorage } from '../buildings/schema';
@@ -1299,20 +1299,25 @@ export class AuthStore implements DurableObject {
     if (!eligibleMemberAccount(account)) return { status: 403, body: { error: 'member_required' } };
     const config = imageStorageConfig(this.env);
     if (!config) return { status: 503, body: { error: 'image_upload_not_configured' } };
-    let verifiedKeys: ImagePair<string> | null = null;
+    let verifiedKeys: ImageFiles<string> | null = null;
+    let previewBytes: number | undefined;
     if (action === 'completeImageUpload') {
       const isSize = (value: unknown): value is number => typeof value === 'number' &&
         Number.isInteger(value) && value >= 1 && value <= MAX_BUILDING_IMAGE_BYTES;
-      if (!isImagePair(sizes, isSize) || sizes.webp + sizes.jxl > MAX_BUILDING_IMAGE_BYTES)
+      if (!isImageFiles(sizes, isSize) || sizes.webp + sizes.jxl > MAX_BUILDING_IMAGE_BYTES || (sizes.thumbnailWebp ?? 0) > MAX_THUMBNAIL_BYTES)
         return { status: 422, body: { error: 'invalid_image' } };
       const keys = this.buildings.uploadKeys(account.playerUuid, uploadId);
       if (!keys) return { status: 409, body: { error: 'upload_expired' } };
+      if (Boolean(keys.thumbnailWebp) !== Boolean(sizes.thumbnailWebp)) return { status: 422, body: { error: 'invalid_image' } };
       try {
-        const [webp, jxl] = await Promise.all([
+        const [webp, jxl, thumbnailWebp] = await Promise.all([
           readBuildingImage(config, keys.webp, sizes.webp),
           readBuildingImage(config, keys.jxl, sizes.jxl),
+          keys.thumbnailWebp ? readBuildingImage(config, keys.thumbnailWebp, sizes.thumbnailWebp!) : undefined,
         ]);
-        if (!(await validImagePair({ webp, jxl }))) return { status: 422, body: { error: 'invalid_image' } };
+        const inspected = await inspectBuildingImages({ webp, jxl, thumbnailWebp });
+        if (!inspected) return { status: 422, body: { error: 'invalid_image' } };
+        previewBytes = inspected.jxlPreviewBytes;
         verifiedKeys = keys;
       } catch (error) {
         console.warn('Building image verification failed', keys, error instanceof Error ? error.message : 'storage error');
@@ -1326,14 +1331,17 @@ export class AuthStore implements DurableObject {
       if (!eligibleMemberAccount(currentAccount))
         return { status: 403, body: { error: 'member_required' } };
       if (action === 'prepareImageUpload') {
-        const keys = isImagePair(hashes, (value): value is string => typeof value === 'string') &&
+        const keys = isImageFiles(hashes, (value): value is string => typeof value === 'string') &&
           this.buildings.prepareUpload(account.playerUuid, uploadId, hashes);
         if (!keys) return { status: 409, body: { error: 'upload_expired' } };
-        const [webp, jxl] = await Promise.all([prepareImagePut(config, keys.webp), prepareImagePut(config, keys.jxl)]);
-        return { status: 200, body: { put: { webp, jxl } } };
+        const [webp, jxl, thumbnailWebp] = await Promise.all([
+          prepareImagePut(config, keys.webp), prepareImagePut(config, keys.jxl),
+          keys.thumbnailWebp ? prepareImagePut(config, keys.thumbnailWebp) : undefined,
+        ]);
+        return { status: 200, body: { put: { webp, jxl, thumbnailWebp } } };
       }
       if (verifiedKeys !== null) {
-        const completed = this.buildings.completeUpload(account.playerUuid, uploadId, verifiedKeys);
+        const completed = this.buildings.completeUpload(account.playerUuid, uploadId, verifiedKeys, previewBytes);
         return completed
           ? { status: 200, body: completed }
           : { status: 409, body: { error: 'upload_expired' } };

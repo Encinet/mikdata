@@ -1,28 +1,65 @@
 import { createJxlTran, TransformError, type ImageInfo } from '@chimok/jxltran-js';
 import jxlWasm from '../../../node_modules/@chimok/jxltran-js/dist/jxltran.wasm';
-import type { ImagePair } from './keys';
-import { MAX_BUILDING_IMAGE_BYTES, MAX_BUILDING_IMAGE_DIMENSION } from './limits';
+import type { ImageFiles } from './keys';
+import {
+  MAX_BUILDING_IMAGE_BYTES, MAX_BUILDING_IMAGE_DIMENSION, MAX_JXL_PREVIEW_BYTES,
+  MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_DIMENSION,
+} from './limits';
 
 type ImageDimensions = { width: number; height: number };
 let jxlParser: ReturnType<typeof createJxlTran> | undefined;
 
-export async function validImagePair(bytes: ImagePair<Uint8Array<ArrayBuffer>>): Promise<boolean> {
-  if (bytes.webp.length + bytes.jxl.length > MAX_BUILDING_IMAGE_BYTES) return false;
+/** Inspect the encoded files. Pixel conversion runs in the uploading browser. */
+export async function inspectBuildingImages(
+  bytes: ImageFiles<Uint8Array<ArrayBuffer>>,
+): Promise<{ jxlPreviewBytes?: number } | null> {
+  if (bytes.webp.length + bytes.jxl.length > MAX_BUILDING_IMAGE_BYTES) return null;
   const webp = pixelOnlyWebpDimensions(bytes.webp);
-  if (!webp || Math.max(webp.width, webp.height) > MAX_BUILDING_IMAGE_DIMENSION) return false;
+  if (!webp || Math.max(webp.width, webp.height) > MAX_BUILDING_IMAGE_DIMENSION) return null;
   const jxl = jxlCodestreamDimensions(bytes.jxl);
-  if (!jxl || jxl.width !== webp.width || jxl.height !== webp.height) return false;
-
-  // Wrangler supplies a compiled module. Bun tests use the package's filesystem loader.
+  if (!jxl || jxl.width !== webp.width || jxl.height !== webp.height) return null;
+  if (bytes.thumbnailWebp) {
+    const thumb = pixelOnlyWebpDimensions(bytes.thumbnailWebp);
+    const scale = Math.min(1, MAX_THUMBNAIL_DIMENSION / Math.max(webp.width, webp.height));
+    if (!thumb || bytes.thumbnailWebp.length > MAX_THUMBNAIL_BYTES ||
+        thumb.width > Math.max(1, Math.round(webp.width * scale)) ||
+        thumb.height > Math.max(1, Math.round(webp.height * scale)) ||
+        Math.abs(thumb.width * webp.height - thumb.height * webp.width) > Math.max(webp.width, webp.height))
+      return null;
+  }
   jxlParser ??= createJxlTran(typeof jxlWasm === 'string' ? undefined : jxlWasm);
   const parser = await jxlParser;
   try {
-    // Validate frame boundaries and the section table without decoding pixels.
     const info = parser.info(bytes.jxl);
-    return info.orientation === 1 && info.width === webp.width && info.height === webp.height &&
-      isStillJxl(info);
+    if (info.orientation !== 1 || info.width !== webp.width || info.height !== webp.height || !isStillJxl(info))
+      return null;
   } catch (error) {
-    if (error instanceof TransformError) return false;
+    if (error instanceof TransformError) return null;
+    throw error;
+  }
+  return bytes.thumbnailWebp ? { jxlPreviewBytes: previewBudget(parser, bytes.jxl) } : {};
+}
+
+function previewBudget(parser: Awaited<ReturnType<typeof createJxlTran>>, bytes: Uint8Array<ArrayBuffer>) {
+  // Asking for one extra byte identifies EOF even when CORS hides Content-Range.
+  if (bytes.length <= 32 * 1024) return bytes.length + 1;
+  try {
+    const structure = JSON.parse(parser.run(['INPUT.jxl', '--info-structure'], bytes).stdout);
+    const sections: { label: string; byte_end_exclusive: number }[] = structure.codestream.frames.at(-1).toc_sections;
+    // Offsets in a bare codestream include preceding low-frequency frames. A late
+    // global/group section can put the first useful frame beyond the cover budget.
+    let end = 0;
+    for (const section of sections) {
+      if (/^(?:lf_global|lf_group |hf_global|combined)/.test(section.label))
+        end = Math.max(end, section.byte_end_exclusive);
+    }
+    if (!end) return 0;
+    const budget = Math.max(end, Math.min(96 * 1024, Math.ceil(bytes.length / 3)));
+    if (budget > MAX_JXL_PREVIEW_BYTES) return 0;
+    return budget === bytes.length ? Math.min(budget + 1, MAX_JXL_PREVIEW_BYTES) : budget;
+  } catch (error) {
+    // A valid still image with no inspectable section layout can use its small WebP.
+    if (error instanceof TransformError) return 0;
     throw error;
   }
 }
