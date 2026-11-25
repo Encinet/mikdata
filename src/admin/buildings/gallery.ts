@@ -69,10 +69,8 @@ function buildingImageUrl(id, hash, format) {
   return imageBaseUrl && id && hash ? imageBaseUrl + '/buildings/' + id + '/' + hash + '.' + format : '';
 }
 
-function buildingPicture(id, image, attributes) {
-  if (image.thumbnailWebp) return '<img ' + attributes + ' src="' + esc(buildingImageUrl(id, image.thumbnailWebp, 'webp')) + '" alt="">';
-  return '<picture><source type="image/jxl" srcset="' + esc(buildingImageUrl(id, image.jxl, 'jxl')) + '">' +
-    '<img ' + attributes + ' src="' + esc(buildingImageUrl(id, image.webp, 'webp')) + '" alt=""></picture>';
+function buildingThumbnail(id, image, attributes) {
+  return '<img ' + attributes + ' src="' + esc(buildingImageUrl(id, image.thumbnailWebp, 'webp')) + '" alt="">';
 }
 
 function fallbackToWebp(event) {
@@ -93,7 +91,7 @@ function renderGallery() {
     const attrs = ' type="button" data-index="' + index + '"';
     return '<li class="gallery-tile" data-index="' + index + '" draggable="true">' +
       '<button class="gallery-preview"' + attrs + ' data-gallery="preview" aria-label="预览' + label + '">' +
-      buildingPicture(gallery.buildingId, image, 'draggable="false" loading="lazy" decoding="async"') +
+      buildingThumbnail(gallery.buildingId, image, 'draggable="false" loading="lazy" decoding="async"') +
       (index === 0 ? '<span>封面</span>' : '') + '</button>' +
       '<div class="gallery-actions">' +
       '<button class="btn ghost sm"' + attrs + ' data-gallery="earlier" aria-label="前移' + label + '"' +
@@ -231,17 +229,15 @@ async function addImages(files) {
           body,
         });
         const data = await readJson(response);
-        if (!response.ok || !data.image?.webp || !data.image?.jxl || !data.buildingId)
+        if (!response.ok || !data.image?.webp || !data.image.jxl || !data.image.thumbnailWebp ||
+            !Number.isInteger(data.image.jxlPreviewBytes) || !data.buildingId)
           throw new Error(imageUploadError(data.error));
-        const existing = gallery.images.findIndex(image => image.webp === data.image.webp && image.jxl === data.image.jxl);
-        if (existing >= 0 && gallery.images[existing].thumbnailWebp === data.image.thumbnailWebp &&
-            gallery.images[existing].jxlPreviewBytes === data.image.jxlPreviewBytes) {
+        if (gallery.images.some(image => image.webp === data.image.webp && image.jxl === data.image.jxl)) {
           errors.push(file.name + ' · 图片已在图册中');
           continue;
         }
         gallery.buildingId = data.buildingId;
-        if (existing >= 0) gallery.images[existing] = data.image;
-        else gallery.images.push(data.image);
+        gallery.images.push(data.image);
         added++;
         renderGallery();
       } catch (error) {

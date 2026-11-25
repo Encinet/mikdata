@@ -308,7 +308,7 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [webp, jxl]
+            required: [webp, jxl, thumbnailWebp, jxlPreviewBytes]
             properties:
               webp:
                 type: string

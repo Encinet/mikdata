@@ -68,17 +68,17 @@ function imageObjectKeys(id: string, images: BuildingImage[]) {
   return images.flatMap(image => Object.values(keysForHashes(id, image)));
 }
 
-function imageFromKeys(keys: ImageFiles<string>, previewBytes?: number | null): BuildingImage {
+function imageFromKeys(keys: ImageFiles<string>, previewBytes: number): BuildingImage {
   return {
     webp: imageKeyHash(keys.webp), jxl: imageKeyHash(keys.jxl),
-    ...(keys.thumbnailWebp && { thumbnailWebp: imageKeyHash(keys.thumbnailWebp) }),
-    ...(previewBytes != null && { jxlPreviewBytes: previewBytes }),
+    thumbnailWebp: imageKeyHash(keys.thumbnailWebp),
+    jxlPreviewBytes: previewBytes,
   };
 }
 
 function uploadKeys(row?: UploadRow): ImageFiles<string> | null {
-  return row?.object_key && row.jxl_key ? {
-    webp: row.object_key, jxl: row.jxl_key, ...(row.thumbnail_key && { thumbnailWebp: row.thumbnail_key }),
+  return row?.object_key && row.jxl_key && row.thumbnail_key ? {
+    webp: row.object_key, jxl: row.jxl_key, thumbnailWebp: row.thumbnail_key,
   } : null;
 }
 
@@ -86,7 +86,7 @@ function keysForHashes(id: string, hashes: ImageFiles<string>): ImageFiles<strin
   return {
     webp: buildingImageKey(id, hashes.webp, 'webp'),
     jxl: buildingImageKey(id, hashes.jxl, 'jxl'),
-    ...(hashes.thumbnailWebp && { thumbnailWebp: buildingImageKey(id, hashes.thumbnailWebp, 'webp') }),
+    thumbnailWebp: buildingImageKey(id, hashes.thumbnailWebp, 'webp'),
   };
 }
 
@@ -347,8 +347,9 @@ export class BuildingStore {
       'SELECT id,building_id,completed,expires_at,object_key,jxl_key,thumbnail_key,jxl_preview_bytes FROM image_uploads WHERE owner=? AND draft_key=? AND request_key=?',
       owner, draft, requestKey,
     ).toArray()[0];
-    if (prior?.completed && prior.object_key === keys.webp && prior.jxl_key === keys.jxl && prior.expires_at > now)
-      return { id: prior.id, keys, buildingId, image: imageFromKeys(keys, prior.jxl_preview_bytes), completed: true };
+    if (prior?.completed && prior.expires_at > now && prior.jxl_preview_bytes !== null &&
+        prior.object_key === keys.webp && prior.jxl_key === keys.jxl && prior.thumbnail_key === keys.thumbnailWebp)
+      return { id: prior.id, keys, buildingId, image: imageFromKeys(keys, prior.jxl_preview_bytes), completed: true as const };
     const id = prior?.id ?? crypto.randomUUID();
     this.referenceUpload(id, keys);
     this.storage.sql.exec(
@@ -356,9 +357,9 @@ export class BuildingStore {
        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
        created_at=excluded.created_at, expires_at=excluded.expires_at, building_id=excluded.building_id,
        object_key=excluded.object_key, jxl_key=excluded.jxl_key, thumbnail_key=excluded.thumbnail_key, jxl_preview_bytes=NULL, completed=0`,
-      id, owner, now, now + UPLOAD_LIFETIME_MS, draft, buildingId, requestKey, keys.webp, keys.jxl, keys.thumbnailWebp ?? null,
+      id, owner, now, now + UPLOAD_LIFETIME_MS, draft, buildingId, requestKey, keys.webp, keys.jxl, keys.thumbnailWebp,
     );
-    return { id, keys, buildingId, image: imageFromKeys(keys), completed: false };
+    return { id, keys, buildingId, completed: false as const };
   }
   reserveUpload(owner: string, draft: string, request: string): UploadReservation {
     const now = Date.now();
@@ -370,7 +371,7 @@ export class BuildingStore {
         owner, draft, request, now,
       ).toArray()[0];
       const keys = uploadKeys(prior);
-      if (keys && prior) return { image: imageFromKeys(keys, prior.jxl_preview_bytes), expiresAt: prior.expires_at };
+      if (keys && prior?.jxl_preview_bytes != null) return { image: imageFromKeys(keys, prior.jxl_preview_bytes), expiresAt: prior.expires_at };
     }
     if (buildingId && this.submissionIdExists(buildingId)) return { error: 'draft_submitted' };
     if (this.pendingCount(owner) >= 10) return { error: 'pending_limit_reached' };
@@ -420,7 +421,7 @@ export class BuildingStore {
     // A fresh upload can recreate identical bytes after the previous objects were collected.
     this.storage.sql.exec(
       "UPDATE building_image_objects SET state='active' WHERE object_key IN (?,?,?) AND state='deleted'",
-      keys.webp, keys.jxl, keys.thumbnailWebp ?? null,
+      keys.webp, keys.jxl, keys.thumbnailWebp,
     );
     setImageReferences(this.storage.sql, 'upload/' + id, Object.values(keys));
   }
@@ -428,28 +429,34 @@ export class BuildingStore {
     const row = this.activeUpload(owner, id);
     if (!row || !Object.values(hashes).every(hash => IMAGE_HASH_PATTERN.test(hash))) return null;
     const keys = keysForHashes(row.building_id, hashes);
-    if (row.object_key && (row.object_key !== keys.webp || row.jxl_key !== keys.jxl || row.thumbnail_key !== (keys.thumbnailWebp ?? null)))
+    if (row.object_key && (row.object_key !== keys.webp || row.jxl_key !== keys.jxl || row.thumbnail_key !== keys.thumbnailWebp))
       return null;
     this.referenceUpload(id, keys);
-    this.storage.sql.exec('UPDATE image_uploads SET object_key=?,jxl_key=?,thumbnail_key=? WHERE id=?', keys.webp, keys.jxl, keys.thumbnailWebp ?? null, id);
+    this.storage.sql.exec('UPDATE image_uploads SET object_key=?,jxl_key=?,thumbnail_key=? WHERE id=?', keys.webp, keys.jxl, keys.thumbnailWebp, id);
     return keys;
   }
   uploadKeys(owner: string, id: string): ImageFiles<string> | null {
     return uploadKeys(this.activeUpload(owner, id));
   }
-  completeUpload(owner: string, id: string, keys: ImageFiles<string>, previewBytes?: number) {
+  completeUpload(owner: string, id: string, keys: ImageFiles<string>, previewBytes: number) {
     const row = this.activeUpload(owner, id);
-    if (!row || row.object_key !== keys.webp || row.jxl_key !== keys.jxl || row.thumbnail_key !== (keys.thumbnailWebp ?? null)) return null;
-    if (!row.completed) this.storage.sql.exec('UPDATE image_uploads SET completed=1,jxl_preview_bytes=? WHERE id=?', previewBytes ?? null, id);
-    return { image: imageFromKeys(keys, row.completed ? row.jxl_preview_bytes : previewBytes), expiresAt: row.expires_at };
+    if (!row || row.object_key !== keys.webp || row.jxl_key !== keys.jxl || row.thumbnail_key !== keys.thumbnailWebp) return null;
+    const budget = row.completed ? row.jxl_preview_bytes : previewBytes;
+    if (budget === null) return null;
+    if (!row.completed) this.storage.sql.exec('UPDATE image_uploads SET completed=1,jxl_preview_bytes=? WHERE id=?', budget, id);
+    return { image: imageFromKeys(keys, budget), expiresAt: row.expires_at };
   }
   draftImages(owner: string, draft: string, buildingId: string): BuildingImage[] {
     const rows = this.storage.sql.exec<UploadRow>(
       `SELECT object_key,jxl_key,thumbnail_key,jxl_preview_bytes FROM image_uploads
-       WHERE owner=? AND draft_key=? AND building_id=? AND expires_at>? AND completed=1 AND jxl_key IS NOT NULL`,
+       WHERE owner=? AND draft_key=? AND building_id=? AND expires_at>? AND completed=1`,
       owner, draft, buildingId, Date.now(),
     ).toArray();
-    return rows.map(row => imageFromKeys(uploadKeys(row)!, row.jxl_preview_bytes));
+    return rows.map(row => {
+      const keys = uploadKeys(row);
+      if (!keys || row.jxl_preview_bytes === null) throw new Error('Invalid completed image upload');
+      return imageFromKeys(keys, row.jxl_preview_bytes);
+    });
   }
   cleanup(): void {
     // Bound each sweep; indexed expiry queries do not scan all accounts or submissions.

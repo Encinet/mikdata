@@ -99,9 +99,9 @@ const galleryJxls = [
   '/woIQLATAEiAEADgAHM5AABUqIwybvByrufLDx0W0zauM7TVtoUliSLj2CTVIRM4JIkFUHYHBNAAiIYkSeadjk+1TCUJ',
 ].map(value => Uint8Array.from(atob(value), byte => byte.charCodeAt(0)));
 const galleryHashes = await Promise.all(galleryWebps.map(async (webp, index) => ({
-  webp: await sha256(webp), jxl: await sha256(galleryJxls[index]),
+  webp: await sha256(webp), jxl: await sha256(galleryJxls[index]), thumbnailWebp: await sha256(webp),
 })));
-const galleryImages = galleryHashes;
+const galleryImages = galleryHashes.map((hashes, index) => ({ ...hashes, jxlPreviewBytes: galleryJxls[index].length + 1 }));
 
 async function adminUploadRequest(f: ReturnType<typeof setup>, draft: string, bytes: Uint8Array<ArrayBuffer>,
   { target, origin = 'https://data.example', jxl }: {
@@ -112,6 +112,7 @@ async function adminUploadRequest(f: ReturnType<typeof setup>, draft: string, by
   const url = 'https://data.example/admin/api' + path + (target ? '?building=' + target : '');
   const form = new FormData();
   form.set('webp', new Blob([bytes], { type: 'image/webp' }), 'test.webp');
+  form.set('thumbnailWebp', new Blob([galleryWebps[galleryWebps.indexOf(bytes)] ?? galleryWebps[0]], { type: 'image/webp' }), 'thumbnail.webp');
   form.set('jxl', new Blob([jxl ?? galleryJxls[galleryWebps.indexOf(bytes)] ?? galleryJxls[0]], { type: 'image/jxl' }), 'test.jxl');
   const response = await handleAdminBuildingsRoute(path, new Request(url, {
     method: 'POST',
@@ -161,7 +162,7 @@ async function completeImage(fixture: ReturnType<typeof setup>, token: string, i
   });
   try {
     return await authCall(fixture.store, {
-      action: 'completeImageUpload', sessionId: token, uploadId: id, sizes: { webp: bytes.length, jxl: jxl.length },
+      action: 'completeImageUpload', sessionId: token, uploadId: id, sizes: { webp: bytes.length, jxl: jxl.length, thumbnailWebp: bytes.length },
     });
   } finally {
     network.mockRestore();
@@ -769,6 +770,7 @@ test('completed uploads stay within a draft, survive retries and publish ordered
   expect(id).toMatch(/^[0-9a-f]{32}$/);
   expect(signed.body.put.webp.headers['x-amz-content-sha256']).toBe(hashes[0].webp);
   expect(signed.body.put.jxl.headers['x-amz-content-sha256']).toBe(hashes[0].jxl);
+  expect(signed.body.put.thumbnailWebp.headers['x-amz-content-sha256']).toBe(hashes[0].thumbnailWebp);
   expect((await prepare(first.body.uploadId, hashes[1])).status).toBe(409);
   expect((await completeImage(f, other.token, first.body.uploadId, bytes[0])).status).toBe(409);
   expect((await complete(first.body.uploadId, bytes[1])).status).toBe(502);
@@ -916,7 +918,7 @@ test('an incomplete upload expires independently of a rejected submission’s im
   const reserve = await authCall(f.store, { action: 'reserveImageUpload', sessionId: token,
     draftKey: crypto.randomUUID(), requestKey: crypto.randomUUID() });
   const abandoned = await authCall(f.store, { action: 'prepareImageUpload', sessionId: token,
-    uploadId: reserve.body.uploadId, hashes: { webp: 'f'.repeat(64), jxl: 'a'.repeat(64) } });
+    uploadId: reserve.body.uploadId, hashes: { webp: 'f'.repeat(64), jxl: 'a'.repeat(64), thumbnailWebp: 'b'.repeat(64) } });
   expect(abandoned.status).toBe(200);
   f.db.exec('UPDATE image_uploads SET expires_at=0');
   await f.store.alarm();

@@ -1299,26 +1299,23 @@ export class AuthStore implements DurableObject {
     if (!eligibleMemberAccount(account)) return { status: 403, body: { error: 'member_required' } };
     const config = imageStorageConfig(this.env);
     if (!config) return { status: 503, body: { error: 'image_upload_not_configured' } };
-    let verifiedKeys: ImageFiles<string> | null = null;
-    let previewBytes: number | undefined;
+    let verified: { keys: ImageFiles<string>; previewBytes: number } | undefined;
     if (action === 'completeImageUpload') {
       const isSize = (value: unknown): value is number => typeof value === 'number' &&
         Number.isInteger(value) && value >= 1 && value <= MAX_BUILDING_IMAGE_BYTES;
-      if (!isImageFiles(sizes, isSize) || sizes.webp + sizes.jxl > MAX_BUILDING_IMAGE_BYTES || (sizes.thumbnailWebp ?? 0) > MAX_THUMBNAIL_BYTES)
+      if (!isImageFiles(sizes, isSize) || sizes.webp + sizes.jxl > MAX_BUILDING_IMAGE_BYTES || sizes.thumbnailWebp > MAX_THUMBNAIL_BYTES)
         return { status: 422, body: { error: 'invalid_image' } };
       const keys = this.buildings.uploadKeys(account.playerUuid, uploadId);
       if (!keys) return { status: 409, body: { error: 'upload_expired' } };
-      if (Boolean(keys.thumbnailWebp) !== Boolean(sizes.thumbnailWebp)) return { status: 422, body: { error: 'invalid_image' } };
       try {
         const [webp, jxl, thumbnailWebp] = await Promise.all([
           readBuildingImage(config, keys.webp, sizes.webp),
           readBuildingImage(config, keys.jxl, sizes.jxl),
-          keys.thumbnailWebp ? readBuildingImage(config, keys.thumbnailWebp, sizes.thumbnailWebp!) : undefined,
+          readBuildingImage(config, keys.thumbnailWebp, sizes.thumbnailWebp),
         ]);
         const inspected = await inspectBuildingImages({ webp, jxl, thumbnailWebp });
         if (!inspected) return { status: 422, body: { error: 'invalid_image' } };
-        previewBytes = inspected.jxlPreviewBytes;
-        verifiedKeys = keys;
+        verified = { keys, previewBytes: inspected.jxlPreviewBytes };
       } catch (error) {
         console.warn('Building image verification failed', keys, error instanceof Error ? error.message : 'storage error');
         return { status: 502, body: { error: 'image_upload_unavailable' } };
@@ -1336,12 +1333,12 @@ export class AuthStore implements DurableObject {
         if (!keys) return { status: 409, body: { error: 'upload_expired' } };
         const [webp, jxl, thumbnailWebp] = await Promise.all([
           prepareImagePut(config, keys.webp), prepareImagePut(config, keys.jxl),
-          keys.thumbnailWebp ? prepareImagePut(config, keys.thumbnailWebp) : undefined,
+          prepareImagePut(config, keys.thumbnailWebp),
         ]);
         return { status: 200, body: { put: { webp, jxl, thumbnailWebp } } };
       }
-      if (verifiedKeys !== null) {
-        const completed = this.buildings.completeUpload(account.playerUuid, uploadId, verifiedKeys, previewBytes);
+      if (verified) {
+        const completed = this.buildings.completeUpload(account.playerUuid, uploadId, verified.keys, verified.previewBytes);
         return completed
           ? { status: 200, body: completed }
           : { status: 409, body: { error: 'upload_expired' } };

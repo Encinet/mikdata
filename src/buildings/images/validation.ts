@@ -12,21 +12,19 @@ let jxlParser: ReturnType<typeof createJxlTran> | undefined;
 /** Inspect the encoded files. Pixel conversion runs in the uploading browser. */
 export async function inspectBuildingImages(
   bytes: ImageFiles<Uint8Array<ArrayBuffer>>,
-): Promise<{ jxlPreviewBytes?: number } | null> {
+): Promise<{ jxlPreviewBytes: number } | null> {
   if (bytes.webp.length + bytes.jxl.length > MAX_BUILDING_IMAGE_BYTES) return null;
   const webp = pixelOnlyWebpDimensions(bytes.webp);
   if (!webp || Math.max(webp.width, webp.height) > MAX_BUILDING_IMAGE_DIMENSION) return null;
   const jxl = jxlCodestreamDimensions(bytes.jxl);
   if (!jxl || jxl.width !== webp.width || jxl.height !== webp.height) return null;
-  if (bytes.thumbnailWebp) {
-    const thumb = pixelOnlyWebpDimensions(bytes.thumbnailWebp);
-    const scale = Math.min(1, MAX_THUMBNAIL_DIMENSION / Math.max(webp.width, webp.height));
-    if (!thumb || bytes.thumbnailWebp.length > MAX_THUMBNAIL_BYTES ||
-        thumb.width > Math.max(1, Math.round(webp.width * scale)) ||
-        thumb.height > Math.max(1, Math.round(webp.height * scale)) ||
-        Math.abs(thumb.width * webp.height - thumb.height * webp.width) > Math.max(webp.width, webp.height))
-      return null;
-  }
+  const thumb = pixelOnlyWebpDimensions(bytes.thumbnailWebp);
+  const scale = Math.min(1, MAX_THUMBNAIL_DIMENSION / Math.max(webp.width, webp.height));
+  if (!thumb || bytes.thumbnailWebp.length > MAX_THUMBNAIL_BYTES ||
+      thumb.width > Math.max(1, Math.round(webp.width * scale)) ||
+      thumb.height > Math.max(1, Math.round(webp.height * scale)) ||
+      Math.abs(thumb.width * webp.height - thumb.height * webp.width) > Math.max(webp.width, webp.height))
+    return null;
   jxlParser ??= createJxlTran(typeof jxlWasm === 'string' ? undefined : jxlWasm);
   const parser = await jxlParser;
   try {
@@ -37,7 +35,7 @@ export async function inspectBuildingImages(
     if (error instanceof TransformError) return null;
     throw error;
   }
-  return bytes.thumbnailWebp ? { jxlPreviewBytes: previewBudget(parser, bytes.jxl) } : {};
+  return { jxlPreviewBytes: previewBudget(parser, bytes.jxl) };
 }
 
 function previewBudget(parser: Awaited<ReturnType<typeof createJxlTran>>, bytes: Uint8Array<ArrayBuffer>) {

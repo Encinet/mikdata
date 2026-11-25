@@ -56,10 +56,5 @@ export function initializeBuildingStorage(storage: DurableObjectStorage): void {
       DELETE FROM building_image_refs WHERE owner='building/' || OLD.id;
     END;
     `);
-    const columns = storage.sql.exec<{name: string}>('PRAGMA table_info(image_uploads)').toArray();
-    if (!columns.some(c => c.name === 'thumbnail_key'))
-      storage.sql.exec('ALTER TABLE image_uploads ADD COLUMN thumbnail_key TEXT');
-    if (!columns.some(c => c.name === 'jxl_preview_bytes'))
-      storage.sql.exec('ALTER TABLE image_uploads ADD COLUMN jxl_preview_bytes INTEGER');
   });
 }

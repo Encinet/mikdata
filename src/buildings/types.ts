@@ -26,8 +26,8 @@ export interface Source {
 export interface BuildingImage {
   webp: string;
   jxl: string;
-  thumbnailWebp?: string;
-  jxlPreviewBytes?: number;
+  thumbnailWebp: string;
+  jxlPreviewBytes: number;
 }
 
 export interface Building {

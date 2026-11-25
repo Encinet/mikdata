@@ -235,7 +235,7 @@ function renderSubmissions() {
 
 function thumbnail(id, image) {
   return image && imageBaseUrl
-    ? buildingPicture(id, image, 'class="record-thumb" loading="lazy" decoding="async"')
+    ? buildingThumbnail(id, image, 'class="record-thumb" loading="lazy" decoding="async"')
     : '<span class="record-thumb record-thumb-empty">${icon('building')}</span>';
 }
 
