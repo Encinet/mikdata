@@ -1,6 +1,6 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { matchProxyRoute, serveProxyRoute } from '../../src/proxy';
-import { testAuthEnv } from '../helpers/auth-store';
+import { testAuthEnv } from '../helpers/auth';
 
 const originalFetch = globalThis.fetch;
 const originalCache = Object.getOwnPropertyDescriptor(globalThis, 'caches');

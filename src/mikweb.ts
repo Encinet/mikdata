@@ -1,8 +1,14 @@
-import type { Env } from '../env';
-import { authJson, readLimitedRequestText, RequestBodyTooLargeError } from '../shared/http';
-import { authStore, type StoreRequest } from './binding';
-import { AUTH_RATE_LIMIT_WINDOW_SECONDS, CHALLENGE_TTL_SECONDS, sanitizeRateLimitPart, SESSION_ABSOLUTE_SECONDS } from './policy';
-import { asString, MAX_AUTH_BODY_BYTES, optionalString } from './request';
+import { DatabaseBusy } from './db/transaction';
+import type { Env } from './env';
+import { asString, authJson, readLimitedRequestText, RequestBodyTooLargeError } from './shared/http';
+import { SessionService } from './auth/sessions';
+import { MinecraftLogin } from './auth/minecraft';
+import { Passkeys } from './auth/passkeys';
+import { authorizeWebChat, checkChatLeases } from './auth/chat';
+import { playerBuildingAction, type UploadAction } from './buildings/actions';
+import { lookupPlayer, PluginUnavailableError } from './players/accounts';
+import { AUTH_RATE_LIMIT_WINDOW_SECONDS, CHALLENGE_TTL_SECONDS, sanitizeRateLimitPart, SESSION_ABSOLUTE_SECONDS } from './auth/policy';
+const MAX_AUTH_BODY_BYTES = 64 * 1024;
 
 const SESSION_COOKIE_NAME = '__Host-mik_sid';
 
@@ -17,7 +23,7 @@ interface AuthRateLimitCheck {
   key: string;
 }
 
-const imageUploadActions = new Map([
+const imageUploadActions = new Map<string, UploadAction>([
   ['/me/images/reserve', 'reserveImageUpload'],
   ['/me/images/prepare', 'prepareImageUpload'],
   ['/me/images/complete', 'completeImageUpload'],
@@ -45,17 +51,69 @@ function isAllowedAuthRoute(path: string, method: string): boolean {
       '/me/security',
       '/me/sessions/revoke',
       '/me/players/resolve',
-      '/me/chat/authorize',
       '/me/building-submissions',
       '/me/building-submissions/mine',
     ]).has(path) || imageUploadActions.has(path) || /^\/auth\/challenges\/[A-Za-z0-9_-]{24}\/complete$/.test(path)
   );
 }
 
-export async function handleAuthRoute(
+function chatSessionCookie(request: Request) {
+  const cookies = (request.headers.get('cookie') ?? '').split(';')
+    .map(part => part.trim()).filter(part => part.startsWith(SESSION_COOKIE_NAME + '='));
+  const token = cookies.length === 1 ? cookies[0].slice(SESSION_COOKIE_NAME.length + 1) : '';
+  return /^[A-Za-z0-9_-]{43}$/.test(token) ? token : '';
+}
+
+export async function handleChatRequest(
+  request: Request, env: Env, ctx: ExecutionContext, path: '/chat/connect' | '/chat/check' | '/chat/session',
+) {
+  const reading = path === '/chat/session';
+  if (request.method !== (reading ? 'GET' : 'POST')) return authJson({ error: 'method_not_allowed' }, 405);
+  if (path !== '/chat/check') {
+    const origin = request.headers.get('origin');
+    const site = request.headers.get('sec-fetch-site');
+    if ((site && site !== 'same-origin') || (origin !== 'https://mcmik.top' && !(reading && !origin)))
+      return authJson({ error: 'forbidden' }, 403);
+  }
+  if (!reading && request.headers.get('content-type')?.split(';')[0].trim() !== 'application/json')
+    return authJson({ error: 'unsupported_media_type' }, 415);
+
+  try {
+    const sessions = new SessionService(env, ctx);
+    const clientKey = 'ip:' + sanitizeRateLimitPart(request.headers.get('cf-connecting-ip') ?? 'unknown');
+    if (reading) {
+      const limited = await enforceAuthRateLimits('/auth/me', 'POST', clientKey, env);
+      if (limited) return limited;
+      const result = await sessions.me(chatSessionCookie(request), clientKey);
+      const headers = sessionHeaders(result.body);
+      if (result.status === 429 && typeof result.body.retryAfterSeconds === 'number')
+        headers.set('Retry-After', String(result.body.retryAfterSeconds));
+      return authJson(stripInternalAuthFields(result.body), result.status, headers);
+    }
+    const payload = await readJsonObject(request, path === '/chat/check' ? 4096 : 1024);
+    if (!payload.ok) return payload.response;
+    const data = payload.data;
+    if (path === '/chat/check') {
+      const result = await checkChatLeases(sessions, data);
+      return authJson(result.body, result.status);
+    }
+    const token = chatSessionCookie(request);
+    if (!token) return authJson({ error: 'unauthenticated' }, 401);
+    const limited = await enforceAuthRateLimits(path, 'POST', clientKey, env);
+    if (limited) return limited;
+    const result = await authorizeWebChat(sessions, token, asString(data.connectionId), asString(data.clientPublicKey), data.chatScope);
+    return authJson(stripInternalAuthFields(result.body), result.status);
+  } catch (error) {
+    const result = mikwebError(error);
+    return authJson(result.body, result.status);
+  }
+}
+
+export async function handleMikwebRoute(
   routePath: string,
   request: Request,
   env: Env,
+  ctx: ExecutionContext,
 ): Promise<AuthRouteResult> {
   if (!routePath.startsWith('/auth') && !routePath.startsWith('/me')) {
     return null;
@@ -71,20 +129,25 @@ export async function handleAuthRoute(
   const clientKey = clientRateLimitKey(request);
   const rateLimited = await enforceAuthRateLimits(routePath, request.method, clientKey, env);
   if (rateLimited) return rateLimited;
-  const store = authStore(env);
+  try {
+    return await serveMikwebRoute(routePath, request, env, ctx, clientKey);
+  } catch (error) {
+    const result = mikwebError(error);
+    return authJson(result.body, result.status);
+  }
+}
+
+async function serveMikwebRoute(routePath: string, request: Request, env: Env, ctx: ExecutionContext, clientKey: string) {
+  const auth = new SessionService(env, ctx);
   const sessionId = request.headers.get('X-Mik-Session') ?? '';
   const browserNonce = request.headers.get('X-Mik-Browser-Nonce') ?? '';
 
+  const payload = request.method === 'GET' ? { ok: true as const, data: {} as Record<string, unknown> } : await readJsonObject(request);
+  if (!payload.ok) return payload.response;
+  const data = payload.data;
+
   if (routePath === '/auth/challenges' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'createMinecraftChallenge',
-      purpose: payload.data.purpose,
-      sessionId,
-      clientKey,
-      browserNonce,
-    });
+    const response = await new MinecraftLogin(auth).create(clientKey, browserNonce, data.purpose, sessionId);
     return authJson(
       stripInternalAuthFields(response.body),
       response.status,
@@ -94,27 +157,13 @@ export async function handleAuthRoute(
 
   const challengeStatus = routePath.match(/^\/auth\/challenges\/([^/]+)$/);
   if (challengeStatus && request.method === 'GET') {
-    const response = await callStore(store, {
-      action: 'getMinecraftChallenge',
-      sessionId,
-      challengeId: challengeStatus[1],
-      browserNonce,
-      clientKey,
-    });
+    const response = await new MinecraftLogin(auth).get(challengeStatus[1], clientKey, browserNonce, sessionId);
     return authJson(response.body, response.status);
   }
 
   const challengeComplete = routePath.match(/^\/auth\/challenges\/([^/]+)\/complete$/);
   if (challengeComplete && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'completeMinecraftChallenge',
-      sessionId,
-      challengeId: challengeComplete[1],
-      browserNonce,
-      clientKey,
-    });
+    const response = await new MinecraftLogin(auth).complete(challengeComplete[1], browserNonce, clientKey, sessionId);
     return authJson(
       stripInternalAuthFields(response.body),
       response.status,
@@ -123,9 +172,7 @@ export async function handleAuthRoute(
   }
 
   if (routePath === '/auth/me' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const { status, body } = await callStore(store, { action: 'me', sessionId, clientKey });
+    const { status, body } = await auth.me(sessionId, clientKey);
     const headers = sessionHeaders(body);
     if (status === 429 && typeof body.retryAfterSeconds === 'number') {
       headers.set('Retry-After', String(body.retryAfterSeconds));
@@ -133,29 +180,8 @@ export async function handleAuthRoute(
     return authJson(stripInternalAuthFields(body), status, headers);
   }
 
-  if (routePath === '/me/chat/authorize' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'authorizeWebChat',
-      sessionId,
-      connectionId: payload.data.connectionId,
-      clientPublicKey: payload.data.clientPublicKey,
-    });
-    return authJson(
-      stripInternalAuthFields(response.body),
-      response.status,
-      sessionHeaders(response.body),
-    );
-  }
-
   if (routePath === '/auth/logout' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'logout',
-      sessionId,
-    });
+    const response = await auth.logout(sessionId);
     return authJson(
       stripInternalAuthFields(response.body),
       response.status,
@@ -164,24 +190,12 @@ export async function handleAuthRoute(
   }
 
   if (routePath === '/auth/passkeys/options/register' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'passkeyRegistrationOptions',
-      sessionId,
-    });
+    const response = await new Passkeys(auth).registrationOptions(sessionId);
     return authJson(response.body, response.status);
   }
 
   if (routePath === '/auth/passkeys/register' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'passkeyRegister',
-      sessionId,
-      credential: payload.data.credential,
-      displayName: payload.data.displayName,
-    });
+    const response = await new Passkeys(auth).register(sessionId, data.credential, data.displayName);
     return authJson(
       stripInternalAuthFields(response.body),
       response.status,
@@ -190,15 +204,7 @@ export async function handleAuthRoute(
   }
 
   if (routePath === '/auth/passkeys/options/authenticate' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'passkeyAuthenticationOptions',
-      purpose: payload.data.purpose,
-      sessionId,
-      clientKey,
-      browserNonce,
-    });
+    const response = await new Passkeys(auth).authenticationOptions(clientKey, browserNonce, data.purpose, sessionId);
     return authJson(
       stripInternalAuthFields(response.body),
       response.status,
@@ -207,15 +213,7 @@ export async function handleAuthRoute(
   }
 
   if (routePath === '/auth/passkeys/authenticate' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'passkeyAuthenticate',
-      sessionId,
-      credential: payload.data.credential,
-      browserNonce,
-      clientKey,
-    });
+    const response = await new Passkeys(auth).authenticate(data.credential, clientKey, browserNonce, sessionId);
     return authJson(
       stripInternalAuthFields(response.body),
       response.status,
@@ -227,47 +225,21 @@ export async function handleAuthRoute(
   const sessionResource = routePath.match(/^\/me\/sessions\/([A-Za-z0-9_-]{43})$/);
   const renameTarget = passkeyResource ?? sessionResource;
   if (request.method === 'PATCH' && renameTarget) {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'renameSecurityItem',
-      kind: passkeyResource ? 'passkey' : 'session',
-      targetId: renameTarget[1],
-      displayName: payload.data.displayName,
-      sessionId,
-    });
+    const response = await auth.renameSecurityItem(sessionId, passkeyResource ? 'passkey' : 'session', renameTarget[1], data.displayName);
     return authJson(response.body, response.status);
   }
   if (passkeyResource && request.method === 'DELETE') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'passkeyDelete',
-      credentialId: passkeyResource[1],
-      sessionId,
-    });
+    const response = await new Passkeys(auth).delete(sessionId, passkeyResource[1]);
     return authJson(response.body, response.status);
   }
 
   if (routePath === '/me/security' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'accountSecurity',
-      sessionId,
-    });
+    const response = await auth.accountSecurity(sessionId);
     return authJson(response.body, response.status);
   }
 
   if (routePath === '/me/sessions/revoke' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'revokeAccountSession',
-      sessionId,
-      targetSessionId: payload.data.targetSessionId,
-      all: payload.data.all === true,
-    });
+    const response = await auth.revokeAccountSession(sessionId, asString(data.targetSessionId), data.all === true);
     return authJson(
       stripInternalAuthFields(response.body),
       response.status,
@@ -276,28 +248,20 @@ export async function handleAuthRoute(
   }
 
   if (routePath === '/me/players/resolve' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
-      action: 'resolvePlayer',
-      sessionId,
-      name: payload.data.name,
-    });
+    const response = await resolveMikwebPlayer(auth, sessionId, asString(data.name));
     return authJson(response.body, response.status);
   }
 
   const uploadAction = imageUploadActions.get(routePath);
   if (uploadAction && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
+    const response = await playerBuildingAction(env, auth, {
       action: uploadAction,
-      hashes: payload.data.hashes,
+      hashes: data.hashes,
       sessionId,
-      draftKey: payload.data.draftKey,
-      requestKey: payload.data.requestKey,
-      uploadId: payload.data.uploadId,
-      sizes: payload.data.sizes,
+      draftKey: data.draftKey,
+      requestKey: data.requestKey,
+      uploadId: data.uploadId,
+      sizes: data.sizes,
     });
     return authJson(
       response.body,
@@ -309,9 +273,7 @@ export async function handleAuthRoute(
   }
 
   if (routePath === '/me/building-submissions' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
+    const response = await playerBuildingAction(env, auth, {
       action: 'createBuildingSubmission',
       sessionId,
       payload: payload.data,
@@ -320,9 +282,7 @@ export async function handleAuthRoute(
   }
 
   if (routePath === '/me/building-submissions/mine' && request.method === 'POST') {
-    const payload = await readJsonObject(request);
-    if (!payload.ok) return payload.response;
-    const response = await callStore(store, {
+    const response = await playerBuildingAction(env, auth, {
       action: 'listBuildingSubmissions',
       sessionId,
     });
@@ -330,6 +290,13 @@ export async function handleAuthRoute(
   }
 
   return authJson({ error: 'not_found' }, 404);
+}
+
+export async function resolveMikwebPlayer(auth: SessionService, sessionId: string, name: string) {
+  const session = await auth.readValidSession(sessionId);
+  if (!session) return { status: 401, body: { error: 'unauthenticated' } };
+  if (!await auth.readAccount(session.playerUuid)) return { status: 403, body: { error: 'authentication_invalidated' } };
+  return lookupPlayer(auth.env, name);
 }
 
 async function enforceAuthRateLimits(
@@ -389,23 +356,21 @@ function authSensitiveAction(routePath: string, method: string): string | null {
   return null;
 }
 
-async function callStore(
-  store: DurableObjectStub,
-  body: StoreRequest,
-): Promise<{ status: number; body: Record<string, unknown> }> {
-  const response = await store.fetch('https://auth-store.local/', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-  return (await response.json()) as { status: number; body: Record<string, unknown> };
+export function mikwebError(error: unknown) {
+  if (error instanceof DatabaseBusy) return { status: 503, body: { error: 'database_busy' } };
+  if (error instanceof PluginUnavailableError) return { status: 503, body: { error: 'plugin_unavailable' } };
+  if (String(error).includes('image_unavailable')) return { status: 409, body: { error: 'image_unavailable' } };
+  console.error('MikWeb request failed', error);
+  return { status: 500, body: { error: 'internal_error' } };
 }
 
 async function readJsonObject(
   request: Request,
+  maxBytes = MAX_AUTH_BODY_BYTES,
 ): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; response: Response }> {
   let text: string;
   try {
-    text = await readLimitedRequestText(request, MAX_AUTH_BODY_BYTES);
+    text = await readLimitedRequestText(request, maxBytes);
   } catch (error) {
     return {
       ok: false,
@@ -477,7 +442,7 @@ function setLoginCookie(body: Record<string, unknown>): HeadersInit {
 
 function sessionHeaders(body: Record<string, unknown>): Headers {
   const headers = new Headers();
-  const sessionId = optionalString(body.sessionId);
+  const sessionId = asString(body.sessionId);
   if (sessionId) {
     headers.append(
       'Set-Cookie',

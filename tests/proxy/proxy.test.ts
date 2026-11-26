@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
 import type { Env } from '../../src/env';
-import { testAuthEnv } from '../helpers/auth-store';
+import { testAuthEnv } from '../helpers/auth';
 import worker from '../../src/index';
 import { matchProxyRoute, serveProxyRoute } from '../../src/proxy';
 
-test('public proxy routes survive unavailable KV', async () => {
-  const env = createEnvWithUnavailableKv();
+test('public proxy routes return upstream data', async () => {
+  const env = createProxyEnv();
   const ctx = {
     waitUntil: () => undefined,
     passThroughOnException: () => undefined,
@@ -29,7 +29,7 @@ test('public proxy routes survive unavailable KV', async () => {
 
 test('public API rate limiting rejects before upstream work', async () => {
   const keys: string[] = [];
-  const env = createEnvWithUnavailableKv();
+  const env = createProxyEnv();
   env.PUBLIC_API_RATE_LIMITER = createRateLimit(false, keys);
   env.VPC_SERVICE = {
     fetch: () => {
@@ -53,7 +53,7 @@ test('public API rate limiting rejects before upstream work', async () => {
 });
 
 test('health checks bypass public API rate limiting', async () => {
-  const env = createEnvWithUnavailableKv();
+  const env = createProxyEnv();
   env.PUBLIC_API_RATE_LIMITER = {
     limit: () => Promise.reject(new Error('rate limiter should not be called')),
   } as RateLimit;
@@ -67,13 +67,8 @@ test('health checks bypass public API rate limiting', async () => {
   expect(response.status).toBe(200);
 });
 
-function createEnvWithUnavailableKv(): Env {
+function createProxyEnv(): Env {
   return testAuthEnv({
-    BUILDINGS_KV: {
-      get: () => {
-        throw new Error('KV unavailable');
-      },
-    } as unknown as KVNamespace,
     VPC_SERVICE: {
       fetch: async (input: RequestInfo | URL) =>
         Response.json(responseBodyForPath(new URL(input.toString()).pathname)),

@@ -107,3 +107,7 @@ export function proxyJson(
     ...extraHeaders,
   });
 }
+
+export function asString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}

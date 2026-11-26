@@ -1,137 +1,73 @@
-import { Database } from 'bun:sqlite';
-import { AuthStore } from '../../src/auth/store';
+import { testDatabase } from './d1';
+import { SessionService } from '../../src/auth/sessions';
+import { MinecraftLogin } from '../../src/auth/minecraft';
+import { Passkeys } from '../../src/auth/passkeys';
+import { authorizeWebChat } from '../../src/auth/chat';
+import { asString } from '../../src/shared/http';
+import { resolveMikwebPlayer, mikwebError } from '../../src/mikweb';
+import { adminBuildings, playerBuildingAction } from '../../src/buildings/actions';
 import type { Env } from '../../src/env';
+import type { MemberBuildingCommand } from '../../src/buildings/actions';
+
+import { playerRow, playerAccount } from '../../src/players/repository';
 
 export const PLAYER_UUID = '00000000-0000-4000-8000-000000000001';
 export const OTHER_UUID = '00000000-0000-4000-8000-000000000002';
 
-/** Structured-clone reads, isolated commits and rollback; intentionally does not model workerd input gates. */
-export function memoryAuthStorage() {
-  const values = new Map<string, unknown>();
-  const db = new Database(':memory:');
-  let alarm: number | null = null;
-  let failSql: string | undefined;
-  let queue: Promise<unknown> = Promise.resolve();
-  let failPrefix: string | undefined;
-  const access = (data: Map<string, unknown>) => ({
-    get: async (key: string) => structuredClone(data.get(key)),
-    put: async (key: string | Record<string, unknown>, value?: unknown) => {
-      const entries = typeof key === 'string' ? [[key, value] as const] : Object.entries(key);
-      for (const [name, entry] of entries) {
-        if (failPrefix && name.startsWith(failPrefix)) {
-          failPrefix = undefined;
-          throw new Error('Injected storage failure');
-        }
-        data.set(name, structuredClone(entry));
-      }
-    },
-    delete: async (key: string | string[]) => {
-      if (Array.isArray(key) && key.length > 128)
-        throw new Error('Storage bulk delete exceeds 128 keys');
-      return Array.isArray(key)
-        ? key.reduce((count, name) => count + Number(data.delete(name)), 0)
-        : data.delete(key);
-    },
-    list: async ({ prefix, limit, startAfter }: DurableObjectListOptions = {}) =>
-      new Map(
-        [...data.entries()]
-          .filter(
-            ([key]) => (!prefix || key.startsWith(prefix)) && (!startAfter || key > startAfter),
-          )
-          .sort(([a], [b]) => a.localeCompare(b))
-          .slice(0, limit ?? Infinity)
-          .map(([key, value]) => [key, structuredClone(value)]),
-      ),
-  });
-  const storage = {
-    sql: {
-      exec: (query: string, ...bindings: (string | number | null | ArrayBuffer)[]) => {
-        if (failSql && query.includes(failSql)) {
-          failSql = undefined;
-          throw new Error('Injected SQL failure');
-        }
-        if (query.trim().split(';').filter(Boolean).length > 1) {
-          db.exec(query);
-          return { toArray: () => [] };
-        }
-        const rows = db.query(query).all(...bindings) as Record<string, unknown>[];
-        return {
-          toArray: () => rows,
-          one: () => {
-            if (rows.length !== 1) throw new Error('Expected one row');
-            return rows[0];
-          },
-          [Symbol.iterator]: () => rows[Symbol.iterator](),
-        };
-      },
-    },
-    getAlarm: async () => alarm,
-    setAlarm: async (time: number) => {
-      alarm = time;
-    },
-    deleteAlarm: async () => {
-      alarm = null;
-    },
-    ...Object.fromEntries(
-      Object.keys(access(values)).map((name) => [
-        name,
-        async (...args: unknown[]) => {
-          await queue;
-          return (access(values) as unknown as Record<string, (...input: unknown[]) => unknown>)[
-            name
-          ](...args);
-        },
-      ]),
-    ),
-    transactionSync: (task: () => unknown) => db.transaction(task)(),
-    transaction: (task: (txn: DurableObjectTransaction) => Promise<unknown>) => {
-      const result = queue
-        .catch(() => undefined)
-        .then(async () => {
-          const copy = structuredClone(values);
-          const oldAlarm = alarm;
-          db.exec('SAVEPOINT test_transaction');
-          let output: unknown;
-          try {
-            output = await task(access(copy) as unknown as DurableObjectTransaction);
-            db.exec('RELEASE test_transaction');
-          } catch (error) {
-            db.exec('ROLLBACK TO test_transaction; RELEASE test_transaction');
-            alarm = oldAlarm;
-            throw error;
-          }
-          values.clear();
-          for (const [key, value] of copy) values.set(key, value);
-          return output;
-        });
-      queue = result.catch(() => undefined);
-      return result;
-    },
-  } as unknown as DurableObjectStorage;
-  return {
-    storage,
-    values,
-    db,
-    failNextSql: (query: string) => {
-      failSql = query;
-    },
-    failNextPut: (prefix: string) => {
-      failPrefix = prefix;
-    },
-  };
+const tables: Record<string, string> = {
+  account: 'players', session: 'auth_sessions', passkey: 'auth_passkeys',
+  challenge: 'auth_challenges', code: 'auth_codes', webauthn: 'auth_webauthn',
+};
+export class FixtureRecords {
+  constructor(private readonly sqlite: ReturnType<typeof testDatabase>['sqlite']) {}
+  get(key: string) {
+    const [kind,id] = key.split(':');
+    if (kind === 'account') {
+      const row = this.sqlite.query('SELECT * FROM players WHERE id=?').get(id);
+      return row ? playerAccount(row) : undefined;
+    }
+    const row = this.sqlite.query(`SELECT document FROM ${tables[kind]} WHERE id=?`).get(id) as { document: string } | null;
+    return row ? JSON.parse(row.document) : undefined;
+  }
+  has(key: string) { return this.get(key) !== undefined; }
+  set(key: string, value: unknown) {
+    const [kind,id] = key.split(':');
+    if (kind === 'account') {
+      const row = playerRow(value);
+      this.sqlite.query('INSERT OR REPLACE INTO players(id,current_name,role,disabled_at,banned,credentials_changed_at,policy_checked_at) VALUES(?,?,?,?,?,?,?)')
+        .run(row.id, row.current_name, row.role, row.disabled_at, row.banned, row.credentials_changed_at, row.policy_checked_at);
+    } else this.sqlite.query(`INSERT OR REPLACE INTO ${tables[kind]}(id,document) VALUES(?,?)`).run(id, JSON.stringify(value));
+  }
+  delete(key: string) {
+    const [kind,id] = key.split(':');
+    this.sqlite.query(`DELETE FROM ${tables[kind]} WHERE id=?`).run(id);
+  }
+  sessions(uuid: string) {
+    return this.sqlite.query('SELECT id FROM auth_sessions WHERE player_uuid=?').all(uuid).map(row => row.id);
+  }
+  *keys() {
+    for (const [kind, table] of Object.entries(tables))
+      for (const { id } of this.sqlite.query(`SELECT id FROM ${table} ORDER BY id`).all()) yield kind + ':' + id;
+  }
+}
+
+export function authDatabaseFixture() {
+  const database = testDatabase();
+  const values = new FixtureRecords(database.sqlite);
+  function failNextSql(text: string) {
+    database.hooks.before = sql => {
+      if (!sql.includes(text)) return;
+      database.hooks.before = undefined;
+      throw new Error('Injected storage failure');
+    };
+  }
+  return { ...database, values, failNextSql, failNextPut: (prefix: string) => failNextSql('INSERT INTO ' + tables[prefix.split(':')[0]]) };
 }
 
 export function testAuthEnv(overrides: Partial<Env> = {}): Env {
   const limiter = { limit: async () => ({ success: true }) } as RateLimit;
   return {
-    BUILDINGS_KV: {
-      get: async (key: string | string[]) =>
-        Array.isArray(key) ? new Map(key.map((name) => [name, null])) : null,
-      put: async () => undefined,
-      list: async () => ({ keys: [], list_complete: true, cacheStatus: null }),
-    } as unknown as KVNamespace,
-    AUTH_STORE: {} as DurableObjectNamespace,
-    SPONSOR_STORE: {} as DurableObjectNamespace,
+    DB: overrides.DB ?? testDatabase().db,
     AUTH_CLIENT_RATE_LIMITER: limiter,
     AUTH_SESSION_CHECK_IP_RATE_LIMITER: limiter,
     AUTH_CHALLENGE_CREATE_RATE_LIMITER: limiter,
@@ -165,35 +101,43 @@ export function testAuthEnv(overrides: Partial<Env> = {}): Env {
   };
 }
 
-export function testAuthStore(overrides: Partial<Env> = {}, memory = memoryAuthStorage()) {
-  const env = testAuthEnv(overrides);
+export function authFixture(overrides: Partial<Env> = {}, memory = authDatabaseFixture()) {
+  const env = testAuthEnv({ DB: memory.db, ...overrides });
   const background: Promise<unknown>[] = [];
-  const store = new AuthStore(
-    {
-      storage: memory.storage,
-      waitUntil: (promise: Promise<unknown>) => {
-        background.push(promise);
-      },
-    } as DurableObjectState,
-    env,
-  );
-  return { store, env, background, ...memory };
+  const ctx = { waitUntil: (p: Promise<unknown>) => { background.push(p); } } as ExecutionContext;
+  return { ...memory, store: { env, ctx }, env, ctx, background, db: memory.sqlite };
 }
 
-export async function authCall(store: AuthStore, body: Record<string, unknown>) {
-  const response = await store.fetch(
-    new Request('https://auth-store.local/', { method: 'POST', body: JSON.stringify(body) }),
-  );
-  return (await response.json()) as {
-    status: number;
-    body: Record<string, unknown> & {
-      options: { challenge: string };
-      browserNonce: string;
-      challengeId: string;
-      sessionId: string;
-      authenticated: boolean;
-    };
-  };
+export async function authCall(store: { env: Env; ctx: ExecutionContext }, body: Record<string, unknown>) {
+  const auth = new SessionService(store.env, store.ctx);
+  const action = body as MemberBuildingCommand;
+  if (['createBuildingSubmission','listBuildingSubmissions','prepareImageUpload','reserveImageUpload','completeImageUpload'].includes(action.action))
+    return playerBuildingAction(store.env, auth, action);
+  if (action.action === 'adminBuildingMutation') return adminBuildings(store.env, { actor: {}, ...body } as any);
+  const data = body;
+  const sessionId = asString(body.sessionId);
+  const clientKey = asString(body.clientKey);
+  const browserNonce = asString(body.browserNonce);
+  try {
+    switch (body.action) {
+      case 'createMinecraftChallenge': return await new MinecraftLogin(auth).create(clientKey, browserNonce, data.purpose, sessionId);
+      case 'getMinecraftChallenge': return await new MinecraftLogin(auth).get(asString(data.challengeId), clientKey, browserNonce, sessionId);
+      case 'completeMinecraftChallenge': return await new MinecraftLogin(auth).complete(asString(data.challengeId), browserNonce, clientKey, sessionId);
+      case 'me': return await auth.me(sessionId, clientKey);
+      case 'logout': return await auth.logout(sessionId);
+      case 'passkeyRegistrationOptions': return await new Passkeys(auth).registrationOptions(sessionId);
+      case 'passkeyRegister': return await new Passkeys(auth).register(sessionId, data.credential, data.displayName);
+      case 'passkeyAuthenticationOptions': return await new Passkeys(auth).authenticationOptions(clientKey, browserNonce, data.purpose, sessionId);
+      case 'passkeyAuthenticate': return await new Passkeys(auth).authenticate(data.credential, clientKey, browserNonce, sessionId);
+      case 'passkeyDelete': return await new Passkeys(auth).delete(sessionId, asString(data.credentialId));
+      case 'accountSecurity': return await auth.accountSecurity(sessionId);
+      case 'renameSecurityItem': return await auth.renameSecurityItem(sessionId, data.kind, asString(data.targetId), data.displayName);
+      case 'revokeAccountSession': return await auth.revokeAccountSession(sessionId, asString(data.targetSessionId), data.all === true);
+      case 'authorizeWebChat': return await authorizeWebChat(auth, sessionId, asString(data.connectionId), asString(data.clientPublicKey));
+      case 'resolvePlayer': return await resolveMikwebPlayer(auth, sessionId, asString(data.name));
+      default: throw new Error('Unknown fixture action ' + body.action);
+    }
+  } catch (error) { return mikwebError(error); }
 }
 
 export function b64(value: Uint8Array | ArrayBuffer): string {
@@ -205,7 +149,7 @@ export async function hash(value: string): Promise<string> {
   return b64(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
 }
 export async function seedSession(
-  values: Map<string, unknown>,
+  values: FixtureRecords,
   ageMs = 0,
   playerUuid = PLAYER_UUID,
 ) {
@@ -223,7 +167,6 @@ export async function seedSession(
     authMethod: 'minecraft-challenge',
   };
   values.set(`session:${sidHash}`, record);
-  values.set(`account-session:${playerUuid}:${sidHash}`, sidHash);
   values.set(`account:${playerUuid}`, {
     playerUuid,
     currentName: 'Player',
@@ -232,7 +175,7 @@ export async function seedSession(
   return { token, record };
 }
 
-export async function passkeyFixture(values: Map<string, unknown>) {
+export async function passkeyFixture(values: FixtureRecords) {
   const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
     'sign',
     'verify',
@@ -265,7 +208,6 @@ export async function passkeyFixture(values: Map<string, unknown>) {
     createdAt: new Date().toISOString(),
   };
   values.set(`passkey:${id}`, record);
-  values.set(`account-passkey:${PLAYER_UUID}:${id}`, id);
   values.set(`account:${PLAYER_UUID}`, {
     playerUuid: PLAYER_UUID,
     currentName: 'Player',

@@ -4,9 +4,7 @@ export interface Env {
   BUILDING_IMAGE_ACCESS_KEY_ID?: string;
   BUILDING_IMAGE_SECRET_ACCESS_KEY?: string;
   BUILDING_IMAGE_PUBLIC_BASE_URL?: string;
-  BUILDINGS_KV: KVNamespace;
-  AUTH_STORE: DurableObjectNamespace;
-  SPONSOR_STORE: DurableObjectNamespace;
+  DB: D1Database;
   AUTH_CLIENT_RATE_LIMITER: RateLimit;
   AUTH_SESSION_CHECK_IP_RATE_LIMITER: RateLimit;
   AUTH_CHALLENGE_CREATE_RATE_LIMITER: RateLimit;

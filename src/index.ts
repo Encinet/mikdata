@@ -2,8 +2,9 @@ import type { Env } from './env';
 import { requireCloudflareAccess } from './auth/access';
 import { adminPage } from './admin/page';
 import { imagePublicBaseUrl } from './buildings/images/storage';
-import { handleAuthRoute } from './auth/route';
-import { AuthStore } from './auth/store';
+import { handleChatRequest, handleMikwebRoute } from './mikweb';
+import { maintainAuth } from './auth/repository';
+import { maintainBuildings } from './buildings/actions';
 import { handleAdminBuildingsRoute } from './buildings/admin-route';
 import { handlePublicBuildingsRoute } from './buildings/public-route';
 import { json, proxyJson, PUBLIC_CORS_HEADERS } from './shared/http';
@@ -11,30 +12,35 @@ import { matchProxyRoute, refreshProxyRoutes, serveProxyRoute } from './proxy';
 import {
   handleAdminSponsorsRoute,
   handlePublicSponsorsRoute,
-  refreshSponsorCatalog,
-} from './sponsors';
+} from './sponsors/route';
+import { refreshAfdian } from './sponsors/snapshot';
 
 const ADMIN_API_BASE_PATH = '/admin/api';
 const PUBLIC_BASE_PATH = '/api';
 const PUBLIC_RATE_LIMIT_WINDOW_SECONDS = 60;
 const RATE_LIMIT_RETRY_SECONDS = 10;
 
-export { AuthStore };
-export { SponsorStore } from './sponsors/store';
-
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     return handleRequest(request, env, ctx);
   },
 
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(maintainAuth(env.DB));
+    ctx.waitUntil(maintainBuildings(env));
     refreshProxyRoutes(env, ctx);
-    refreshSponsorCatalog(env, ctx);
+    if (new Date(event.scheduledTime).getUTCMinutes() === 0) {
+      ctx.waitUntil(refreshAfdian(env, event.scheduledTime));
+    }
   },
 };
 
 async function handleRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
+
+  if (url.pathname === '/chat/connect' || url.pathname === '/chat/check' || url.pathname === '/chat/session') {
+    return withoutCors(await handleChatRequest(request, env, ctx, url.pathname));
+  }
 
   if (request.method === 'OPTIONS') {
     if (url.pathname.startsWith('/admin') || isAuthPath(url.pathname)) {
@@ -49,7 +55,7 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
   }
 
   if (isAuthPath(url.pathname)) {
-    return withoutCors((await handleAuthRoute(url.pathname, request, env)) ?? json({ error: 'Not found' }, 404));
+    return withoutCors((await handleMikwebRoute(url.pathname, request, env, ctx)) ?? json({ error: 'Not found' }, 404));
   }
 
   const sponsorAdminPage = url.pathname === '/admin/sponsors' || url.pathname === '/admin/sponsors/';

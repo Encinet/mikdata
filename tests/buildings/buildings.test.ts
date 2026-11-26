@@ -1,9 +1,9 @@
 import { expect, spyOn, test } from 'bun:test';
-import { BuildingStore, PUBLIC_BUILDINGS_KEY, PUBLISH_INTERVAL_MS } from '../../src/buildings/store';
+import { BuildingStore } from '../../src/buildings/store';
 import { canonicalContent, contentTag } from '../../src/shared/content-precondition';
 import { sha256 } from '../../src/buildings/images/storage';
-import { AuthStore } from '../../src/auth/store';
-import { initializeBuildingStorage } from '../../src/buildings/schema';
+import { transact } from '../../src/db/transaction';
+import { maintainBuildings } from '../../src/buildings/actions';
 import { handleAdminBuildingsRoute } from '../../src/buildings/admin-route';
 import { handlePublicBuildingsRoute } from '../../src/buildings/public-route';
 import { validateBuildingInput } from '../../src/buildings/validation';
@@ -13,8 +13,8 @@ import {
   OTHER_UUID,
   PLAYER_UUID,
   seedSession,
-  testAuthStore,
-} from '../helpers/auth-store';
+  authFixture,
+} from '../helpers/auth';
 
 const input = (name = 'Building') => ({
   name: { 'zh-CN': name, en: name },
@@ -27,36 +27,18 @@ const input = (name = 'Building') => ({
 });
 const imageBaseUrl = 'https://images.example/gallery';
 function setup() {
-  const kv = new Map<string, string>();
-  let writes = 0;
-  let fail = false;
-  const fixture = testAuthStore({
+  return authFixture({
     BUILDING_IMAGE_PUBLIC_BASE_URL: imageBaseUrl,
     BUILDING_IMAGE_S3_BUCKET_URL: 'https://bucket.example',
     BUILDING_IMAGE_S3_REGION: 'test-region',
     BUILDING_IMAGE_ACCESS_KEY_ID: 'test',
     BUILDING_IMAGE_SECRET_ACCESS_KEY: 'test',
-    BUILDINGS_KV: {
-      get: async (key: string) => kv.get(key) ?? null,
-      put: async (key: string, value: string) => {
-        writes++;
-        if (fail) throw new Error('KV unavailable');
-        kv.set(key, value);
-      },
-    } as unknown as KVNamespace,
   });
-  fixture.env.AUTH_STORE = {
-    idFromName: () => 'global',
-    get: () => ({ fetch: (request: Request) => fixture.store.fetch(request) }),
-  } as unknown as DurableObjectNamespace;
-  return {
-    ...fixture,
-    kv,
-    writes: () => writes,
-    setFail: (value: boolean) => {
-      fail = value;
-    },
-  };
+}
+async function publicCatalog(fixture: ReturnType<typeof setup>) {
+  const response = await handlePublicBuildingsRoute('/buildings', new Request('https://data.example/api/buildings'), fixture.env);
+  expect(response?.status).toBe(200);
+  return response!.json();
 }
 async function admin(
   fixture: ReturnType<typeof setup>,
@@ -193,8 +175,8 @@ async function submit(fixture: ReturnType<typeof setup>, token: string, draft: A
   });
 }
 
-function storedSubmission(fixture: ReturnType<typeof setup>, id: string): BuildingSubmission {
-  return new BuildingStore(fixture.storage).submission(id)!;
+async function storedSubmission(fixture: ReturnType<typeof setup>, id: string) {
+  return (await new BuildingStore(fixture.env.DB).submission(id))!;
 }
 
 test('validation rejects unknown fields, invalid dates and image paths', () => {
@@ -250,114 +232,56 @@ function stored(name = 'Building', id = 'ab'.repeat(16)): Building {
   return { id, ...input(name) };
 }
 
-test('a missing public snapshot is rebuilt from SQLite and republished', async () => {
-  const f = setup(),
-    store = new BuildingStore(f.storage);
-  initializeBuildingStorage(f.storage);
+test('the public catalog reads committed buildings from D1', async () => {
+  const f = setup();
+  expect(await publicCatalog(f)).toEqual({ imageBaseUrl, buildings: [] });
   const building = stored();
-  store.insertBuilding(building);
-  const response = await handlePublicBuildingsRoute(
-    '/buildings',
-    new Request('https://data.example/api/buildings'),
-    f.env,
-  );
-  expect(response?.status).toBe(200);
-  expect(await response?.json()).toEqual({ imageBaseUrl, buildings: [{ id: building.id, ...input() }] });
-  expect(await f.storage.getAlarm()).toBeNumber();
-  f.db.exec('UPDATE building_publication SET next_attempt=0');
-  await f.store.alarm();
-  expect(JSON.parse(f.kv.get(PUBLIC_BUILDINGS_KEY)!).buildings).toEqual(store.snapshot().buildings);
+  await transact(f.env.DB, 'buildings', async tx => new BuildingStore(f.env.DB, tx).insertBuilding(building));
+  expect(await publicCatalog(f)).toEqual({ imageBaseUrl, buildings: [building] });
 });
 
-test('a fresh database serves and publishes an empty public catalog', async () => {
+test('duplicate lookups preserve multilingual matching and exclude the current building', async () => {
   const f = setup();
-  const response = await handlePublicBuildingsRoute(
-    '/buildings',
-    new Request('https://data.example/api/buildings'),
-    f.env,
-  );
-  expect(response?.status).toBe(200);
-  expect(await response?.json()).toEqual({ imageBaseUrl, buildings: [] });
-  f.db.exec('UPDATE building_publication SET next_attempt=0');
-  await f.store.alarm();
-  expect(JSON.parse(f.kv.get(PUBLIC_BUILDINGS_KEY)!)).toMatchObject({ buildings: [] });
-});
-
-test('a public snapshot with duplicate IDs is rebuilt from the authoritative database', async () => {
-  const f = setup();
-  const store = new BuildingStore(f.storage);
-  initializeBuildingStorage(f.storage);
-  const building = stored('Authoritative');
-  store.insertBuilding(building);
-  const document = store.snapshot().buildings[0];
-  f.kv.set(PUBLIC_BUILDINGS_KEY, JSON.stringify({
-    version: 99,
-    buildings: [document, { ...document, name: input('Conflicting').name }],
-  }));
-  const list = await handlePublicBuildingsRoute(
-    '/buildings',
-    new Request('https://data.example/api/buildings'),
-    f.env,
-  );
-  expect(list?.status).toBe(200);
-  expect(await list!.json()).toEqual({ imageBaseUrl, buildings: [{ id: building.id, ...input('Authoritative') }] });
-  const detail = await handlePublicBuildingsRoute(
-    `/buildings/${building.id}`,
-    new Request(`https://data.example/api/buildings/${building.id}`),
-    f.env,
-  );
-  expect(await detail!.json()).toEqual({ imageBaseUrl, building });
-  expect(await f.storage.getAlarm()).toBeNumber();
-});
-
-test('duplicate lookups preserve multilingual matching and exclude the current building', () => {
-  const f = setup();
-  const store = new BuildingStore(f.storage);
-  initializeBuildingStorage(f.storage);
+  const store = new BuildingStore(f.env.DB);
   const building = { ...stored('Original'), name: { 'zh-CN': '中文建筑', en: 'English' } };
-  store.insertBuilding(building);
-  expect(store.duplicateBuildingId(building)).toBe(building.id);
-  expect(store.duplicateBuildingId(building, building.id)).toBeNull();
+  await transact(f.env.DB, 'buildings', async tx => new BuildingStore(f.env.DB, tx).insertBuilding(building));
+  expect((await store.duplicateBuildingId(building))).toBe(building.id);
+  expect((await store.duplicateBuildingId(building, building.id))).toBeNull();
   for (const name of [
     { 'zh-CN': '中文建筑', en: 'Different' },
     { 'zh-CN': '不同建筑', en: 'English' },
-  ]) expect(store.duplicateBuildingId({ ...building, name })).toBe(building.id);
+  ]) expect((await store.duplicateBuildingId({ ...building, name }))).toBe(building.id);
   for (const changed of [
     { name: { 'zh-CN': 'English', en: '中文建筑' } },
     { name: { 'zh-CN': '不同建筑', en: 'english' } },
     { coordinates: { ...building.coordinates, world: 'world_nether' } },
     { buildDate: '2026-06-28' },
     { builders: [{ name: 'Other', uuid: OTHER_UUID, weight: 1 }] },
-  ]) expect(store.duplicateBuildingId({ ...building, ...changed })).toBeNull();
+  ]) expect((await store.duplicateBuildingId({ ...building, ...changed }))).toBeNull();
   const renamed = { ...building, name: { 'zh-CN': '已重命名', en: 'Renamed' } };
-  store.updateBuilding(renamed);
-  expect(store.duplicateBuildingId(building)).toBeNull();
-  expect(store.duplicateBuildingId(renamed)).toBe(building.id);
+  await transact(f.env.DB, 'buildings', async tx => new BuildingStore(f.env.DB, tx).updateBuilding(renamed));
+  expect((await store.duplicateBuildingId(building))).toBeNull();
+  expect((await store.duplicateBuildingId(renamed))).toBe(building.id);
 });
 
-test('conditional deletes compare the expected content without publishing failed mutations', async () => {
+test('conditional deletes require the current building content', async () => {
   const f = setup();
   const created = await admin(f, '/buildings', 'POST', input());
   const original = created.body as Building;
   const updated = await admin(f, `/buildings/${original.id}`, 'PUT', input('Updated'), original);
   expect(updated.status).toBe(200);
-  const store = new BuildingStore(f.storage);
-  const revision = store.snapshot().version;
+  const store = new BuildingStore(f.env.DB);
   const stale = await admin(f, `/buildings/${original.id}`, 'DELETE', undefined, original);
   expect(stale.status).toBe(412);
-  expect(store.snapshot().version).toBe(revision);
-  expect(store.building(original.id)).toEqual(updated.body);
+  expect((await store.building(original.id))).toEqual(updated.body);
   const deleted = await admin(f, `/buildings/${original.id}`, 'DELETE', undefined, updated.body);
   expect(deleted.status).toBe(200);
-  expect(store.snapshot()).toEqual({ version: revision + 1, buildings: [] });
+  expect(await store.buildings()).toEqual([]);
   expect((await admin(f, `/buildings/${original.id}`, 'DELETE', undefined, updated.body)).status).toBe(404);
-  expect(store.snapshot().version).toBe(revision + 1);
-  const restarted = new AuthStore({ storage: f.storage } as DurableObjectState, f.env);
-  const snapshot = await authCall(restarted, { action: 'publicBuildingSnapshot' });
-  expect(snapshot.body.buildings).toEqual([]);
+  expect(await publicCatalog(f)).toEqual({ imageBaseUrl, buildings: [] });
 });
 
-test('bulk import publishes one catalog revision and retains language-specific duplicate detection', async () => {
+test('bulk import retains language-specific duplicate detection', async () => {
   const f = setup();
   const imported = await admin(f, '/buildings/import', 'POST', { buildings: [
     { ...input(), name: { 'zh-CN': '甲', en: 'Alpha' } },
@@ -371,46 +295,34 @@ test('bulk import publishes one catalog revision and retains language-specific d
     .toEqual({ status: 422, body: { error: 'unknown field: images' } });
   expect(await admin(f, '/buildings/import', 'POST', { buildings: [input('Fourth'), stored('Other')] }))
     .toEqual({ status: 422, body: { error: 'buildings[1]: unknown field: id' } });
-  const store = new BuildingStore(f.storage);
-  expect(store.snapshot().version).toBe(1);
-  expect(store.buildings()).toHaveLength(3);
+  const store = new BuildingStore(f.env.DB);
+  expect(await store.buildings()).toHaveLength(3);
   for (const name of [
     { 'zh-CN': '甲', en: 'Different' },
     { 'zh-CN': '不同建筑', en: 'Alpha' },
   ]) {
     const duplicate = await admin(f, '/buildings/import', 'POST', { buildings: [{ ...input(), name }] });
     expect(duplicate.status).toBe(409);
-    expect(store.snapshot().version).toBe(1);
+    expect(await store.buildings()).toHaveLength(3);
   }
   const duplicateBatch = await admin(f, '/buildings/import', 'POST', {
     buildings: [input('Same'), input('Same')],
   });
   expect(duplicateBatch.status).toBe(422);
-  expect(store.snapshot().version).toBe(1);
+  expect(await store.buildings()).toHaveLength(3);
 });
 
-test('a failed batch insert rolls back all imported records and the publication revision', async () => {
+test('a failed batch insert rolls back all imported records', async () => {
   const f = setup();
-  const store = new BuildingStore(f.storage);
-  initializeBuildingStorage(f.storage);
-  store.insertBuilding(stored('Existing'));
-  const before = store.snapshot();
-  const exec = f.storage.sql.exec.bind(f.storage.sql);
-  let inserts = 0;
-  const sql = spyOn(f.storage.sql, 'exec').mockImplementation((query, ...bindings) => {
-    if (query.startsWith('INSERT INTO buildings') && ++inserts === 2) throw new Error('Injected batch failure');
-    return exec(query, ...bindings);
-  });
-  try {
-    const failed = await admin(f, '/buildings/import', 'POST', {
-      buildings: [input('One'), input('Two')],
-    });
-    expect(failed.status).toBe(500);
-    expect(inserts).toBe(2);
-    expect(store.snapshot()).toEqual(before);
-  } finally {
-    sql.mockRestore();
-  }
+  const store = new BuildingStore(f.env.DB);
+  await transact(f.env.DB, 'buildings', async tx => new BuildingStore(f.env.DB, tx).insertBuilding(stored('Existing')));
+  const before = await store.buildings();
+  f.db.exec(`CREATE TRIGGER fail_second BEFORE INSERT ON buildings
+    WHEN json_extract(NEW.document,'$.name.en')='Two'
+    BEGIN SELECT RAISE(ABORT,'Injected batch failure'); END;`);
+  const failed = await admin(f, '/buildings/import', 'POST', { buildings: [input('One'), input('Two')] });
+  expect(failed.status).toBe(500);
+  expect(await store.buildings()).toEqual(before);
 });
 
 test('server-assigned building IDs survive edits, restarts and public reads', async () => {
@@ -438,14 +350,7 @@ test('server-assigned building IDs survive edits, restarts and public reads', as
     ...replacement,
     id: original.id,
   });
-  const restarted = new AuthStore({ storage: f.storage } as DurableObjectState, f.env);
-  const snapshot = await authCall(restarted, { action: 'publicBuildingSnapshot' });
-  expect(snapshot.status).toBe(200);
-  expect(snapshot.body.buildings).toEqual(new BuildingStore(f.storage).snapshot().buildings);
-  f.env.AUTH_STORE = {
-    idFromName: () => 'global',
-    get: () => ({ fetch: (request: Request) => restarted.fetch(request) }),
-  } as unknown as DurableObjectNamespace;
+  expect(await publicCatalog(f)).toEqual({ imageBaseUrl, buildings: [replaced.body] });
   const detail = await handlePublicBuildingsRoute(
     `/buildings/${original.id}`,
     new Request(`https://data.example/api/buildings/${original.id}`),
@@ -463,10 +368,9 @@ test('server-assigned building IDs survive edits, restarts and public reads', as
 
 test('building ID collisions retry safely and cannot overwrite existing records', async () => {
   const f = setup();
-  const store = new BuildingStore(f.storage);
-  initializeBuildingStorage(f.storage);
+  const store = new BuildingStore(f.env.DB);
   const existing = stored('Existing', '11'.repeat(16));
-  store.insertBuilding(existing);
+  await transact(f.env.DB, 'buildings', async tx => new BuildingStore(f.env.DB, tx).insertBuilding(existing));
   const values = [0x11, 0x22, 0x22, 0x33];
   const random = spyOn(crypto, 'getRandomValues').mockImplementation((bytes) => {
     (bytes as Uint8Array).fill(values.shift() ?? 0x44);
@@ -482,26 +386,25 @@ test('building ID collisions retry safely and cannot overwrite existing records'
       '22'.repeat(16),
       '33'.repeat(16),
     ]);
-    expect(store.buildings()).toHaveLength(3);
-    expect(store.building(existing.id)).toEqual(existing);
-    const before = store.snapshot();
-    expect(() => store.insertBuilding({ ...existing, name: input('Replacement').name })).toThrow();
-    expect(store.snapshot()).toEqual(before);
+    expect((await store.buildings())).toHaveLength(3);
+    expect((await store.building(existing.id))).toEqual(existing);
+    const before = await store.buildings();
+    await expect(transact(f.env.DB, 'buildings', async tx => new BuildingStore(f.env.DB, tx).insertBuilding({ ...existing, name: input('Replacement').name }))).rejects.toThrow();
+    expect(await store.buildings()).toEqual(before);
     random.mockImplementation((bytes) => {
       (bytes as Uint8Array).fill(0x11);
       return bytes;
     });
     const failed = await admin(f, '/buildings', 'POST', input('Blocked'));
     expect(failed.status).toBe(500);
-    expect(store.snapshot()).toEqual(before);
+    expect(await store.buildings()).toEqual(before);
   } finally {
     random.mockRestore();
   }
 });
 
-test('concurrent building writes stay unique and independent of public KV failures', async () => {
+test('concurrent building writes assign unique IDs', async () => {
   const f = setup();
-  f.setFail(true);
   const values = [0x11, 0x11, 0x22];
   const random = spyOn(crypto, 'getRandomValues').mockImplementation((bytes) => {
     (bytes as Uint8Array).fill(values.shift() ?? 0x33);
@@ -514,37 +417,12 @@ test('concurrent building writes stay unique and independent of public KV failur
     ]);
     expect(created.map((response) => response.status)).toEqual([201, 201]);
     expect(new Set(created.map((response) => response.body.id)).size).toBe(2);
-    const buildings = new BuildingStore(f.storage).buildings();
+    const buildings = (await new BuildingStore(f.env.DB).buildings());
     expect(buildings.map((building) => building.name.en).sort()).toEqual(['One', 'Two']);
     expect((await admin(f)).body).toHaveLength(2);
-    expect(f.writes()).toBe(0);
-    expect(await f.storage.getAlarm()).toBeNumber();
   } finally {
     random.mockRestore();
   }
-});
-
-test('publication coalesces edits, respects the five minute write interval and retries durable pending state', async () => {
-  const f = setup();
-  await admin(f, '/buildings', 'POST', input('One'));
-  await admin(f, '/buildings', 'POST', input('Two'));
-  f.db.exec('UPDATE building_publication SET next_attempt=0');
-  f.setFail(true);
-  await f.store.alarm();
-  expect(f.kv.size).toBe(0);
-  expect((await admin(f)).body).toHaveLength(2);
-  const store = new BuildingStore(f.storage);
-  expect(store.publication().published_revision).toBe(0);
-  expect(store.publication().next_attempt).toBeGreaterThan(Date.now() + PUBLISH_INTERVAL_MS - 2000);
-  f.setFail(false);
-  f.db.exec('UPDATE building_publication SET next_attempt=0');
-  await f.store.alarm();
-  const published = JSON.parse(f.kv.get(PUBLIC_BUILDINGS_KEY)!);
-  expect(published.buildings).toHaveLength(2);
-  await admin(f, '/buildings', 'POST', input('Three'));
-  await f.store.alarm();
-  expect(f.writes()).toBe(2);
-  expect(store.publication().revision).toBeGreaterThan(store.publication().published_revision);
 });
 
 test('approval failure rolls back both building creation and submission state', async () => {
@@ -552,21 +430,20 @@ test('approval failure rolls back both building creation and submission state', 
   const session = await seedSession(f.values);
   const draft = await permitImage(f, session.token);
   const created = await submit(f, session.token, draft);
-  const submission = storedSubmission(f, created.body.submission.id);
+  const submission = (await storedSubmission(f, created.body.submission.id));
   f.failNextSql('UPDATE submissions');
   const failed = await admin(f, `/building-submissions/${submission.id}/approve`, 'PUT', {}, submission);
   expect(failed.status).toBe(500);
   expect((await admin(f)).body).toHaveLength(0);
-  expect(new BuildingStore(f.storage).submission(submission.id)?.status).toBe('pending');
+  expect((await new BuildingStore(f.env.DB).submission(submission.id))?.status).toBe('pending');
   const retry = await admin(f, `/building-submissions/${submission.id}/approve`, 'PUT', {}, submission);
   expect(retry.status).toBe(200);
   expect(retry.body.building.id).toMatch(/^[0-9a-f]{32}$/);
   expect(retry.body.building.id).toBe(submission.id);
   expect(retry.body).not.toHaveProperty('submission');
-  expect(new BuildingStore(f.storage).building(retry.body.building.id)).toEqual(retry.body.building);
-  expect(new BuildingStore(f.storage).submission(submission.id)?.status).toBe('approved');
+  expect((await new BuildingStore(f.env.DB).building(retry.body.building.id))).toEqual(retry.body.building);
+  expect((await new BuildingStore(f.env.DB).submission(submission.id))?.status).toBe('approved');
   expect((await admin(f)).body).toHaveLength(1);
-  expect(f.writes()).toBe(0);
 });
 
 test('concurrent approval creates exactly one building and retains the review result', async () => {
@@ -574,7 +451,7 @@ test('concurrent approval creates exactly one building and retains the review re
   const { token } = await seedSession(f.values);
   const draft = await permitImage(f, token);
   const created = await submit(f, token, draft);
-  const submission = storedSubmission(f, created.body.submission.id);
+  const submission = (await storedSubmission(f, created.body.submission.id));
   const { id } = submission;
   const results = await Promise.all([
     admin(f, `/building-submissions/${id}/approve`, 'PUT', {}, submission),
@@ -592,8 +469,7 @@ test('concurrent approval creates exactly one building and retains the review re
 test('building ID reservation also checks expired records awaiting cleanup', async () => {
   const f = setup();
   const { token } = await seedSession(f.values);
-  initializeBuildingStorage(f.storage);
-  const store = new BuildingStore(f.storage);
+  const store = new BuildingStore(f.env.DB);
   const past = new Date(Date.now() - 86400_000).toISOString();
   const expired: BuildingSubmission = {
     id: '11'.repeat(16),
@@ -605,9 +481,9 @@ test('building ID reservation also checks expired records awaiting cleanup', asy
     expiresAt: past,
   };
   const draftKey = crypto.randomUUID();
-  store.insertSubmission(expired, draftKey);
-  expect(() => store.insertSubmission({ ...expired, submitterUuid: PLAYER_UUID }, draftKey)).toThrow();
-  expect(store.submission(expired.id)).toBeNull();
+  await transact(f.env.DB, 'buildings', async tx => new BuildingStore(f.env.DB, tx).insertSubmission(expired, draftKey));
+  await expect(transact(f.env.DB, 'buildings', async tx => new BuildingStore(f.env.DB, tx).insertSubmission({ ...expired, submitterUuid: PLAYER_UUID }, draftKey))).rejects.toThrow();
+  expect((await store.submission(expired.id))).toBeNull();
   const values = [0x11, 0x22];
   const random = spyOn(crypto, 'getRandomValues').mockImplementation((bytes) => {
     (bytes as Uint8Array).fill(values.shift() ?? 0x33);
@@ -669,23 +545,22 @@ test('image quota survives concurrent requests and records expire in bounded cle
   );
   expect(reservations.map((r) => r.status).sort()).toEqual([200, 429, 429, 429]);
   f.db.exec('UPDATE image_uploads SET created_at=0,expires_at=0');
-  new BuildingStore(f.storage).cleanup();
+  await transact(f.env.DB, 'buildings', async tx => new BuildingStore(f.env.DB, tx).cleanup());
   expect(f.db.query('SELECT count(*) AS count FROM image_uploads').get()).toEqual({ count: 0 });
 });
 
-test('building writes require the current content and leave the publication unchanged for identical edits', async () => {
+test('building writes require the current content and allow identical edits', async () => {
   const f = setup();
   const created = await admin(f, '/buildings', 'POST', input());
   const building = created.body as Building;
   const path = `/buildings/${building.id}`;
-  const store = new BuildingStore(f.storage);
-  const version = store.snapshot().version;
+  const store = new BuildingStore(f.env.DB);
   expect((await admin(f, path, 'PUT', input('One'))).status).toBe(428);
   expect((await admin(f, path, 'DELETE')).status).toBe(428);
   expect((await admin(f, path, 'PUT', input(), building)).status).toBe(200);
   expect(await admin(f, path, 'PUT', { ...input(), tags: [], source: null }, building))
     .toEqual({ status: 200, body: building });
-  expect(store.snapshot().version).toBe(version);
+  expect(await store.building(building.id)).toEqual(building);
   const [listed] = (await admin(f)).body as Building[];
   const reordered = Object.fromEntries(Object.entries(listed).reverse()) as unknown as Building;
   const results = await Promise.all([
@@ -693,7 +568,7 @@ test('building writes require the current content and leave the publication unch
     admin(f, path, 'PUT', input('Two'), reordered),
   ]);
   expect(results.map((r) => r.status).sort()).toEqual([200, 412]);
-  expect(store.snapshot().version).toBe(version + 1);
+  expect(await store.building(building.id)).toEqual(results.find(result => result.status === 200)?.body);
 });
 
 test('admin HTTP boundary preserves escaped JSON within the 64 KiB limit', async () => {
@@ -718,11 +593,6 @@ test('admin HTTP boundary preserves escaped JSON within the 64 KiB limit', async
 
 test('admin HTTP adapter rejects malformed, cross-site and unsupported requests before storage', async () => {
   const f = setup();
-  f.env.AUTH_STORE = {
-    get: () => {
-      throw new Error('Unexpected coordinator');
-    },
-  } as unknown as DurableObjectNamespace;
   for (const [method, headers, body, expected] of [
     ['POST', { 'Content-Type': 'application/json' }, '{broken', 400],
     ['POST', { 'Content-Type': 'text/plain' }, '{}', 415],
@@ -745,7 +615,7 @@ test('admin HTTP adapter rejects malformed, cross-site and unsupported requests 
   }
 });
 
-test('completed uploads stay within a draft, survive retries and publish ordered image pairs under the reserved ID', async () => {
+test('completed uploads stay within a draft, survive retries and serve ordered image pairs under the reserved ID', async () => {
   const f = setup();
   const { token } = await seedSession(f.values);
   const other = await seedSession(f.values, 0, OTHER_UUID);
@@ -802,7 +672,7 @@ test('completed uploads stay within a draft, survive retries and publish ordered
   const submitted = await create(token, draftKey);
   const summary = { id, name: payload.name, status: 'pending' };
   expect(submitted).toEqual({ status: 201, body: { playerUuid: PLAYER_UUID, submission: summary } });
-  const submission = storedSubmission(f, id);
+  const submission = (await storedSubmission(f, id));
   expect(submission.payload.images).toEqual(images);
   const history = (sessionId: string) => authCall(f.store, { action: 'listBuildingSubmissions', sessionId });
   expect((await history(token)).body).toEqual({ playerUuid: PLAYER_UUID, submissions: [summary] });
@@ -822,19 +692,16 @@ test('completed uploads stay within a draft, survive retries and publish ordered
   const approved = await admin(f, route, 'PUT', { payload: { ...payload, images: ordered } }, submission);
   expect(approved.status).toBe(200);
   expect(approved.body).toEqual({ building: { id, ...payload, images: ordered } });
-  expect(storedSubmission(f, id).payload.images).toEqual(ordered);
+  expect((await storedSubmission(f, id)).payload.images).toEqual(ordered);
   const stored = JSON.parse((f.db.query('SELECT document FROM buildings WHERE id=?').get(id) as { document: string }).document);
   expect(stored.images).toEqual(ordered);
   const list = await handlePublicBuildingsRoute('/buildings', new Request('https://data.example/api/buildings?locale=en'), f.env);
   expect((await list!.json()).buildings[0].images).toEqual(ordered);
-  f.db.exec('UPDATE building_publication SET next_attempt=0');
-  await f.store.alarm();
-  expect(JSON.parse(f.kv.get(PUBLIC_BUILDINGS_KEY)!).buildings[0]).toEqual(stored);
   const detail = await handlePublicBuildingsRoute('/buildings/' + id, new Request('https://data.example/api/buildings/' + id), f.env);
   expect((await detail!.json()).building.images).toEqual(ordered);
 });
 
-test('removing the last gallery reference waits for publication, survives reattachment and retries S3 deletion', async () => {
+test('image collection waits after the last reference, survives reattachment and retries S3 deletion', async () => {
   const f = setup();
   const source = (await admin(f, '/buildings', 'POST', input('First'))).body;
   const hash = await sha256(galleryWebps[0]);
@@ -856,23 +723,13 @@ test('removing the last gallery reference waits for publication, survives reatta
   };
   await attach();
   const state = () => f.db.query('SELECT state,due FROM building_image_objects WHERE object_key=?').get(key) as {state: string; due: number | null};
-  async function sweep() {
-    f.values.delete('maintenance:next-sweep');
-    f.db.exec('UPDATE building_publication SET next_attempt=0');
-    await f.store.alarm();
-  }
+  const sweep = () => maintainBuildings(f.env);
   await sweep();
   expect(state().due).toBeNull();
   expect((await saveGallery([])).status).toBe(200);
-  f.setFail(true);
+  const detachedAt = Date.now();
   await sweep();
-  expect(state().due).toBeNull();
-  const detached = new BuildingStore(f.storage).publication().revision;
-  expect(f.db.query('SELECT retire_revision FROM building_image_objects WHERE object_key=?').get(key))
-    .toEqual({ retire_revision: detached });
-  f.setFail(false);
-  await sweep();
-  expect(state().due).toBeGreaterThanOrEqual(Date.now() + 13 * 86400_000);
+  expect(state().due).toBeGreaterThanOrEqual(detachedAt + 14 * 86_400_000);
   await attach();
   expect(state().due).toBeNull();
   expect((await saveGallery([])).status).toBe(200);
@@ -921,19 +778,17 @@ test('an incomplete upload expires independently of a rejected submission’s im
     uploadId: reserve.body.uploadId, hashes: { webp: 'f'.repeat(64), jxl: 'a'.repeat(64), thumbnailWebp: 'b'.repeat(64) } });
   expect(abandoned.status).toBe(200);
   f.db.exec('UPDATE image_uploads SET expires_at=0');
-  await f.store.alarm();
+  await maintainBuildings(f.env);
   const due = (key: string) => (f.db.query('SELECT due FROM building_image_objects WHERE object_key=?')
     .get(key) as { due: number | null }).due;
   expect(due(new URL(abandoned.body.put.webp.url).pathname.slice(1))).toBeNumber();
   expect(due(approvedDraft.key)).toBeNull();
-  const reviewed = await admin(f, '/building-submissions/' + id + '/reject', 'PUT', { reviewNote: 'Retry' }, storedSubmission(f, id));
+  const reviewed = await admin(f, '/building-submissions/' + id + '/reject', 'PUT', { reviewNote: 'Retry' }, (await storedSubmission(f, id)));
   expect(reviewed.status).toBe(200);
-  f.values.delete('maintenance:next-sweep');
-  await f.store.alarm();
+  await maintainBuildings(f.env);
   expect(due(approvedDraft.key)).toBeNull();
   f.db.exec('UPDATE submissions SET expires_at=0');
-  f.values.delete('maintenance:next-sweep');
-  await f.store.alarm();
+  await maintainBuildings(f.env);
   expect(due(approvedDraft.key)).toBeNumber();
 });
 
@@ -987,7 +842,7 @@ test('review rejects unexpected fields before changing the saved submission', as
   const { token } = await seedSession(f.values);
   const draft = await permitImage(f, token);
   const created = await submit(f, token, draft);
-  const submission = storedSubmission(f, created.body.submission.id);
+  const submission = (await storedSubmission(f, created.body.submission.id));
   const path = '/building-submissions/' + submission.id;
 
   expect(await admin(f, path + '/approve', 'PUT', { paylod: submission.payload }, submission))
@@ -996,7 +851,7 @@ test('review rejects unexpected fields before changing the saved submission', as
     .toEqual({ status: 422, body: { error: 'unknown field: images' } });
   expect(await admin(f, path + '/reject', 'PUT', { reviewNote: 'Retry', payload: submission.payload }, submission))
     .toEqual({ status: 422, body: { error: 'unknown field: payload' } });
-  expect(storedSubmission(f, submission.id)).toEqual(submission);
+  expect((await storedSubmission(f, submission.id))).toEqual(submission);
   expect((await admin(f)).body).toEqual([]);
 
   expect(await admin(f, path + '/approve', 'PUT', undefined, submission))
@@ -1020,7 +875,7 @@ test('admins can add, reorder and remove submission images before approval', asy
   const { token } = await seedSession(f.values);
   const playerDraft = await permitImage(f, token);
   const created = await submit(f, token, playerDraft);
-  const submission = storedSubmission(f, created.body.submission.id);
+  const submission = (await storedSubmission(f, created.body.submission.id));
   const draft = crypto.randomUUID();
   const first = await adminUpload(f, draft, submission.id, galleryWebps[1]);
   const second = await adminUpload(f, draft, submission.id, galleryWebps[2]);
@@ -1056,7 +911,7 @@ test('completed uploads and saved submissions remain usable across public base U
   const saved = await admin(f, '/buildings/' + building.id, 'PUT', { ...input('Admin'), images: [uploaded.body.image] }, building, adminDraft);
   expect(saved.status).toBe(200);
   const env = { ...f.env, BUILDING_IMAGE_PUBLIC_BASE_URL: base };
-  const store = new AuthStore({ storage: f.storage } as DurableObjectState, env);
+  const store = { env, ctx: f.ctx };
   const current = await authCall(store, {
     action: 'adminBuildingMutation', operation: 'listBuildings',
   });
@@ -1074,8 +929,26 @@ test('completed uploads and saved submissions remain usable across public base U
   expect(completed.body.image).toEqual(draft.image);
   const submitted = await submit({ ...f, store }, token, draft);
   expect(submitted.status).toBe(201);
-  const submission = storedSubmission(f, submitted.body.submission.id);
+  const submission = (await storedSubmission(f, submitted.body.submission.id));
   const approved = await admin(f, `/building-submissions/${submission.id}/approve`, 'PUT', {}, submission);
   expect(approved.status).toBe(200);
   expect(approved.body.building.images).toEqual([draft.image]);
+});
+
+test('session revocation that commits during submission validation prevents the D1 write', async () => {
+  const f = setup();
+  const { token, record } = await seedSession(f.values);
+  const draft = await permitImage(f, token);
+  let revoked = false;
+  f.hooks.beforeBatch = statements => {
+    if (!revoked && statements.some(sql => sql.includes('INSERT INTO submissions'))) {
+      revoked = true;
+      f.values.delete('session:' + record.sidHash);
+    }
+  };
+  const result = await submit(f, token, draft);
+  expect(revoked).toBe(true);
+  expect(result.status).toBe(401);
+  expect(f.db.query('SELECT count(*) AS n FROM submissions').get()).toEqual({ n: 0 });
+  expect(f.db.query("SELECT count(*) AS n FROM building_image_refs WHERE owner LIKE 'submission/%'").get()).toEqual({ n: 0 });
 });

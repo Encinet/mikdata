@@ -1,15 +1,16 @@
+import { maintainAuth } from '../../src/auth/repository';
 import { expect, test } from 'bun:test';
 import worker from '../../src/index';
 import {
   authCall,
-  memoryAuthStorage,
+  authDatabaseFixture,
   OTHER_UUID,
   passkeyFixture,
   PLAYER_UUID,
   seedSession,
   testAuthEnv,
-  testAuthStore,
-} from '../helpers/auth-store';
+  authFixture,
+} from '../helpers/auth';
 
 const completion = (body: Record<string, unknown>) => ({
   action: 'completeMinecraftChallenge',
@@ -20,7 +21,7 @@ const sessionCount = (values: Map<string, unknown>) =>
   [...values.keys()].filter((key) => key.startsWith('session:')).length;
 
 test('one game approval issues one session across parallel completion and reconfirmation', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   const results = await Promise.all([
     authCall(store, completion(created.body)),
@@ -32,7 +33,7 @@ test('one game approval issues one session across parallel completion and reconf
 });
 
 test('storage failure rolls back challenge consumption and session creation, allowing retry', async () => {
-  const { store, values, failNextPut } = testAuthStore();
+  const { store, values, failNextPut } = authFixture();
   const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   failNextPut('session:');
   expect((await authCall(store, completion(created.body))).status).toBe(500);
@@ -45,7 +46,7 @@ test('storage failure rolls back challenge consumption and session creation, all
 });
 
 test('game status and completion both require the initiating browser', async () => {
-  const { store } = testAuthStore();
+  const { store } = authFixture();
   const created = await authCall(store, { action: 'createMinecraftChallenge', purpose: 'login' });
   expect(
     (
@@ -67,7 +68,7 @@ test('game status and completion both require the initiating browser', async () 
 
 test('parallel status polling makes one plugin request', async () => {
   let requests = 0;
-  const { store } = testAuthStore({
+  const { store } = authFixture({
     VPC_SERVICE: {
       fetch: async () => {
         requests++;
@@ -86,7 +87,7 @@ test('parallel status polling makes one plugin request', async () => {
 });
 
 test('disabled accounts cannot be re-enabled by game login', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   values.set(`account:${PLAYER_UUID}`, {
     playerUuid: PLAYER_UUID,
     currentName: 'Player',
@@ -99,7 +100,7 @@ test('disabled accounts cannot be re-enabled by game login', async () => {
 });
 
 test('a real zero-counter Passkey assertion is browser bound and consumed once in parallel', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const options = await authCall(store, {
     action: 'passkeyAuthenticationOptions',
@@ -133,7 +134,7 @@ test('a real zero-counter Passkey assertion is browser bound and consumed once i
 });
 
 test('Passkey authentication checks the user handle and user verification', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const options = await authCall(store, {
     action: 'passkeyAuthenticationOptions',
@@ -157,7 +158,7 @@ test('Passkey authentication checks the user handle and user verification', asyn
 });
 
 test('Passkey registration belongs to the exact session and does not refresh authentication', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const first = await seedSession(values);
   const second = await seedSession(values);
@@ -191,7 +192,7 @@ test('Passkey registration belongs to the exact session and does not refresh aut
 });
 
 test('old sessions cannot add or revoke keys even when issued recently', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const session = await seedSession(values, 6 * 60_000);
   for (const request of [
@@ -206,7 +207,7 @@ test('old sessions cannot add or revoke keys even when issued recently', async (
 });
 
 test('key revocation checks ownership and permits revoking the final key', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const other = await seedSession(values, 0, OTHER_UUID);
   expect(
@@ -238,22 +239,16 @@ test('web revocation during an in-flight passkey login cannot recreate the crede
   const gate = new Promise<void>((resolve) => {
     resume = resolve;
   });
-  const memory = memoryAuthStorage();
-  const read = memory.storage.get.bind(memory.storage) as (key: string) => Promise<unknown>;
+  const memory = authDatabaseFixture();
   let pausedCredential = '';
-  const storage = {
-    ...memory.storage,
-    get: async (key: string) => {
-      const value = await read(key);
-      if (key === pausedCredential) {
-        pausedCredential = '';
-        entered();
-        await gate;
-      }
-      return value;
-    },
-  } as unknown as DurableObjectStorage;
-  const { store, values } = testAuthStore({}, { ...memory, storage });
+  memory.hooks.afterRead = async (sql, args) => {
+    if (sql.includes('FROM auth_passkeys WHERE id=?') && 'passkey:' + args[0] === pausedCredential) {
+      pausedCredential = '';
+      entered();
+      await gate;
+    }
+  };
+  const { store, values } = authFixture({}, memory);
   const session = await seedSession(values);
   const key = await passkeyFixture(values);
   const options = await authCall(store, {
@@ -291,9 +286,9 @@ test('unknown roles and credential changes invalidate existing web sessions', as
     { role: 'unknown', banned: false, credentialsChangedAt: 0 },
     { role: 'member', banned: false, credentialsChangedAt: Date.now() },
   ]) {
-    const memory = memoryAuthStorage();
+    const memory = authDatabaseFixture();
     const session = await seedSession(memory.values, 60_000);
-    const { store } = testAuthStore(
+    const { store } = authFixture(
       {
         VPC_SERVICE: {
           fetch: async () => Response.json({ player: { uuid: PLAYER_UUID, ...policy } }),
@@ -308,7 +303,7 @@ test('unknown roles and credential changes invalidate existing web sessions', as
 });
 
 test('policy lookup failure fails closed without deleting the account or session', async () => {
-  const { store, values } = testAuthStore({
+  const { store, values } = authFixture({
     VPC_SERVICE: {
       fetch: async () => {
         throw new Error('offline');
@@ -321,7 +316,7 @@ test('policy lookup failure fails closed without deleting the account or session
   expect(sessionCount(values)).toBe(1);
 });
 
-test('unknown routes and methods spend no auth-store or limiter budget', async () => {
+test('unknown routes and methods spend no D1 or limiter budget', async () => {
   let checks = 0;
   const env = testAuthEnv({
     AUTH_CLIENT_RATE_LIMITER: {
@@ -330,11 +325,11 @@ test('unknown routes and methods spend no auth-store or limiter budget', async (
         return { success: true };
       },
     } as RateLimit,
-    AUTH_STORE: {
-      idFromName: () => {
+    DB: {
+      prepare: () => {
         throw new Error('must not resolve the store');
       },
-    } as unknown as DurableObjectNamespace,
+    } as unknown as D1Database,
   });
   for (const [method, path] of [
     ['POST', '/auth/unknown'],
@@ -355,7 +350,7 @@ test('unknown routes and methods spend no auth-store or limiter budget', async (
 });
 
 test('signing out all browsers clears the cookie and revokes web and chat sessions for the owner', async () => {
-  const { store, values, env, background } = testAuthStore();
+  const { store, values, env, background } = authFixture();
   const plugin = env.VPC_SERVICE;
   const notifications: string[][] = [];
   env.VPC_SERVICE = {
@@ -376,13 +371,6 @@ test('signing out all browsers clears the cookie and revokes web and chat sessio
       (await authCall(store, { action: 'me', sessionId: session.token })).body.authenticated,
     ).toBe(true);
   }
-  env.AUTH_STORE = {
-    idFromName: () => ({}),
-    get: () => ({
-      fetch: (input: RequestInfo | URL, init?: RequestInit) =>
-        store.fetch(new Request(input, init)),
-    }),
-  } as unknown as DurableObjectNamespace;
   const response = await worker.fetch(
     new Request('https://data.mcmik.top/me/sessions/revoke', {
       method: 'POST',
@@ -394,7 +382,7 @@ test('signing out all browsers clears the cookie and revokes web and chat sessio
       body: JSON.stringify({ all: true, playerUuid: OTHER_UUID, sessionId: 'untrusted-body' }),
     }),
     env,
-    {} as ExecutionContext,
+    store.ctx,
   );
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ ok: true });
@@ -406,7 +394,7 @@ test('signing out all browsers clears the cookie and revokes web and chat sessio
   ]);
   for (const session of [actor, second]) {
     expect(values.has(`session:${session.record.sidHash}`)).toBe(false);
-    expect(values.has(`account-session:${PLAYER_UUID}:${session.record.sidHash}`)).toBe(false);
+    expect(values.sessions(PLAYER_UUID)).not.toContain(session.record.sidHash);
     expect(
       (await authCall(store, { action: 'me', sessionId: session.token })).body.authenticated,
     ).toBe(false);
@@ -418,7 +406,7 @@ test('signing out all browsers clears the cookie and revokes web and chat sessio
 });
 
 test('revoking other or all sessions requires recent authentication while ordinary logout remains available', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const actor = await seedSession(values, 10 * 60_000);
   const target = await seedSession(values);
   for (const scope of [{ all: true }, { targetSessionId: target.record.sidHash }]) {
@@ -437,7 +425,7 @@ test('revoking other or all sessions requires recent authentication while ordina
 });
 
 test('session revocation rejects ambiguous scope and cannot target another account', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const actor = await seedSession(values);
   const other = await seedSession(values, 0, OTHER_UUID);
   for (const scope of [{}, { all: 'true' }, { all: true, targetSessionId: other.record.sidHash }]) {
@@ -461,7 +449,7 @@ test('session revocation rejects ambiguous scope and cannot target another accou
 
 test('concurrent requests for one account share one authoritative policy lookup', async () => {
   let requests = 0;
-  const { store, values } = testAuthStore({
+  const { store, values } = authFixture({
     VPC_SERVICE: {
       fetch: async () => {
         requests += 1;
@@ -481,7 +469,7 @@ test('concurrent requests for one account share one authoritative policy lookup'
 });
 
 test('observing account disablement revokes sessions so enabling the account cannot resurrect them', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const session = await seedSession(values);
   const account = values.get(`account:${PLAYER_UUID}`) as Record<string, unknown>;
   values.set(`account:${PLAYER_UUID}`, { ...account, disabledAt: new Date().toISOString() });
@@ -496,7 +484,7 @@ test('observing account disablement revokes sessions so enabling the account can
 });
 
 test('listing expired sessions deletes records and indexes while preserving a foreign account record', async () => {
-  const f = testAuthStore();
+  const f = authFixture();
   const current = await seedSession(f.values);
   const expired = await seedSession(f.values);
   const foreign = await seedSession(f.values, 0, OTHER_UUID);
@@ -504,18 +492,17 @@ test('listing expired sessions deletes records and indexes while preserving a fo
     ...expired.record,
     idleExpiresAt: '2020-01-01T00:00:00.000Z',
   });
-  f.values.set(`account-session:${PLAYER_UUID}:${foreign.record.sidHash}`, foreign.record.sidHash);
   expect(
     (await authCall(f.store, { action: 'accountSecurity', sessionId: current.token })).status,
   ).toBe(200);
   expect(f.values.has(`session:${expired.record.sidHash}`)).toBe(false);
-  expect(f.values.has(`account-session:${PLAYER_UUID}:${expired.record.sidHash}`)).toBe(false);
-  expect(f.values.has(`account-session:${PLAYER_UUID}:${foreign.record.sidHash}`)).toBe(false);
+  expect(f.values.sessions(PLAYER_UUID)).not.toContain(expired.record.sidHash);
+  expect(f.values.sessions(PLAYER_UUID)).not.toContain(foreign.record.sidHash);
   expect(f.values.has(`session:${foreign.record.sidHash}`)).toBe(true);
 });
 
 test('a successful login caps active sessions at sixteen without touching another account', async () => {
-  const f = testAuthStore();
+  const f = authFixture();
   for (let i = 0; i < 17; i++) await seedSession(f.values);
   const foreign = await seedSession(f.values, 0, OTHER_UUID);
   const challenge = await authCall(f.store, {
@@ -524,14 +511,14 @@ test('a successful login caps active sessions at sixteen without touching anothe
   });
   expect((await authCall(f.store, completion(challenge.body))).status).toBe(200);
   expect(
-    [...f.values.keys()].filter((key) => key.startsWith(`account-session:${PLAYER_UUID}:`)),
+    f.values.sessions(PLAYER_UUID),
   ).toHaveLength(16);
   expect(f.values.has(`session:${foreign.record.sidHash}`)).toBe(true);
 });
 
-test('session cleanup is bounded and resumes from its durable cursor', async () => {
-  const f = testAuthStore();
-  for (let i = 0; i < 150; i++) {
+test('session cleanup uses bounded expiry batches across cron runs', async () => {
+  const f = authFixture();
+  for (let i = 0; i < 278; i++) {
     const sidHash = String(i).padStart(4, '0');
     f.values.set(`session:${sidHash}`, {
       sidHash,
@@ -539,13 +526,9 @@ test('session cleanup is bounded and resumes from its durable cursor', async () 
       idleExpiresAt: '2020-01-01',
       absoluteExpiresAt: '2020-01-01',
     });
-    f.values.set(`account-session:${PLAYER_UUID}:${sidHash}`, sidHash);
   }
-  await f.store.alarm();
+  await maintainAuth(f.env.DB);
   expect(sessionCount(f.values)).toBe(22);
-  expect(f.values.has('maintenance:session-cursor')).toBe(true);
-  f.values.set('maintenance:next-sweep', 0);
-  await f.store.alarm();
+  await maintainAuth(f.env.DB);
   expect(sessionCount(f.values)).toBe(0);
-  expect(f.values.has('maintenance:session-cursor')).toBe(false);
 });

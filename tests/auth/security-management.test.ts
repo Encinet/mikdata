@@ -6,11 +6,11 @@ import {
   passkeyFixture,
   PLAYER_UUID,
   seedSession,
-  testAuthStore,
-} from '../helpers/auth-store';
+  authFixture,
+} from '../helpers/auth';
 
 test('names update only display metadata and invalidate warm session and Passkey caches', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const actor = await seedSession(values, 6 * 60_000);
   await authCall(store, { action: 'accountSecurity', sessionId: actor.token });
@@ -45,7 +45,7 @@ test('names update only display metadata and invalidate warm session and Passkey
 });
 
 test('names validate types, Unicode controls and length; empty names restore the default', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const actor = await seedSession(values);
   const base = {
     action: 'renameSecurityItem',
@@ -75,7 +75,7 @@ test('names validate types, Unicode controls and length; empty names restore the
 });
 
 test('renaming cannot cross accounts or edit revoked and expired sessions', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const actor = await seedSession(values);
   const other = await seedSession(values, 0, OTHER_UUID);
   const key = await passkeyFixture(values);
@@ -130,7 +130,7 @@ test('renaming cannot cross accounts or edit revoked and expired sessions', asyn
 });
 
 test('naming rolls back on failure and never recreates a concurrently revoked session', async () => {
-  const fixture = testAuthStore();
+  const fixture = authFixture();
   const actor = await seedSession(fixture.values);
   const body = {
     action: 'renameSecurityItem',
@@ -156,7 +156,7 @@ test('naming rolls back on failure and never recreates a concurrently revoked se
 
 test('session names survive both game and Passkey reauthentication without copying another session label', async () => {
   for (const method of ['minecraft', 'passkey']) {
-    const { store, values } = testAuthStore();
+    const { store, values } = authFixture();
     const key = await passkeyFixture(values);
     const actor = await seedSession(values, 6 * 60_000);
     const other = await seedSession(values);
@@ -196,7 +196,7 @@ test('session names survive both game and Passkey reauthentication without copyi
 });
 
 test('Passkey names are normalized on creation and retained when that key is used', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const actor = await seedSession(values);
   const options = await authCall(store, {
@@ -248,7 +248,7 @@ test('Passkey names are normalized on creation and retained when that key is use
 });
 
 test('renaming has an account-wide write budget, including across browser sessions', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const first = await seedSession(values);
   const second = await seedSession(values);
   for (let n = 0; n < 20; n++)
@@ -277,17 +277,10 @@ test('renaming has an account-wide write budget, including across browser sessio
 });
 
 test('HTTP rename routes require the BFF secret and Cookie-derived session metadata', async () => {
-  const { store, values, env } = testAuthStore();
+  const { store, values, env } = authFixture();
   const actor = await seedSession(values);
   const other = await seedSession(values, 0, OTHER_UUID);
   const key = await passkeyFixture(values);
-  env.AUTH_STORE = {
-    idFromName: () => ({}),
-    get: () => ({
-      fetch: (input: RequestInfo | URL, init?: RequestInit) =>
-        store.fetch(new Request(input, init)),
-    }),
-  } as unknown as DurableObjectNamespace;
   const request = (path: string, session: string, secret = 'test-secret', body: object = {}) =>
     worker.fetch(
       new Request(`https://data.mcmik.top${path}`, {

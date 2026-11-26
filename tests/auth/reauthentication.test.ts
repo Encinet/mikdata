@@ -2,13 +2,13 @@ import { expect, spyOn, test } from 'bun:test';
 import worker from '../../src/index';
 import {
   authCall,
-  memoryAuthStorage,
+  authDatabaseFixture,
   OTHER_UUID,
   passkeyFixture,
   PLAYER_UUID,
   seedSession,
-  testAuthStore,
-} from '../helpers/auth-store';
+  authFixture,
+} from '../helpers/auth';
 
 const game = (sessionId: string) => ({
   action: 'createMinecraftChallenge',
@@ -41,7 +41,7 @@ function plugin(playerUuid = PLAYER_UUID) {
 }
 
 test('authentication purposes are explicit and reauthentication requires a live session', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   for (const action of ['createMinecraftChallenge', 'passkeyAuthenticationOptions']) {
     expect((await authCall(store, { action })).body.error).toBe('invalid_authentication_purpose');
     expect((await authCall(store, { action, purpose: 'anything' })).status).toBe(422);
@@ -53,7 +53,7 @@ test('authentication purposes are explicit and reauthentication requires a live 
 });
 
 test('game reauthentication rotates only the bound session and invalidates its cached cookie', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const old = await seedSession(values, 6 * 60_000);
   const other = await seedSession(values);
   expect((await authCall(store, { action: 'me', sessionId: old.token })).body.authenticated).toBe(
@@ -79,7 +79,7 @@ test('game reauthentication rotates only the bound session and invalidates its c
   expect((result.body.account as { playerUuid: string }).playerUuid).toBe(PLAYER_UUID);
   expect((result.body.account as { passkeyCount: number }).passkeyCount).toBe(0);
   expect(values.has(`session:${old.record.sidHash}`)).toBe(false);
-  expect(values.has(`account-session:${PLAYER_UUID}:${old.record.sidHash}`)).toBe(false);
+  expect(values.sessions(PLAYER_UUID)).not.toContain(old.record.sidHash);
   expect(values.has(`session:${other.record.sidHash}`)).toBe(true);
   expect((await authCall(store, { action: 'me', sessionId: old.token })).body.authenticated).toBe(
     false,
@@ -99,7 +99,7 @@ test('game reauthentication rotates only the bound session and invalidates its c
 });
 
 test('a different game account cannot change the account during reauthentication', async () => {
-  const { store, values } = testAuthStore({ VPC_SERVICE: plugin(OTHER_UUID) });
+  const { store, values } = authFixture({ VPC_SERVICE: plugin(OTHER_UUID) });
   const old = await seedSession(values, 6 * 60_000);
   const challenge = await authCall(store, game(old.token));
   const result = await authCall(store, complete(challenge.body.challengeId, old.token));
@@ -110,7 +110,7 @@ test('a different game account cannot change the account during reauthentication
 });
 
 test('concurrent reauthentication proofs can replace one old session only once', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const old = await seedSession(values, 6 * 60_000);
   const first = await authCall(store, game(old.token));
   const second = await authCall(store, game(old.token));
@@ -122,7 +122,7 @@ test('concurrent reauthentication proofs can replace one old session only once',
 });
 
 test('reauthentication rolls back session replacement and challenge consumption together', async () => {
-  const { store, values, failNextPut } = testAuthStore();
+  const { store, values, failNextPut } = authFixture();
   const old = await seedSession(values, 6 * 60_000);
   const challenge = await authCall(store, game(old.token));
   failNextPut('session:');
@@ -145,7 +145,7 @@ test('revoking a session while its game proof is in flight prevents replacement'
     release = resolve;
   });
   const service = plugin();
-  const { store, values } = testAuthStore({
+  const { store, values } = authFixture({
     VPC_SERVICE: {
       fetch: async (input: RequestInfo | URL) => {
         if (new URL(input.toString()).pathname.startsWith('/api/auth/challenges/')) {
@@ -170,7 +170,7 @@ test('revoking a session while its game proof is in flight prevents replacement'
 });
 
 test('Passkey reauthentication is bound to an enrolled key, account, and exact session', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const old = await seedSession(values, 6 * 60_000);
   const other = await seedSession(values);
@@ -220,15 +220,13 @@ test('Passkey reauthentication is bound to an enrolled key, account, and exact s
 });
 
 test('another enrolled account cannot satisfy a bound Passkey proof', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const own = await passkeyFixture(values);
   values.set(`passkey:${own.id}`, {
     ...(values.get(`passkey:${own.id}`) as object),
     playerUuid: OTHER_UUID,
   });
-  values.delete(`account-passkey:${PLAYER_UUID}:${own.id}`);
-  values.set(`account-passkey:${OTHER_UUID}:${own.id}`, own.id);
   const old = await seedSession(values, 6 * 60_000, OTHER_UUID);
   const options = await authCall(store, {
     action: 'passkeyAuthenticationOptions',
@@ -247,7 +245,7 @@ test('another enrolled account cannot satisfy a bound Passkey proof', async () =
 });
 
 test('an account without enrolled keys is not given an unrestricted reauthentication prompt', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const old = await seedSession(values);
   expect(
     (
@@ -261,7 +259,7 @@ test('an account without enrolled keys is not given an unrestricted reauthentica
 });
 
 test('a registration begun within recent authentication completes under its own lifetime', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const old = await seedSession(values, 4 * 60_000);
   const options = await authCall(store, {
@@ -291,7 +289,7 @@ test('a registration begun within recent authentication completes under its own 
 });
 
 test('expired registration grants cannot be used even when a session is still valid', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const old = await seedSession(values);
   const options = await authCall(store, {
@@ -313,24 +311,16 @@ test('expired registration grants cannot be used even when a session is still va
 });
 
 test('account credential revocation during registration verification prevents the final write', async () => {
-  const memory = memoryAuthStorage();
+  const memory = authDatabaseFixture();
   let invalidate = false;
-  const transaction = memory.storage.transaction.bind(memory.storage);
-  const storage = {
-    ...memory.storage,
-    transaction: async (task: any) => {
-      if (invalidate) {
-        invalidate = false;
-        const account = memory.values.get(`account:${PLAYER_UUID}`) as object;
-        memory.values.set(`account:${PLAYER_UUID}`, {
-          ...account,
-          banned: false, credentialsChangedAt: Date.now() + 1,
-        });
-      }
-      return transaction(task);
-    },
-  } as DurableObjectStorage;
-  const { store, values } = testAuthStore({}, { ...memory, storage });
+  memory.hooks.before = sql => {
+    if (invalidate && sql.includes('SELECT document FROM auth_sessions WHERE id=')) {
+      invalidate = false;
+      const account = memory.values.get(`account:${PLAYER_UUID}`);
+      memory.values.set(`account:${PLAYER_UUID}`, { ...account, credentialsChangedAt: Date.now() + 1 });
+    }
+  };
+  const { store, values } = authFixture({}, memory);
   const key = await passkeyFixture(values);
   const old = await seedSession(values);
   const options = await authCall(store, {
@@ -346,15 +336,8 @@ test('account credential revocation during registration verification prevents th
 });
 
 test('the HTTP boundary accepts session authority only from the authenticated BFF header', async () => {
-  const { store, values, env } = testAuthStore();
+  const { store, values, env } = authFixture();
   const old = await seedSession(values);
-  env.AUTH_STORE = {
-    idFromName: () => ({}),
-    get: () => ({
-      fetch: (input: RequestInfo | URL, init?: RequestInit) =>
-        store.fetch(new Request(input, init)),
-    }),
-  } as unknown as DurableObjectNamespace;
   const response = await worker.fetch(
     new Request('https://data.mcmik.top/auth/passkeys/options/register', {
       method: 'POST',
@@ -369,7 +352,7 @@ test('the HTTP boundary accepts session authority only from the authenticated BF
 
 test('sensitive writes refresh plugin policy even when the ordinary account cache is warm', async () => {
   let role = 'member';
-  const { store, values } = testAuthStore({
+  const { store, values } = authFixture({
     VPC_SERVICE: {
       fetch: async (input: RequestInfo | URL) =>
         Response.json({
@@ -396,7 +379,7 @@ test('sensitive writes refresh plugin policy even when the ordinary account cach
 test('an unavailable fresh policy blocks registration without deleting its grant or session', async () => {
   let offline = false;
   const service = plugin();
-  const { store, values } = testAuthStore({
+  const { store, values } = authFixture({
     VPC_SERVICE: {
       fetch: async (input: RequestInfo | URL) => {
         if (offline) throw new Error('offline');
@@ -427,7 +410,7 @@ test('an unavailable fresh policy blocks registration without deleting its grant
 });
 
 test('session rotation invalidates old registration grants for both the old and new cookies', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const session = await seedSession(values);
   const grant = await authCall(store, {
@@ -469,7 +452,7 @@ test('plugin revocation notification cannot delay delivery of the rotated sessio
     release = resolve;
   });
   const service = plugin();
-  const { store, values, background } = testAuthStore({
+  const { store, values, background } = authFixture({
     VPC_SERVICE: {
       fetch: async (input: RequestInfo | URL) => {
         if (new URL(input.toString()).pathname === '/api/chat/revoke') {
@@ -494,7 +477,7 @@ test('plugin revocation notification cannot delay delivery of the rotated sessio
 }, 1000);
 
 test('account-bound authentication permits an omitted user handle but rejects a mismatched one', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const key = await passkeyFixture(values);
   const session = await seedSession(values, 6 * 60_000);
   const options = await authCall(store, {

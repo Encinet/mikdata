@@ -1,12 +1,14 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "mikdata",
+	"account_id": "936caa3c87b953e8865de39834abccbf",
 	"main": "src/index.ts",
 	"build": { "command": "bun scripts/prepare-admin-images.ts" },
 	"assets": { "directory": "./dist/admin-assets" },
 	"compatibility_date": "2026-11-25",
 	"compatibility_flags": ["no_nodejs_compat"],
 	"workers_dev": false,
+	"keep_vars": true,
 	"routes": [
 		{
 			"pattern": "data.mcmik.top",
@@ -66,27 +68,11 @@
 			"*/5 * * * *"
 		]
 	},
-	"durable_objects": {
-		"bindings": [
-			{
-				"name": "AUTH_STORE",
-				"class_name": "AuthStore"
-			},
-			{
-				"name": "SPONSOR_STORE",
-				"class_name": "SponsorStore"
-			}
-		]
-	},
-	"exports": {
-		"AuthStore": { "type": "durable-object", "storage": "sqlite" },
-		"SponsorStore": { "type": "durable-object", "storage": "sqlite" }
-	},
-	"kv_namespaces": [
+	"d1_databases": [
 		{
-			"binding": "BUILDINGS_KV",
-			"id": "bd97d8e8ecd541fea6d4f451b3f259af",
-			"remote": true
+			"binding": "DB",
+			"database_name": "mikdata",
+			"database_id": "e5c5baa7-a900-4e62-b91f-dc6a788f4012"
 		}
 	],
 	"vpc_services": [

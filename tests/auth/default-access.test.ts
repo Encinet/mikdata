@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test';
-import { authCall, passkeyFixture, PLAYER_UUID, seedSession, testAuthStore } from '../helpers/auth-store';
+import { authCall, passkeyFixture, PLAYER_UUID, seedSession, authFixture } from '../helpers/auth';
 
 function newcomerStore() {
   const controls: string[] = [];
-  const fixture = testAuthStore({ VPC_SERVICE: {
+  const fixture = authFixture({ VPC_SERVICE: {
     fetch: async (input: RequestInfo | URL) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       if (url.pathname.startsWith('/api/auth/accounts/')) return Response.json({ player: {
@@ -72,7 +72,7 @@ test('default accounts are denied member-only building operations', async () => 
 });
 
 test('building writes check the stored role after a membership downgrade', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const { token } = await seedSession(values);
   expect((await authCall(store, { action: 'me', sessionId: token })).body.authenticated).toBe(true);
   const account = values.get(`account:${PLAYER_UUID}`) as Record<string, unknown>;

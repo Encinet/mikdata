@@ -9,7 +9,8 @@ import {
 import { isImageDraftKey } from './keys';
 import { MAX_BUILDING_IMAGE_BYTES, MAX_BUILDING_IMAGE_MULTIPART_BYTES, MAX_THUMBNAIL_BYTES } from './limits';
 import { inspectBuildingImages } from './validation';
-import type { BuildingStore } from '../store';
+import { transact } from '../../db/transaction';
+import { BuildingStore } from '../store';
 import type { Env } from '../../env';
 import { json, requestMediaType } from '../../shared/http';
 
@@ -17,15 +18,12 @@ export const ADMIN_IMAGE_PATH = '/building-images';
 
 export async function uploadAdminBuildingImage(
   request: Request,
-  storage: DurableObjectStorage,
-  store: BuildingStore,
   env: Env,
-  scheduleMaintenance: () => Promise<void>,
+  owner: string,
 ): Promise<Response> {
-  const owner = request.headers.get('X-Admin-Image-Owner');
   const draft = request.headers.get('X-Building-Draft');
   const target = new URL(request.url).searchParams.get('building');
-  if (!owner?.startsWith('admin/') || !isImageDraftKey(draft) || (target !== null && !isBuildingId(target)))
+  if (!isImageDraftKey(draft) || (target !== null && !isBuildingId(target)))
     return json({ error: 'invalid_image_draft' }, 422);
   if (requestMediaType(request) !== 'multipart/form-data')
     return json({ error: 'multipart_required' }, 415);
@@ -66,11 +64,8 @@ export async function uploadAdminBuildingImage(
     webp: await sha256(images.webp), jxl: await sha256(images.jxl),
     thumbnailWebp: await sha256(images.thumbnailWebp),
   };
-  const lease = await storage.transaction(async () => {
-    const result = store.reserveAdminImage(owner, draft, target, hashes);
-    if (result) await scheduleMaintenance();
-    return result;
-  });
+  const lease = await transact(env.DB, 'buildings', tx =>
+    new BuildingStore(env.DB, tx).reserveAdminImage(owner, draft, target, hashes));
   if (!lease) return json({ error: 'image_draft_unavailable' }, 409);
   if (lease.completed) return json({ buildingId: lease.buildingId, image: lease.image }, 200);
   try {
@@ -91,6 +86,6 @@ export async function uploadAdminBuildingImage(
     console.warn('Admin building image upload failed', lease.keys, error);
     return json({ error: 'image_upload_unavailable' }, 502);
   }
-  const completed = await storage.transaction(async () => store.completeUpload(owner, lease.id, lease.keys, inspected.jxlPreviewBytes));
+  const completed = await transact(env.DB, 'buildings', tx => new BuildingStore(env.DB, tx).completeUpload(owner, lease.id, lease.keys, inspected.jxlPreviewBytes));
   return completed ? json({ buildingId: lease.buildingId, image: completed.image }, 200) : json({ error: 'image_draft_unavailable' }, 409);
 }

@@ -86,3 +86,9 @@ export function parseManualOrderEdit(body: Record<string, unknown>, owner: strin
   if (!uuid || amount === null || time === null || message === null) return undefined;
   return { uuid, amount, time, message };
 }
+
+export type OrderRow = { id: string; player_uuid: string; amount_minor: number; paid_at: number; message: string | null };
+
+export function manualOrder(row: OrderRow): ManualOrder {
+  return { uuid: row.player_uuid, amountMinor: row.amount_minor, at: row.paid_at, ...(row.message ? { message: row.message } : {}) };
+}

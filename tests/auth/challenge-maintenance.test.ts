@@ -1,8 +1,8 @@
 import { expect, spyOn, test } from 'bun:test';
-import { AuthStore } from '../../src/auth/store';
-import { authCall, testAuthStore } from '../helpers/auth-store';
+import { maintainAuth } from '../../src/auth/repository';
+import { authCall, authFixture } from '../helpers/auth';
 
-function expired(f: ReturnType<typeof testAuthStore>, count: number) {
+function expired(f: ReturnType<typeof authFixture>, count: number) {
   for (let i = 0; i < count; i++) {
     const id = String(i).padStart(24, '0'),
       code = String(i).padStart(6, '0');
@@ -20,8 +20,8 @@ function expired(f: ReturnType<typeof testAuthStore>, count: number) {
   }
 }
 
-test('challenge creation schedules maintenance without scanning expired challenges', async () => {
-  const f = testAuthStore();
+test('challenge creation does not scan expired challenges', async () => {
+  const f = authFixture();
   expired(f, 129);
   const created = await authCall(f.store, {
     action: 'createMinecraftChallenge',
@@ -32,11 +32,10 @@ test('challenge creation schedules maintenance without scanning expired challeng
   expect(created.status).toBe(200);
   expect([...f.values.keys()].filter((key) => key.startsWith('challenge:'))).toHaveLength(130);
   expect([...f.values.keys()].filter((key) => key.startsWith('webauthn:'))).toHaveLength(129);
-  expect(await f.storage.getAlarm()).toBeLessThanOrEqual(Date.now() + 301_000);
 });
 
 test('bounded challenge sweeps preserve active challenges and reassigned codes across restarts', async () => {
-  const f = testAuthStore();
+  const f = authFixture();
   expired(f, 300);
   f.values.set('code:000000', 'another-challenge');
   f.values.set('challenge:active', {
@@ -54,13 +53,13 @@ test('bounded challenge sweeps preserve active challenges and reassigned codes a
   let now = new Date().getTime();
   date.mockImplementation(() => now);
   try {
-    await f.store.alarm();
-    expect([...f.values.keys()].filter((key) => key.startsWith('challenge:'))).toHaveLength(173);
-    const restarted = new AuthStore({ storage: f.storage } as DurableObjectState, f.env);
+    await maintainAuth(f.env.DB);
+    expect([...f.values.keys()].filter((key) => key.startsWith('challenge:'))).toHaveLength(45);
+
     now += 1001;
-    await restarted.alarm();
+    await maintainAuth(f.env.DB);
     now += 1001;
-    await restarted.alarm();
+    await maintainAuth(f.env.DB);
     expect([...f.values.keys()].filter((key) => key.startsWith('challenge:'))).toEqual([
       'challenge:active',
     ]);
@@ -74,19 +73,18 @@ test('bounded challenge sweeps preserve active challenges and reassigned codes a
   }
 });
 
-test('challenge sweep cursor and deletions roll back together after a storage failure', async () => {
-  const f = testAuthStore();
-  expired(f, 130);
-  f.failNextPut('maintenance:challenges-next-sweep');
-  await expect(f.store.alarm()).rejects.toThrow('Injected storage failure');
-  expect(f.values.has('maintenance:challenge:cursor')).toBe(false);
-  expect([...f.values.keys()].filter((key) => key.startsWith('challenge:'))).toHaveLength(130);
-  await f.store.alarm();
+test('expired challenges and their display codes roll back together after a storage failure', async () => {
+  const f = authFixture();
+  expired(f, 258);
+  f.failNextSql('DELETE FROM auth_webauthn');
+  await expect(maintainAuth(f.env.DB)).rejects.toThrow('Injected storage failure');
+  expect([...f.values.keys()].filter((key) => key.startsWith('challenge:'))).toHaveLength(258);
+  await maintainAuth(f.env.DB);
   expect([...f.values.keys()].filter((key) => key.startsWith('challenge:'))).toHaveLength(2);
 });
 
-test('passkey login options arm challenge cleanup without a Minecraft login or building operation', async () => {
-  const f = testAuthStore();
+test('cron expires passkey challenges without a Minecraft login or building operation', async () => {
+  const f = authFixture();
   const options = await authCall(f.store, {
     action: 'passkeyAuthenticationOptions',
     purpose: 'login',
@@ -94,6 +92,7 @@ test('passkey login options arm challenge cleanup without a Minecraft login or b
     browserNonce: '',
   });
   expect(options.status).toBe(200);
-  expect(f.values.get('maintenance:challenges-next-sweep')).toBeNumber();
-  expect(await f.storage.getAlarm()).toBeLessThanOrEqual(Date.now() + 301_000);
+  f.db.run("UPDATE auth_webauthn SET document=json_set(document,'$.expiresAt','2000-01-01')");
+  await maintainAuth(f.env.DB);
+  expect([...f.values.keys()].filter(key => key.startsWith('webauthn:'))).toHaveLength(0);
 });

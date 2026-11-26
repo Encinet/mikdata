@@ -2,6 +2,8 @@ import { afdianSign } from './md5';
 import type { Env } from '../env';
 import { AFDIAN_ID_RE, parseAmount, parseOrderTime, type Payment } from './model';
 
+export type AfdianCredentials = Pick<Env, 'AFDIAN_USER_ID' | 'AFDIAN_API_TOKEN'>;
+
 const AFDIAN_API_BASE = 'https://afdian.com/api/open';
 /** Bound page scans so one bad upstream response cannot stall the sync. */
 const MAX_SPONSOR_PAGES = 100;
@@ -22,7 +24,7 @@ export interface AfdianOrder extends Payment {
 type AfdianPath = '/query-sponsor' | '/query-order';
 
 async function afdianPage(
-  env: Env,
+  env: AfdianCredentials,
   path: AfdianPath,
   params: Record<string, number>,
   signal: AbortSignal,
@@ -61,7 +63,7 @@ async function afdianPage(
 }
 
 export async function fetchAfdianSponsors(
-  env: Env,
+  env: AfdianCredentials,
   signal = AbortSignal.timeout(20_000),
 ): Promise<AfdianSponsor[]> {
   const sponsors = new Map<string, AfdianSponsor>();
@@ -71,6 +73,8 @@ export async function fetchAfdianSponsors(
     if (page === 1) {
       if (data.totalPages > MAX_SPONSOR_PAGES) throw new Error('Afdian sponsor page limit exceeded');
       totalPages = data.totalPages;
+    } else if (data.totalPages !== totalPages) {
+      throw new Error('Afdian sponsor page count changed during refresh');
     }
 
     for (const entry of data.list) {
@@ -87,7 +91,7 @@ export async function fetchAfdianSponsors(
 }
 
 export async function fetchAfdianOrders(
-  env: Env,
+  env: AfdianCredentials,
   signal = AbortSignal.timeout(20_000),
 ): Promise<{ orders: AfdianOrder[]; status: 'complete' | 'incomplete' | 'truncated' }> {
   const orders = new Map<string, AfdianOrder>();

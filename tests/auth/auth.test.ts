@@ -7,12 +7,12 @@ import {
   PLAYER_UUID,
   seedSession,
   testAuthEnv,
-  testAuthStore,
-} from '../helpers/auth-store';
+  authFixture,
+} from '../helpers/auth';
 
 test('confirmed game logins preserve the account role', async () => {
   for (const role of ['default', 'moderator', 'custodian']) {
-    const { store } = testAuthStore({
+    const { store } = authFixture({
       VPC_SERVICE: {
         fetch: async () =>
           Response.json({
@@ -35,7 +35,7 @@ test('confirmed game logins preserve the account role', async () => {
 });
 
 test('minecraft challenge completion reports unavailable plugin without creating a session', async () => {
-  const { store } = testAuthStore({
+  const { store } = authFixture({
     VPC_SERVICE: {
       fetch: () => Promise.reject(new Error('plugin unavailable')),
     } as Fetcher,
@@ -58,7 +58,7 @@ test('minecraft challenge completion rejects malformed confirmed plugin players'
     { uuid: PLAYER_UUID, name: 'Player', role: '' },
     { uuid: 'not-a-uuid', name: 'Player', role: 'member' },
   ]) {
-    const { store } = testAuthStore({
+    const { store } = authFixture({
       VPC_SERVICE: {
         fetch: async () =>
           Response.json({ status: 'confirmed', player, confirmedAt: new Date().toISOString() }),
@@ -77,7 +77,7 @@ test('minecraft challenge completion rejects malformed confirmed plugin players'
 });
 
 test('minecraft challenge creation is rate limited per client key', async () => {
-  const { store } = testAuthStore();
+  const { store } = authFixture();
 
   for (let index = 0; index < 8; index += 1) {
     const response = await authCall(store, {
@@ -99,7 +99,7 @@ test('minecraft challenge creation is rate limited per client key', async () => 
 });
 
 test('minecraft challenge status polling is rate limited per client key', async () => {
-  const { store } = testAuthStore({
+  const { store } = authFixture({
     VPC_SERVICE: {
       fetch: () => Promise.resolve(Response.json({ status: 'pending' })),
     } as Fetcher,
@@ -131,7 +131,7 @@ test('minecraft challenge status polling is rate limited per client key', async 
   expect(limited.body.error).toBe('rate_limited');
 });
 
-test('worker rate limits auth requests before invoking the durable object', async () => {
+test('worker rate limits auth requests before accessing authentication storage', async () => {
   const createKeys: string[] = [];
   const clientKeys: string[] = [];
   const response = await worker.fetch(
@@ -145,11 +145,11 @@ test('worker rate limits auth requests before invoking the durable object', asyn
     testAuthEnv({
       AUTH_CHALLENGE_CREATE_RATE_LIMITER: createRateLimit(true, createKeys),
       AUTH_CLIENT_RATE_LIMITER: createRateLimit(false, clientKeys),
-      AUTH_STORE: {
-        idFromName: () => {
-          throw new Error('auth store should not be called');
+      DB: {
+        prepare: () => {
+          throw new Error('D1 should not be queried');
         },
-      } as unknown as DurableObjectNamespace,
+      } as unknown as D1Database,
     }),
     createExecutionContext(),
   );
@@ -174,11 +174,11 @@ test('worker fails closed when an auth rate limiter is unavailable', async () =>
       AUTH_CHALLENGE_CREATE_RATE_LIMITER: {
         limit: () => Promise.reject(new Error('rate limiter unavailable')),
       } as RateLimit,
-      AUTH_STORE: {
-        idFromName: () => {
-          throw new Error('auth store should not be called');
+      DB: {
+        prepare: () => {
+          throw new Error('D1 should not be queried');
         },
-      } as unknown as DurableObjectNamespace,
+      } as unknown as D1Database,
     }),
     createExecutionContext(),
   );
@@ -193,11 +193,11 @@ test('session checks enforce a dedicated pre-store IP limit', async () => {
   const response = await checkSession(
     testAuthEnv({
       AUTH_SESSION_CHECK_IP_RATE_LIMITER: createRateLimit(false, keys),
-      AUTH_STORE: {
-        idFromName: () => {
-          throw new Error('auth store should not be called');
+      DB: {
+        prepare: () => {
+          throw new Error('D1 should not be queried');
         },
-      } as unknown as DurableObjectNamespace,
+      } as unknown as D1Database,
     }),
     'x'.repeat(43),
   );
@@ -265,7 +265,7 @@ test('auth preflight does not return wildcard cors headers', async () => {
   expect(response.headers.get('Access-Control-Allow-Origin')).toBeNull();
 });
 
-test('auth routes reject oversized JSON bodies before hitting auth store', async () => {
+test('auth routes reject oversized JSON bodies before querying D1', async () => {
   const response = await worker.fetch(
     new Request('https://data.mcmik.top/auth/me', {
       method: 'POST',
@@ -276,14 +276,14 @@ test('auth routes reject oversized JSON bodies before hitting auth store', async
       body: JSON.stringify({ value: 'x'.repeat(65 * 1024) }),
     }),
     testAuthEnv({
-      AUTH_STORE: {
-        idFromName: () => ({}),
+      DB: {
+        prepare: () => ({}),
         get: () => ({
           fetch: () => {
-            throw new Error('auth store should not be called');
+            throw new Error('D1 should not be queried');
           },
         }),
-      } as unknown as DurableObjectNamespace,
+      } as unknown as D1Database,
     }),
     createExecutionContext(),
   );
@@ -295,7 +295,7 @@ test('auth routes reject oversized JSON bodies before hitting auth store', async
 test('player resolution normalizes names and reuses the cached result', async () => {
   let resolveRequests = 0;
   const policy = testAuthEnv().VPC_SERVICE;
-  const { store, values } = testAuthStore({
+  const { store, values } = authFixture({
     VPC_SERVICE: {
       fetch: async (input: RequestInfo | URL) => {
         if (new URL(input.toString()).pathname !== '/api/players/resolve')
@@ -317,7 +317,7 @@ test('player resolution normalizes names and reuses the cached result', async ()
 });
 
 test('account security lists own sessions and revokes one without signing out the current browser', async () => {
-  const { store, values } = testAuthStore();
+  const { store, values } = authFixture();
   const first = await seedSession(values),
     second = await seedSession(values);
   const security = await authCall(store, { action: 'accountSecurity', sessionId: first.token });
@@ -338,18 +338,11 @@ test('account security lists own sessions and revokes one without signing out th
   expect(
     (await authCall(store, { action: 'accountSecurity', sessionId: second.token })).status,
   ).toBe(401);
-  expect(values.has(`account-session:${PLAYER_UUID}:${second.record.sidHash}`)).toBe(false);
+  expect(values.sessions(PLAYER_UUID)).not.toContain(second.record.sidHash);
 });
 
 function testSessionWorker(overrides: Partial<Env> = {}) {
-  const fixture = testAuthStore(overrides);
-  fixture.env.AUTH_STORE = {
-    idFromName: () => ({}),
-    get: () => ({
-      fetch: (input: RequestInfo | URL, init?: RequestInit) =>
-        fixture.store.fetch(new Request(input, init)),
-    }),
-  } as unknown as DurableObjectNamespace;
+  const fixture = authFixture(overrides);
   return fixture;
 }
 

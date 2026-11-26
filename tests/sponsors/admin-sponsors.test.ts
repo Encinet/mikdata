@@ -2,11 +2,11 @@ import { expect, test } from 'bun:test';
 import type { Env } from '../../src/env';
 import worker from '../../src/index';
 import { canonicalContent, contentTag } from '../../src/shared/content-precondition';
-import { handleAdminSponsorsRoute } from '../../src/sponsors';
-import { AFDIAN_FRESH_MS } from '../../src/sponsors/cache';
+import { handleAdminSponsorsRoute } from '../../src/sponsors/route';
+import { AFDIAN_FRESH_MS, refreshAfdian } from '../../src/sponsors/snapshot';
 import { MAX_MANUAL_MESSAGE_LENGTH } from '../../src/sponsors/model';
 import {
-  AFDIAN_ORDER_ID, ORDER_ID, OTHER_UUID, UUID, afdianOrder, mockAfdian, sponsorEnv,
+  AFDIAN_ORDER_ID, ORDER_ID, OTHER_UUID, UUID, afdianOrder, mockAfdian, sponsorEnv, sponsorFixture,
 } from './helpers';
 
 const actor = { email: 'admin@example.com' };
@@ -56,6 +56,7 @@ test('the public list sorts sponsors by their latest payment and orders by payme
   }));
   try {
     const env = sponsorEnv(afdianEnv);
+    await refreshAfdian(env);
     expect((await (await admin(env, '/sponsor-catalog'))!.json()).pending).toHaveLength(2);
     for (const afdianUserId of ['u-1', 'u-2']) {
       expect((await admin(env, '/sponsor-mappings', 'PUT', {
@@ -102,8 +103,7 @@ test('the public list sorts sponsors by their latest payment and orders by payme
 });
 
 test('moving a manual order is retryable, preserves its ID and prevents duplicate ownership', async () => {
-  const storage = new Map<string, unknown>();
-  const env = sponsorEnv({}, storage);
+  const { env, orders } = sponsorFixture();
   const body = { amount: '28.25', at: MANUAL_AT };
   const writes = await Promise.all([
     admin(env, manualPath(), 'PUT', body),
@@ -118,7 +118,7 @@ test('moving a manual order is retryable, preserves its ID and prevents duplicat
   expect((await admin(env, manualPath(), 'PATCH', edit))!.status).toBe(409);
   const originalTag = await orderMatch(UUID, '28.25', MANUAL_AT);
   expect((await admin(env, manualPath(), 'DELETE', undefined, undefined, originalTag))!.status).toBe(404);
-  expect([...storage]).toEqual([['manual-order:' + ORDER_ID, {
+  expect([...orders()]).toEqual([[ORDER_ID, {
     uuid: OTHER_UUID, amountMinor: 2825, at: MANUAL_AT,
   }]]);
   expect(await (await publicList(env))!.json()).toEqual([{
@@ -129,7 +129,7 @@ test('moving a manual order is retryable, preserves its ID and prevents duplicat
   expect(detail.orders).toEqual([{ id: 'mn:' + ORDER_ID, amount: '28.25', at: MANUAL_AT, source: 'manual' }]);
   const movedTag = await orderMatch(OTHER_UUID, '28.25', MANUAL_AT);
   expect((await admin(env, manualPath(OTHER_UUID), 'DELETE', undefined, undefined, movedTag))!.status).toBe(204);
-  expect(storage.size).toBe(0);
+  expect(orders().size).toBe(0);
   expect((await admin(env, manualPath(OTHER_UUID), 'PATCH', edit))!.status).toBe(404);
   expect(await (await publicList(env))!.json()).toEqual([]);
 });
@@ -150,27 +150,25 @@ test('manual order deletion requires the current amount, date, and message', asy
 });
 
 test('manual orders require a payment time that can be updated', async () => {
-  const storage = new Map<string, unknown>();
-  const env = sponsorEnv({}, storage);
-  const key = 'manual-order:' + ORDER_ID;
+  const { env, orders } = sponsorFixture();
+  const key = ORDER_ID;
   const payment = { uuid: UUID, amountMinor: 500, at: MANUAL_AT };
   expect((await admin(env, manualPath(), 'PUT', { amount: '5' }))!.status).toBe(400);
   expect((await admin(env, manualPath(), 'PUT', { amount: '5', at: MANUAL_AT }))!.status).toBe(204);
-  expect(storage.get(key)).toEqual(payment);
+  expect(orders().get(key)).toEqual(payment);
   expect((await admin(env, manualPath(), 'PUT', { amount: '5.00', at: MANUAL_AT }))!.status).toBe(204);
 
   const at = 1795309943;
   expect((await admin(env, manualPath(), 'PATCH', { at: { from: MANUAL_AT, to: at } }))!.status).toBe(204);
-  expect(storage.get(key)).toEqual({ ...payment, at });
+  expect(orders().get(key)).toEqual({ ...payment, at });
 
   expect((await admin(env, manualPath(), 'PATCH', { at: { from: at, to: 0 } }))!.status).toBe(400);
-  expect(storage.get(key)).toEqual({ ...payment, at });
+  expect(orders().get(key)).toEqual({ ...payment, at });
 });
 
 test('manual edits merge disjoint changes and reject conflicting changes without writing', async () => {
-  const storage = new Map<string, unknown>();
-  const env = sponsorEnv({}, storage);
-  const key = 'manual-order:' + ORDER_ID;
+  const { env, orders } = sponsorFixture();
+  const key = ORDER_ID;
   const at = 1795309943;
   expect((await admin(env, manualPath(), 'PUT', { amount: '10', at: MANUAL_AT }))!.status).toBe(204);
 
@@ -191,12 +189,11 @@ test('manual edits merge disjoint changes and reject conflicting changes without
     message: { from: '', to: 'Concurrent change' }, at: { from: at, to: MANUAL_AT },
   }))!.status).toBe(409);
   expect((await admin(env, manualPath(), 'PATCH', { amount: { to: '25' } }))!.status).toBe(400);
-  expect(storage.get(key)).toEqual({ uuid: UUID, amountMinor: 2000, at, message: '谢谢！\n下次见。' });
+  expect(orders().get(key)).toEqual({ uuid: UUID, amountMinor: 2000, at, message: '谢谢！\n下次见。' });
 });
 
 test('manual order messages appear in the public list and can be cleared', async () => {
-  const storage = new Map<string, unknown>();
-  const env = sponsorEnv({}, storage);
+  const { env, orders } = sponsorFixture();
   const message = '春天快乐！\nTake care <3';
   const body = { amount: '5', at: MANUAL_AT, message: '  ' + message + '  ' };
   expect((await admin(env, manualPath(), 'PUT', body))!.status).toBe(204);
@@ -215,7 +212,7 @@ test('manual order messages appear in the public list and can be cleared', async
   const clear = { message: { from: message, to: ' ' } };
   expect((await admin(env, manualPath(), 'PATCH', clear))!.status).toBe(204);
   expect((await admin(env, manualPath(), 'PATCH', clear))!.status).toBe(204);
-  expect(storage.get('manual-order:' + ORDER_ID)).toEqual({ uuid: UUID, amountMinor: 500, at: MANUAL_AT });
+  expect(orders().get(ORDER_ID)).toEqual({ uuid: UUID, amountMinor: 500, at: MANUAL_AT });
   expect(await details()).toEqual([adminOrder]);
   expect(await (await publicList(env))!.json()).toEqual([{
     uuid: UUID, name: UUID, totalAmount: '5.00', orders: [order],
@@ -247,6 +244,7 @@ test('an unavailable Afdian feed keeps manual data and flags any incomplete play
   const restore = mockAfdian(() => { throw new Error('upstream down'); });
   try {
     const env = sponsorEnv(afdianEnv);
+    await refreshAfdian(env);
     await admin(env, manualPath(), 'PUT', { amount: '8', at: MANUAL_AT });
     const response = (await publicList(env))!;
     expect(response.status).toBe(200);
@@ -280,9 +278,11 @@ test('truncated order history omits incomplete totals and includes purchasers ab
     : { total_page: orderPages, list: page === 1 ? [afdianOrder()] : [] });
   try {
     const env = sponsorEnv(afdianEnv);
+    await refreshAfdian(env);
     expect((await publicList(env))!.headers.get('X-Sponsor-Data')).toBe('complete');
     now += AFDIAN_FRESH_MS;
     orderPages = 51;
+    await refreshAfdian(env);
     const pending = await (await admin(env, '/sponsor-accounts/u-1'))!.json();
     expect(pending.orders).toHaveLength(1);
     expect(pending).not.toHaveProperty('totalAmount');
@@ -316,12 +316,14 @@ test('a temporary order scan failure keeps the complete snapshot until retry or 
   });
   try {
     const env = sponsorEnv(afdianEnv);
+    await refreshAfdian(env);
     await admin(env, '/sponsor-mappings', 'PUT', { afdianUserId: 'u-1', uuid: UUID });
     expect((await publicList(env))!.headers.get('X-Sponsor-Data')).toBe('complete');
 
     now += AFDIAN_FRESH_MS;
     unstable = true;
     total = '25.00';
+    await refreshAfdian(env);
     const fallback = (await publicList(env))!;
     expect(fallback.headers.get('X-Sponsor-Data')).toBe('stale');
     expect(await fallback.json()).toMatchObject([{ totalAmount: '20.00', orders: [{ amount: '20.00' }] }]);
@@ -329,14 +331,19 @@ test('a temporary order scan failure keeps the complete snapshot until retry or 
     expect(catalog.afdianStatus).toBe('stale');
     expect(orderReads).toBe(3);
 
-    now += 5 * 60_000;
+    now += 60 * 60_000 - 1;
     unstable = false;
+    await refreshAfdian(env);
+    expect(orderReads).toBe(3);
+    now += 1;
+    await refreshAfdian(env);
     const recovered = (await publicList(env))!;
     expect(recovered.headers.get('X-Sponsor-Data')).toBe('complete');
     expect(await recovered.json()).toMatchObject([{ totalAmount: '25.00', orders: [{ amount: '25.00' }] }]);
 
     now += 7 * 24 * 60 * 60_000;
     unstable = true;
+    await refreshAfdian(env);
     const expired = (await publicList(env))!;
     expect(expired.headers.get('X-Sponsor-Data')).toBe('partial');
     const [sponsor] = await expired.json();
@@ -355,6 +362,7 @@ test('a failed name lookup still exposes paid orders with a confirmed total', as
   });
   try {
     const env = sponsorEnv(afdianEnv);
+    await refreshAfdian(env);
     const detail = await (await admin(env, '/sponsor-accounts/u-1'))!.json();
     expect(detail.orders).toHaveLength(1);
     await admin(env, '/sponsor-mappings', 'PUT', { afdianUserId: 'u-1', uuid: UUID });

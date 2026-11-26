@@ -1,28 +1,22 @@
-import { SponsorStore } from '../../src/sponsors/store';
+import { testDatabase } from '../helpers/d1';
 import type { Env } from '../../src/env';
-import { testAuthEnv } from '../helpers/auth-store';
+import { testAuthEnv } from '../helpers/auth';
 
 export const UUID = '069a79f4-44e9-4726-a5be-fca4e82d3858';
 export const OTHER_UUID = '11111111-2222-4333-8444-555566667777';
 export const ORDER_ID = 'aa111111-2222-4333-8444-555566667777';
 export const AFDIAN_ORDER_ID = '202611220912231234567';
 
-export function sponsorEnv(overrides: Partial<Env> = {}, storage = new Map<string, unknown>()): Env {
-  const kv = {
-    get: (key: string) => storage.get(key),
-    list: ({ prefix }: { prefix: string }) =>
-      new Map([...storage].filter(([key]) => key.startsWith(prefix))),
-    put: (key: string, value: unknown) => { storage.set(key, structuredClone(value)); },
-    delete: (key: string) => storage.delete(key),
-  };
-  const env = testAuthEnv(overrides);
-  const store = new SponsorStore({
-    storage: { kv },
-  } as unknown as DurableObjectState, env);
-  env.SPONSOR_STORE = {
-    getByName: () => ({ fetch: (request: Request) => store.fetch(request) }),
-  } as unknown as DurableObjectNamespace;
-  return env;
+export function sponsorEnv(overrides: Partial<Env> = {}, database = testDatabase()): Env {
+  return testAuthEnv({ DB: database.db, ...overrides });
+}
+
+export function sponsorFixture() {
+  const database = testDatabase();
+  const env = sponsorEnv({}, database);
+  const orders = () => new Map(database.sqlite.query('SELECT * FROM sponsor_orders').all().map(row =>
+    [row.id, { uuid: row.player_uuid, amountMinor: row.amount_minor, at: row.paid_at, ...(row.message ? { message: row.message } : {}) }]));
+  return { env, orders };
 }
 
 export function mockAfdian(

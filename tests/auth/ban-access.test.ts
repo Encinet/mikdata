@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test';
-import { authCall, OTHER_UUID, passkeyFixture, PLAYER_UUID, seedSession, testAuthStore } from '../helpers/auth-store';
+import { authCall, OTHER_UUID, passkeyFixture, PLAYER_UUID, seedSession, authFixture } from '../helpers/auth';
 
 function banStore(policy = { role: 'default', banned: true }) {
-  const fixture = testAuthStore({ VPC_SERVICE: {
+  const fixture = authFixture({ VPC_SERVICE: {
     fetch: async (input: RequestInfo | URL) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       if (url.pathname.startsWith('/api/auth/accounts/')) return Response.json({ player: {
@@ -70,7 +70,7 @@ test('unbanning restores login without deleting Passkeys or permanently disablin
 });
 
 test.each([undefined, 'false', 0])('missing or malformed ban policy (%s) fails closed without deleting sessions', async (banned) => {
-  const { store, values } = testAuthStore({ VPC_SERVICE: {
+  const { store, values } = authFixture({ VPC_SERVICE: {
     fetch: async () => Response.json({ player: { uuid: PLAYER_UUID, role: 'default', credentialsChangedAt: 0, banned } }),
   } as Fetcher });
   const own = await seedSession(values);
